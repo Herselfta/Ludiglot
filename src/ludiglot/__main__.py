@@ -308,26 +308,33 @@ def _check_and_setup_wuthering_data(config_path: Path) -> bool:
                 env=env
             )
             
-            # 步骤5: fetch 远程分支（兼容 master 和 main）
+            # 步骤5: fetch 远程分支（兼容 master 和 main，显示进度）
             process = subprocess.Popen(
-                ["git", "-C", str(data_root), "fetch", "--depth", "1", "origin"],
+                ["git", "-C", str(data_root), "fetch", "--depth", "1", "--progress", "origin"],
                 stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
+                stderr=subprocess.PIPE,
                 text=True,
                 bufsize=1,
                 universal_newlines=True,
                 env=env
             )
             
-            # 实时打印输出
-            if process.stdout:
-                for line in process.stdout:
-                    print(line, end='')
-            
-            process.wait()
-            
-            if process.returncode != 0:
-                raise subprocess.CalledProcessError(process.returncode, "git fetch")
+            # 实时打印输出（进度信息在 stderr）
+            try:
+                if process.stderr:
+                    for line in process.stderr:
+                        print(line, end='')
+                
+                process.wait()
+                
+                if process.returncode != 0:
+                    raise subprocess.CalledProcessError(process.returncode, "git fetch")
+            finally:
+                # 确保关闭所有管道
+                if process.stdout:
+                    process.stdout.close()
+                if process.stderr:
+                    process.stderr.close()
             
             # 步骤6: checkout 到远程默认分支
             # 先尝试 master，如果失败再尝试 main
@@ -345,6 +352,14 @@ def _check_and_setup_wuthering_data(config_path: Path) -> bool:
             
             if not checkout_success:
                 raise subprocess.CalledProcessError(1, "git checkout")
+            
+            # 释放 git 进程锁
+            subprocess.run(
+                ["git", "-C", str(data_root), "gc", "--auto"],
+                capture_output=True,
+                text=True,
+                env=env
+            )
                 
         except subprocess.CalledProcessError as e:
             # 清理可能生成的空目录或不完整的文件
