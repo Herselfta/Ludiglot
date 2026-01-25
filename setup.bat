@@ -1,6 +1,6 @@
 @echo off
 chcp 65001 >nul
-REM Ludiglot 一键构建脚本 (CMD 版本)
+REM Ludiglot 一键构建脚本 (CMD 版)
 
 echo 正在开始 Ludiglot 环境配置...
 echo.

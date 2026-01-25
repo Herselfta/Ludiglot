@@ -1,6 +1,6 @@
 @echo off
 chcp 65001 >nul
-REM Ludiglot 一键运行脚本 (CMD 版本)
+REM Ludiglot 一键运行脚本 (CMD 版)
 
 echo 正在启动 Ludiglot...
 echo.
