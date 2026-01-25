@@ -3038,14 +3038,13 @@ def run_gui(config_path: Path) -> None:
     try:
         config = load_config(config_path)
     except Exception as e:
-        from PyQt6.QtWidgets import QMessageBox
-        msg = QMessageBox()
-        msg.setIcon(QMessageBox.Icon.Critical)
-        msg.setWindowTitle("Ludiglot 启动失败")
-        msg.setText("加载配置或数据失败")
-        msg.setInformativeText(str(e))
-        msg.setStandardButtons(QMessageBox.StandardButton.Ok)
-        msg.exec()
+        # 在终端显示错误信息，不使用GUI窗口
+        print("\n" + "="*70)
+        print("❌ Ludiglot 启动失败")
+        print("="*70)
+        print("\n加载配置或数据失败：")
+        print(f"\n{e}")
+        print("\n" + "="*70 + "\n")
         return
 
     window = OverlayWindow(config, config_path)

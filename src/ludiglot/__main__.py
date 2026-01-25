@@ -118,6 +118,34 @@ def _check_and_setup_wuthering_data(config_path: Path) -> bool:
         # 确保父目录存在
         data_root.parent.mkdir(parents=True, exist_ok=True)
         
+        # 获取系统代理设置
+        import os
+        env = os.environ.copy()
+        
+        # 尝试从git全局配置中获取代理设置
+        proxy_configured = False
+        try:
+            http_proxy_result = subprocess.run(
+                ["git", "config", "--global", "--get", "http.proxy"],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            if http_proxy_result.returncode == 0 and http_proxy_result.stdout.strip():
+                proxy_configured = True
+                print(f"🔑 检测到 Git 代理设置: {http_proxy_result.stdout.strip()}")
+        except Exception:
+            pass
+        
+        # 如果没有git代理，尝试使用系统环境变量中的代理
+        if not proxy_configured:
+            system_proxy = env.get('HTTP_PROXY') or env.get('http_proxy') or \
+                          env.get('HTTPS_PROXY') or env.get('https_proxy')
+            if system_proxy:
+                print(f"🔑 使用系统代理: {system_proxy}")
+                env['HTTP_PROXY'] = system_proxy
+                env['HTTPS_PROXY'] = system_proxy
+        
         # 执行git clone，实时显示输出
         process = subprocess.Popen(
             ["git", "clone", "--progress", "https://github.com/Dimbreath/WutheringData.git", str(data_root)],
@@ -125,7 +153,8 @@ def _check_and_setup_wuthering_data(config_path: Path) -> bool:
             stderr=subprocess.STDOUT,
             text=True,
             bufsize=1,
-            universal_newlines=True
+            universal_newlines=True,
+            env=env
         )
         
         # 实时打印输出
@@ -738,6 +767,30 @@ def cmd_run(args: argparse.Namespace) -> None:
 
 def cmd_gui(args: argparse.Namespace) -> None:
     config_path = Path(args.config)
+    
+    # 检查配置文件是否存在
+    if not config_path.exists():
+        print("\n" + "="*70)
+        print("📝 配置文件不存在")
+        print("="*70)
+        print(f"\n路径: {config_path}")
+        print("\nLudiglot 需要一个配置文件才能运行。\n")
+        print("🚀 快速开始：")
+        print("\n1. 创建配置目录和文件：")
+        print(f"   New-Item -Path '{config_path.parent}' -ItemType Directory -Force")
+        print(f"   New-Item -Path '{config_path}' -ItemType File -Force")
+        print("\n2. 添加基础配置（复制以下内容到配置文件）：")
+        print("   {")
+        print('     "data_root": "data/WutheringData",')
+        print('     "db_path": "data/game_text_db.json",')
+        print('     "auto_rebuild_db": true,')
+        print('     "ocr_backend": "auto",')
+        print('     "play_audio": true')
+        print("   }")
+        print("\n3. 重新运行程序。")
+        print("\n📖 详细配置说明请参考: README.md")
+        print("="*70 + "\n")
+        return
     
     # 在启动GUI前先在终端中检测和处理WutheringData
     if not _check_and_setup_wuthering_data(config_path):
