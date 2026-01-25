@@ -1,0 +1,172 @@
+/* 鸣潮风格 - 暗色半透明主题 */
+
+#OverlayRoot {
+    background-color: rgba(15, 20, 25, 230);
+    border: 1px solid rgba(45, 55, 72, 180);
+    border-radius: 6px;
+}
+
+/* 隐藏子菜单的右侧三角箭头 */
+QMenu::indicator:non-exclusive {
+    width: 13px;
+    height: 13px;
+}
+
+/* Weight菜单指示标位置（菜单向左展开时，勾选标记在文字左侧） */
+QMenu[layoutDirection="RightToLeft"]::indicator:non-exclusive {
+    margin-right: 6px;
+    margin-left: 0px;
+}
+
+/* Weight菜单指示标位置（菜单向右展开时，勾选标记在文字右侧） */
+QMenu[layoutDirection="LeftToRight"]::indicator:non-exclusive {
+    margin-left: 6px;
+    margin-right: 0px;
+}
+
+#Title {
+    color: #aa9b6a;
+    font-size: 15pt;
+    font-weight: normal;
+    padding: 6px 0;
+    background: transparent;
+}
+
+#SourceText {
+    background-color: transparent;
+    color: #cbd5e1;
+    border: none;
+    padding: 8px;
+    font-size: 14pt;
+    font-weight: 600;
+    font-family: "Noto Serif CJK SC", "Source Han Serif SC", "SimSun", serif;
+}
+
+#AccentText {
+    background-color: transparent;
+    color: #e2e8f0;
+    border: none;
+    padding: 8px;
+    font-size: 13pt;
+}
+
+#StatusText {
+    color: #6b7280;
+    font-size: 9pt;
+    padding: 2px 0;
+    background: transparent;
+}
+
+QPushButton {
+    background-color: rgba(26, 35, 50, 150);
+    color: #94a3b8;
+    border: 1px solid rgba(45, 55, 72, 120);
+    border-radius: 3px;
+    padding: 5px 14px;
+    font-size: 9pt;
+    min-width: 50px;
+}
+
+QPushButton:hover {
+    background-color: rgba(45, 55, 72, 180);
+    color: #cbd5e1;
+}
+
+QPushButton:pressed {
+    background-color: rgba(71, 85, 105, 200);
+}
+
+QPushButton:disabled {
+    background-color: rgba(26, 35, 50, 80);
+    color: #4a5568;
+    border-color: rgba(45, 55, 72, 60);
+}
+
+QComboBox {
+    background-color: rgba(26, 35, 50, 150);
+    color: #cbd5e1;
+    border: 1px solid rgba(45, 55, 72, 120);
+    border-radius: 3px;
+    padding: 3px 6px;
+    font-size: 9pt;
+}
+
+QComboBox:hover {
+    border-color: rgba(148, 163, 184, 150);
+}
+
+QComboBox QAbstractItemView {
+    background-color: rgba(15, 20, 25, 240);
+    color: #e2e8f0;
+    border: 1px solid rgba(45, 55, 72, 180);
+    selection-background-color: rgba(71, 85, 105, 200);
+    selection-color: #e2e8f0;
+}
+
+/* 音频进度条样式 */
+#AudioSlider {
+    min-height: 16px;
+}
+
+#AudioSlider::groove:horizontal {
+    background: rgba(26, 35, 50, 180);
+    height: 4px;
+    border-radius: 2px;
+}
+
+#AudioSlider::handle:horizontal {
+    background: rgba(148, 163, 184, 220);
+    width: 12px;
+    height: 12px;
+    margin: -4px 0;
+    border-radius: 6px;
+}
+
+#AudioSlider::handle:horizontal:hover {
+    background: rgba(203, 213, 225, 255);
+}
+
+#AudioSlider::add-page:horizontal {
+    background: rgba(26, 35, 50, 180);
+    border-radius: 2px;
+}
+
+#AudioSlider::sub-page:horizontal {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+        stop:0 rgba(226, 232, 240, 200),
+        stop:1 rgba(148, 163, 184, 160));
+    border-radius: 2px;
+}
+
+/* 播放/暂停按钮样式 */
+#AudioControl {
+    background-color: rgba(26, 35, 50, 150);
+    color: #cbd5e1;
+    border: 1px solid rgba(45, 55, 72, 120);
+    border-radius: 4px;
+    padding: 0px;
+    font-size: 11pt;
+    min-width: 28px;
+}
+
+#AudioControl:hover {
+    background-color: rgba(45, 55, 72, 180);
+    color: #e2e8f0;
+}
+
+#AudioControl:pressed {
+    background-color: rgba(71, 85, 105, 200);
+}
+
+#AudioControl:disabled {
+    background-color: rgba(26, 35, 50, 80);
+    color: #4a5568;
+}
+
+/* 时间标签样式 */
+#TimeLabel {
+    color: #94a3b8;
+    font-size: 9pt;
+    padding: 0 4px;
+    background: transparent;
+}
