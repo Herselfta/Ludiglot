@@ -45,6 +45,65 @@ from ludiglot.core.wwise_hash import WwiseHash
 from ludiglot.ui.overlay_window import run_gui
 
 
+def _get_windows_system_proxy() -> str | None:
+    """仏Windows注册表读取系统代理设置"""
+    try:
+        import winreg
+        # 打开注册表键
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Internet Settings"
+        ) as key:
+            # 检查是否启用代理
+            try:
+                proxy_enable, _ = winreg.QueryValueEx(key, "ProxyEnable")
+                if not proxy_enable:
+                    return None
+            except FileNotFoundError:
+                return None
+            
+            # 获取代理服务器地址
+            try:
+                proxy_server, _ = winreg.QueryValueEx(key, "ProxyServer")
+                if proxy_server:
+                    # 处理多个代理的情况（如 http=...;https=...)
+                    if '=' in proxy_server:
+                        # 提取http代理
+                        for item in proxy_server.split(';'):
+                            if item.startswith('http='):
+                                return 'http://' + item.split('=', 1)[1]
+                            elif item.startswith('https='):
+                                return 'http://' + item.split('=', 1)[1]
+                    else:
+                        # 单一代理地址
+                        if not proxy_server.startswith('http'):
+                            return 'http://' + proxy_server
+                        return proxy_server
+            except FileNotFoundError:
+                return None
+    except Exception:
+        return None
+    return None
+
+
+def _is_wuthering_data_valid(data_root: Path) -> bool:
+    """检查WutheringData目录是否包含必要的数据文件"""
+    if not data_root.exists():
+        return False
+    
+    # 检查是否有关键目录（不再检查.git）
+    required_dirs = ["TextMap", "ConfigDB"]
+    for dir_name in required_dirs:
+        dir_path = data_root / dir_name
+        if not dir_path.exists():
+            return False
+        # 检查目录是否为空
+        if not any(dir_path.iterdir()):
+            return False
+    
+    return True
+
+
 def _check_and_setup_wuthering_data(config_path: Path) -> bool:
     """在终端中检测WutheringData，如不存在则交互式询问是否克隆。
     
@@ -74,9 +133,49 @@ def _check_and_setup_wuthering_data(config_path: Path) -> bool:
         project_root = Path(__file__).resolve().parents[2]
         data_root = (project_root / data_root).resolve()
     
-    # 如果已经存在，直接返回
+    # 检查目录是否存在且完整
     if data_root.exists():
-        return True
+        if _is_wuthering_data_valid(data_root):
+            return True  # 目录存在且完整
+        else:
+            # 目录存在但不完整（可能是上次克隆失败留下的）
+            print("\n" + "="*70)
+            print("⚠️  WutheringData 目录不完整")
+            print("="*70)
+            print(f"\n检测到目录存在但不完整：{data_root}")
+            print("这可能是上次克隆失败留下的空文件夹。\n")
+            print("选项：")
+            print("  [Y] 删除并重新克隆 (推荐)")
+            print("  [N] 跳过（稍后手动处理）")
+            print("  [C] 取消启动")
+            print()
+            
+            while True:
+                choice = input("请选择 [Y/N/C]: ").strip().upper()
+                
+                if choice == 'C':
+                    return False
+                
+                if choice == 'N':
+                    print("\n⚠️  跳过重新克隆。如需手动处理：")
+                    print(f"   1. 删除目录： Remove-Item '{data_root}' -Recurse -Force")
+                    print(f"   2. 重新克隆： git clone https://github.com/Dimbreath/WutheringData.git {data_root}")
+                    return True
+                
+                if choice == 'Y':
+                    # 删除不完整的目录
+                    print(f"\n🗑️  正在删除不完整的目录...")
+                    try:
+                        import shutil
+                        shutil.rmtree(data_root)
+                        print("✅ 已删除\n")
+                    except Exception as e:
+                        print(f"\n❌ 删除失败：{e}")
+                        print("请手动删除后重试。")
+                        return False
+                    break
+                
+                print("❌ 无效输入，请输入 Y、N 或 C")
     
     # WutheringData不存在，在终端中询问用户
     print("\n" + "="*70)
@@ -118,12 +217,15 @@ def _check_and_setup_wuthering_data(config_path: Path) -> bool:
         # 确保父目录存在
         data_root.parent.mkdir(parents=True, exist_ok=True)
         
-        # 获取系统代理设置
+        # 获取代理配置
         import os
         env = os.environ.copy()
         
-        # 尝试从git全局配置中获取代理设置
-        proxy_configured = False
+        # 检测代理配置
+        proxy_info = []
+        active_proxy = None
+        
+        # 1. 检查Git全局代理
         try:
             http_proxy_result = subprocess.run(
                 ["git", "config", "--global", "--get", "http.proxy"],
@@ -132,47 +234,137 @@ def _check_and_setup_wuthering_data(config_path: Path) -> bool:
                 timeout=5
             )
             if http_proxy_result.returncode == 0 and http_proxy_result.stdout.strip():
-                proxy_configured = True
-                print(f"🔑 检测到 Git 代理设置: {http_proxy_result.stdout.strip()}")
+                git_proxy = http_proxy_result.stdout.strip()
+                proxy_info.append(f"Git代理: {git_proxy}")
+                active_proxy = git_proxy
         except Exception:
             pass
         
-        # 如果没有git代理，尝试使用系统环境变量中的代理
-        if not proxy_configured:
-            system_proxy = env.get('HTTP_PROXY') or env.get('http_proxy') or \
-                          env.get('HTTPS_PROXY') or env.get('https_proxy')
-            if system_proxy:
-                print(f"🔑 使用系统代理: {system_proxy}")
-                env['HTTP_PROXY'] = system_proxy
-                env['HTTPS_PROXY'] = system_proxy
+        # 2. 检查系统环境变量代理
+        system_env_proxy = env.get('HTTP_PROXY') or env.get('http_proxy') or \
+                           env.get('HTTPS_PROXY') or env.get('https_proxy')
+        if system_env_proxy:
+            proxy_info.append(f"环境变量代理: {system_env_proxy}")
+            if not active_proxy:
+                active_proxy = system_env_proxy
         
-        # 执行git clone，实时显示输出
-        process = subprocess.Popen(
-            ["git", "clone", "--progress", "https://github.com/Dimbreath/WutheringData.git", str(data_root)],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-            universal_newlines=True,
-            env=env
-        )
+        # 3. 检查Windows系统代理设置
+        windows_proxy = _get_windows_system_proxy()
+        if windows_proxy:
+            proxy_info.append(f"Windows系统代理: {windows_proxy}")
+            if not active_proxy:
+                # 如果没有Git或环境变量代理，使用Windows系统代理
+                active_proxy = windows_proxy
+                env['HTTP_PROXY'] = windows_proxy
+                env['HTTPS_PROXY'] = windows_proxy
         
-        # 实时打印输出
-        for line in process.stdout:
-            print(line, end='')
+        if proxy_info:
+            print("🔑 检测到代理配置:")
+            for info in proxy_info:
+                print(f"   {info}")
+            if active_proxy:
+                print(f"   当前使用: {active_proxy}")
+            print()
+        else:
+            print("⚠️  未检测到代理配置，如连接失败请设置代理:")
+            print("   git config --global http.proxy http://127.0.0.1:7890")
+            print("   或设置环境变量: $env:HTTP_PROXY='http://127.0.0.1:7890'")
+            print()
         
-        process.wait()
+        print("📌 注意：为减少下载量，将仅下载必要的目录（TextMap, ConfigDB）")
+        print("📊 预计大小：~50MB（而不是完整仓库的 200MB）\n")
         
-        if process.returncode != 0:
+        # 使用 sparse-checkout 只克隆必要的目录
+        try:
+            # 步骤1: 初始化空仓库
+            subprocess.run(
+                ["git", "init", str(data_root)],
+                capture_output=True,
+                text=True,
+                check=True,
+                env=env
+            )
+            
+            # 步骤2: 添加 remote
+            subprocess.run(
+                ["git", "-C", str(data_root), "remote", "add", "origin", "https://github.com/Dimbreath/WutheringData.git"],
+                capture_output=True,
+                text=True,
+                check=True,
+                env=env
+            )
+            
+            # 步骤43: 启用 sparse-checkout
+            subprocess.run(
+                ["git", "-C", str(data_root), "sparse-checkout", "init", "--cone"],
+                capture_output=True,
+                text=True,
+                check=True,
+                env=env
+            )
+            
+            # 步骤4: 设置只下载 TextMap 和 ConfigDB
+            subprocess.run(
+                ["git", "-C", str(data_root), "sparse-checkout", "set", "TextMap", "ConfigDB"],
+                capture_output=True,
+                text=True,
+                check=True,
+                env=env
+            )
+            
+            # 步骤5: 从远程拉取（只拉取最后一次提交）
+            print("🔄 正在下载数据...")
+            process = subprocess.Popen(
+                ["git", "-C", str(data_root), "pull", "--depth", "1", "origin", "main"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                universal_newlines=True,
+                env=env
+            )
+            
+            # 实时打印输出
+            if process.stdout:
+                for line in process.stdout:
+                    print(line, end='')
+            
+            process.wait()
+            
+            if process.returncode != 0:
+                raise subprocess.CalledProcessError(process.returncode, "git pull")
+                
+        except subprocess.CalledProcessError as e:
+            # 清理可能生成的空目录或不完整的文件
+            if data_root.exists():
+                try:
+                    import shutil
+                    shutil.rmtree(data_root)
+                    print(f"\n🗑️  已清理不完整的目录")
+                except Exception:
+                    pass
+            
             print("\n" + "="*70)
             print("❌ 克隆失败")
             print("="*70)
-            print("\n请检查：")
-            print("  1. 是否已安装 git 命令")
-            print("  2. 网络连接是否正常")
-            print("  3. 目标路径是否有写入权限")
-            print("\n手动克隆命令：")
-            print(f"  git clone https://github.com/Dimbreath/WutheringData.git {data_root}")
+            print("\n可能的原因：")
+            print("  1. 网络无法访问 GitHub")
+            print("  2. 代理配置不正确或未设置代理")
+            print("  3. Git 命令版本过旧")
+            print("  4. 目标路径没有写入权限")
+            print("\n解决方法：")
+            print("  • 设置 Git 代理：")
+            print("    git config --global http.proxy http://127.0.0.1:7890")
+            print("    git config --global https.proxy http://127.0.0.1:7890")
+            print("  • 或设置环境变量（临时）：")
+            print("    $env:HTTP_PROXY='http://127.0.0.1:7890'")
+            print("    $env:HTTPS_PROXY='http://127.0.0.1:7890'")
+            print("  • 或手动克隆：")
+            print(f"    git clone https://github.com/Dimbreath/WutheringData.git {data_root}")
+            print("\n💡 提示：如果使用代理工具（如 Clash），请确保：")
+            print("   1. 代理工具正在运行")
+            print("   2. 允许局域网连接")
+            print("   3. 端口号正确（通常是 7890 或 7891）")
             print()
             return False
         
@@ -773,22 +965,7 @@ def cmd_gui(args: argparse.Namespace) -> None:
         print("\n" + "="*70)
         print("📝 配置文件不存在")
         print("="*70)
-        print(f"\n路径: {config_path}")
-        print("\nLudiglot 需要一个配置文件才能运行。\n")
-        print("🚀 快速开始：")
-        print("\n1. 创建配置目录和文件：")
-        print(f"   New-Item -Path '{config_path.parent}' -ItemType Directory -Force")
-        print(f"   New-Item -Path '{config_path}' -ItemType File -Force")
-        print("\n2. 添加基础配置（复制以下内容到配置文件）：")
-        print("   {")
-        print('     "data_root": "data/WutheringData",')
-        print('     "db_path": "data/game_text_db.json",')
-        print('     "auto_rebuild_db": true,')
-        print('     "ocr_backend": "auto",')
-        print('     "play_audio": true')
-        print("   }")
-        print("\n3. 重新运行程序。")
-        print("\n📖 详细配置说明请参考: README.md")
+        print(f"\n请将 config/settings.example.json 重命名为 settings.json 并配置数据路径。\n")
         print("="*70 + "\n")
         return
     

@@ -51,17 +51,16 @@ game_text_db.json
 
 # Project Documentation & Infrastructure
 !docs/
-!PrivateDevDoc/
 !data/
 !data/**/.gitkeep
 !data/**/README.md
 
-# Audio Cache (generated locally)
+# Application State & Cache (generated locally)
 cache/*
 !cache/.gitkeep
 audio_cache/*
 !audio_cache/.gitkeep
-txtp/
+
 
 # Game Data (User-provided, large files ignored)
 data/WutheringData/
@@ -69,7 +68,7 @@ data/FModelExports/
 data/fonts/*.ttf
 data/fonts/*.otf
 data/fonts/*.woff*
-# Keep data/ subfolders by default (via .gitkeep) but ignore most other content
+# Keep data/ subfolders structure but ignore dynamic content
 data/WutheringData/**
 data/FModelExports/**
 

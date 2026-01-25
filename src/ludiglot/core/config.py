@@ -45,7 +45,7 @@ def load_config(path: Path) -> AppConfig:
     if not path.exists():
         raise FileNotFoundError(
             f"配置文件不存在: {path}\n"
-            "请确保配置文件存在且格式正确。"
+            "   请将 config/settings.example.json 重命名为 settings.json 并配置数据路径。"
         )
     raw: Dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
     
@@ -83,17 +83,14 @@ def load_config(path: Path) -> AppConfig:
              # 如果用户已经设置了 false 但还是进来了，说明是 has_db 为 false
              if not auto_rebuild and not has_db:
                  raise FileNotFoundError(
-                     f"数据库文件未找到: {raw.get('db_path')}\n"
-                     f"且由于 data_root 不存在 ({data_root})，无法自动生成数据库。\n\n"
-                     "解决方法：\n"
-                     "1. 检查 settings.json 中的 'db_path' 是否正确\n"
-                     "2. 或者克隆 WutheringData 并设置正确的 'data_root'"
+                     f"未找到数据库: {raw.get('db_path')}\n"
+                     f"且 data_root ({data_root}) 不存在，无法自动生成。\n"
+                     "请在 settings.json 中设置正确的 'data_root' 或 'db_path'。"
                  )
              else:
                  raise FileNotFoundError(
-                     f"配置的数据根目录不存在: {data_root}\n"
-                     "如果您需要自动构建数据库或使用音频功能，请在 config/settings.json 中修改 'data_root' 指向您的 WutheringData 目录。\n"
-                     "如果您已有数据库文件，请确保 'db_path' 正确且设置 'auto_rebuild_db': false。"
+                     f"数据目录不存在: {data_root}\n"
+                     "请在 settings.json 中设置正确的 'data_root' 指向 WutheringData 目录。"
                  )
 
     en_json = raw.get("en_json")

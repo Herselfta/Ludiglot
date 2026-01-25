@@ -672,8 +672,87 @@ class OverlayWindow(QMainWindow):
             direction_menu.addAction(right_action)
         
         self.top_menu_btn.clicked.connect(self._show_window_menu)
+        
+        # 初始化菜单样式（默认左展开）
+        self._initialize_menu_style()
 
     def _show_window_menu(self):
+        """显示窗口菜单，实现右边缘对齐"""
+        # 核心：必须先获取 sizeHint，因为 exec() 之前 width() 可能还是旧值
+        self.window_menu.ensurePolished()
+        self.window_menu.adjustSize()
+        menu_w = self.window_menu.sizeHint().width()
+        
+        # 获取按钮右边缘的全局 X 坐标
+        btn_topleft = self.top_menu_btn.mapToGlobal(QPoint(0, 0))
+        btn_right_x = btn_topleft.x() + self.top_menu_btn.width()
+        btn_bottom_y = btn_topleft.y() + self.top_menu_btn.height()
+        
+        direction = getattr(self, "_menu_direction", "left")
+        
+        if direction == "left":
+            # 强制右边缘对齐：菜单左 X = 按钮右 X - 菜单宽度
+            target_x = btn_right_x - menu_w
+            self.window_menu.exec(QPoint(target_x, btn_bottom_y))
+        else:
+            # 向右展开：左边缘对齐 (默认行为)
+            self.window_menu.exec(QPoint(btn_topleft.x(), btn_bottom_y))
+    
+    def _initialize_menu_style(self):
+        """初始化菜单样式，确保所有用户都能看到正确的样式"""
+        direction = getattr(self, "_menu_direction", "left")
+        layout_dir = Qt.LayoutDirection.RightToLeft if direction == "left" else Qt.LayoutDirection.LeftToRight
+        item_align = "right" if direction == "left" else "left"
+        
+        menu_style = f"""
+            QMenu {{
+                background-color: rgba(40, 40, 40, 240);
+                color: white;
+                font-family: "Source Han Serif SC", "思源宋体", serif;
+                font-size: 13px;
+                border: 1px solid rgba(255, 255, 255, 30);
+            }}
+            QMenu::item {{
+                padding: 6px 16px 6px 16px;
+                border-radius: 4px;
+                text-align: {item_align};
+                border-left: 2px solid transparent; /* 始终占用空间，防止选中时宽度抖动 */
+            }}
+            QMenu::item:checked {{
+                background-color: rgba(201, 166, 74, 45);
+                border-left: 2px solid #c9a64a;
+            }}
+            QMenu::item:selected {{
+                background-color: rgba(60, 60, 60, 200);
+            }}
+            QMenu::separator {{
+                height: 1px;
+                background-color: #555;
+                margin: 4px 8px;
+            }}
+            QMenu::right-arrow {{
+                width: 0px;
+                height: 0px;
+                image: none;
+            }}
+            QMenu::indicator {{
+                width: 0px;
+                height: 0px;
+                image: none;
+            }}
+        """
+        
+        # 递归设置所有菜单的方向和样式
+        menus = [self.window_menu]
+        while menus:
+            m = menus.pop(0)
+            m.setLayoutDirection(layout_dir)
+            m.setStyleSheet(menu_style)
+            for action in m.actions():
+                if action.menu():
+                    menus.append(action.menu())
+
+    def _show_window_menu_old(self):
         """显示窗口菜单，实现右边缘对齐"""
         # 核心：必须先获取 sizeHint，因为 exec() 之前 width() 可能还是旧值
         self.window_menu.ensurePolished()

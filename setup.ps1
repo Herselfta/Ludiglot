@@ -1,7 +1,12 @@
-# Ludiglot 一键构建脚本
+﻿# Ludiglot 一键构建脚本
 # Windows PowerShell 版本
 
 $ErrorActionPreference = "Stop"
+
+# 适配 PowerShell 5.1 中文乱码问题
+if ($PSVersionTable.PSVersion.Major -le 5) {
+    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+}
 
 Write-Host "=== Ludiglot 项目环境配置 ===" -ForegroundColor Cyan
 Write-Host ""
@@ -84,18 +89,30 @@ Write-Host ""
 Write-Host "检查项目数据..." -ForegroundColor Yellow
 
 # 检查数据目录
-if (Test-Path "config/settings.json") {
-    $config = Get-Content "config/settings.json" | ConvertFrom-Json
-    $dataRoot = $config.data_root
-    if (-not (Test-Path $dataRoot)) {
-        Write-Host "  警告: 配置文件中的 data_root 路径不存在 ($dataRoot)" -ForegroundColor Red
-        Write-Host "  请在 config/settings.json 中修改 data_root 指向您的 WutheringData 目录" -ForegroundColor Yellow
-        Write-Host "  详情参考: docs/DataManagement.md" -ForegroundColor Gray
+# 自动生成配置文件
+if (-not (Test-Path "config/settings.json")) {
+    if (Test-Path "config/settings.example.json") {
+        Copy-Item "config/settings.example.json" "config/settings.json"
+        Write-Host "  已自动生成配置文件: config/settings.json" -ForegroundColor Green
     } else {
-        Write-Host "  发现数据目录: $dataRoot" -ForegroundColor Green
+        Write-Host "  未找到 config/settings.example.json，无法自动生成配置" -ForegroundColor Red
     }
-} else {
-    Write-Host "  未发现 config/settings.json，请参考 config/settings.example.json 创建" -ForegroundColor Yellow
+}
+
+# 检查数据目录配置
+if (Test-Path "config/settings.json") {
+    try {
+        $config = Get-Content "config/settings.json" | ConvertFrom-Json
+        $dataRoot = $config.data_root
+        if (-not (Test-Path $dataRoot)) {
+            Write-Host "  注意: 配置文件中的 data_root 路径指向空 ($dataRoot)" -ForegroundColor Yellow
+            Write-Host "  如果尚未下载 WutheringData，运行程序时会提示您自动下载。" -ForegroundColor Gray
+        } else {
+            Write-Host "  数据目录配置有效: $dataRoot" -ForegroundColor Green
+        }
+    } catch {
+        Write-Host "  警告: 配置文件格式可能有误" -ForegroundColor Yellow
+    }
 }
 
 Write-Host ""

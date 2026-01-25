@@ -1,7 +1,12 @@
-# Ludiglot 一键运行脚本
+﻿# Ludiglot 一键运行脚本
 # Windows PowerShell 版本
 
 $ErrorActionPreference = "Stop"
+
+# 适配 PowerShell 5.1 中文乱码问题
+if ($PSVersionTable.PSVersion.Major -le 5) {
+    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+}
 
 Write-Host "=== 启动 Ludiglot ===" -ForegroundColor Cyan
 Write-Host ""
