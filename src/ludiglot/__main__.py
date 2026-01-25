@@ -183,7 +183,7 @@ def _check_and_setup_wuthering_data(config_path: Path) -> bool:
     print("="*70)
     print(f"\n配置的数据目录不存在：{data_root}")
     print("\nWutheringData 是鸣潮游戏的文本和音频数据库。")
-    print("仓库大小约 200MB，需要 git 命令。")
+    print("将仅下载必要目录（TextMap, ConfigDB），约 50MB。")
     print("\n选项：")
     print("  [Y] 从 GitHub 自动克隆 (推荐)")
     print("  [N] 跳过（稍后手动设置）")
@@ -259,23 +259,19 @@ def _check_and_setup_wuthering_data(config_path: Path) -> bool:
                 env['HTTPS_PROXY'] = windows_proxy
         
         if proxy_info:
-            print("🔑 检测到代理配置:")
-            for info in proxy_info:
-                print(f"   {info}")
+            print("🔑 检测到代理:")
             if active_proxy:
-                print(f"   当前使用: {active_proxy}")
+                print(f"   {active_proxy}")
             print()
         else:
-            print("⚠️  未检测到代理配置，如连接失败请设置代理:")
+            print("⚠️  未检测到代理，如连接失败请设置:")
             print("   git config --global http.proxy http://127.0.0.1:7890")
-            print("   或设置环境变量: $env:HTTP_PROXY='http://127.0.0.1:7890'")
             print()
-        
-        print("📌 注意：为减少下载量，将仅下载必要的目录（TextMap, ConfigDB）")
-        print("📊 预计大小：~50MB（而不是完整仓库的 200MB）\n")
         
         # 使用 sparse-checkout 只克隆必要的目录
         try:
+            print("🔄 正在下载数据(~50MB)...\n")
+            
             # 步骤1: 初始化空仓库
             subprocess.run(
                 ["git", "init", str(data_root)],
@@ -294,7 +290,7 @@ def _check_and_setup_wuthering_data(config_path: Path) -> bool:
                 env=env
             )
             
-            # 步骤43: 启用 sparse-checkout
+            # 步骤3: 启用 sparse-checkout
             subprocess.run(
                 ["git", "-C", str(data_root), "sparse-checkout", "init", "--cone"],
                 capture_output=True,
@@ -312,10 +308,9 @@ def _check_and_setup_wuthering_data(config_path: Path) -> bool:
                 env=env
             )
             
-            # 步骤5: 从远程拉取（只拉取最后一次提交）
-            print("🔄 正在下载数据...")
+            # 步骤5: fetch 远程分支（兼容 master 和 main）
             process = subprocess.Popen(
-                ["git", "-C", str(data_root), "pull", "--depth", "1", "origin", "main"],
+                ["git", "-C", str(data_root), "fetch", "--depth", "1", "origin"],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
@@ -332,7 +327,24 @@ def _check_and_setup_wuthering_data(config_path: Path) -> bool:
             process.wait()
             
             if process.returncode != 0:
-                raise subprocess.CalledProcessError(process.returncode, "git pull")
+                raise subprocess.CalledProcessError(process.returncode, "git fetch")
+            
+            # 步骤6: checkout 到远程默认分支
+            # 先尝试 master，如果失败再尝试 main
+            checkout_success = False
+            for branch in ["master", "main"]:
+                result = subprocess.run(
+                    ["git", "-C", str(data_root), "checkout", f"origin/{branch}"],
+                    capture_output=True,
+                    text=True,
+                    env=env
+                )
+                if result.returncode == 0:
+                    checkout_success = True
+                    break
+            
+            if not checkout_success:
+                raise subprocess.CalledProcessError(1, "git checkout")
                 
         except subprocess.CalledProcessError as e:
             # 清理可能生成的空目录或不完整的文件

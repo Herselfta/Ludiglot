@@ -54,24 +54,28 @@ Write-Host ""
 Write-Host "激活虚拟环境..." -ForegroundColor Yellow
 & .\.venv\Scripts\Activate.ps1
 
-# 升级 pip
+# 定义虚拟环境 Python 路径
+$venvPython = ".\.venv\Scripts\python.exe"
+
+# 升级 pip (仅当虚拟环境创建后执行一次，或使用静默模式)
 Write-Host ""
-Write-Host "升级 pip..." -ForegroundColor Yellow
-python -m pip install --upgrade pip
+Write-Host "检查并升级 pip..." -ForegroundColor Yellow
+& $venvPython -m pip install --upgrade pip --quiet
 
 # 安装依赖
 Write-Host ""
 Write-Host "安装项目依赖..." -ForegroundColor Yellow
 if (Test-Path "requirements.txt") {
-    pip install -r requirements.txt
-} else {
+    & $venvPython -m pip install -r requirements.txt
+}
+ else {
     Write-Host "  警告: 未找到 requirements.txt，跳过依赖安装" -ForegroundColor Yellow
 }
 
 # 安装项目（开发模式）
 Write-Host ""
 Write-Host "安装 Ludiglot（开发模式）..." -ForegroundColor Yellow
-pip install -e .
+& $venvPython -m pip install -e .
 
 # 创建必要目录
 Write-Host ""
