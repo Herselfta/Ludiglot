@@ -862,9 +862,9 @@ class OverlayWindow(QMainWindow):
 
     def _on_size_click(self):
         """当点击字号数值时，弹出输入框"""
-        from PyQt6.QtWidgets import QInputDialog
-        val, ok = QInputDialog.getInt(self, "Font Size", "Enter Size (8-72):", 
-                                    self.current_font_size, 8, 72)
+        from ludiglot.ui.dialogs import StyledInputDialog
+        val, ok = StyledInputDialog.get_int(self, "Font Size", "Enter Size (8-72):", 
+                                          self.current_font_size, 8, 72)
         if ok:
             self.current_font_size = val
             self._apply_font_settings()
@@ -873,9 +873,9 @@ class OverlayWindow(QMainWindow):
 
     def _on_spacing_click(self):
         """点击字距数值直接输入"""
-        from PyQt6.QtWidgets import QInputDialog
-        val, ok = QInputDialog.getDouble(self, "Letter Spacing", "Enter (px):", 
-                                        self.current_letter_spacing, -10, 50, 1)
+        from ludiglot.ui.dialogs import StyledInputDialog
+        val, ok = StyledInputDialog.get_double(self, "Letter Spacing", "Enter (px):", 
+                                             self.current_letter_spacing, -10, 50, 1)
         if ok:
             self.current_letter_spacing = val
             self._apply_font_settings()
@@ -884,9 +884,9 @@ class OverlayWindow(QMainWindow):
 
     def _on_line_spacing_click(self):
         """点击行距数值直接输入"""
-        from PyQt6.QtWidgets import QInputDialog
-        val, ok = QInputDialog.getDouble(self, "Line Spacing", "Enter (x):", 
-                                        self.current_line_spacing, 0.5, 5.0, 1)
+        from ludiglot.ui.dialogs import StyledInputDialog
+        val, ok = StyledInputDialog.get_double(self, "Line Spacing", "Enter (x):", 
+                                             self.current_line_spacing, 0.5, 5.0, 1)
         if ok:
             self.current_line_spacing = val
             self._apply_font_settings()
@@ -1104,38 +1104,34 @@ class OverlayWindow(QMainWindow):
     
     def _update_database(self) -> None:
         """更新数据库：拉取 WutheringData 并重建"""
-        from PyQt6.QtWidgets import QMessageBox, QProgressDialog
+        from ludiglot.ui.dialogs import StyledDialog, StyledProgressDialog
         from ludiglot.ui.db_updater import DatabaseUpdateThread
         
         # 检查data_root配置
         if not self.config.data_root:
-            QMessageBox.warning(
+            StyledDialog.warning(
                 self,
                 "配置错误",
-                "未设置 data_root 路径。\\n请在 config/settings.json 中配置 WutheringData 路径。"
+                "未设置 data_root 路径。\n请在 config/settings.json 中配置 WutheringData 路径。"
             )
             return
         
         # 确认对话框
-        reply = QMessageBox.question(
+        reply = StyledDialog.question(
             self,
             "更新数据库",
-            f"即将从 GitHub 拉取 WutheringData 并重建数据库。\\n\\n"
-            f"数据路径: {self.config.data_root}\\n"
-            f"输出文件: {self.config.db_path}\\n\\n"
-            f"此操作可能需要几分钟。是否继续？",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            f"即将从 GitHub 拉取 WutheringData 并重建数据库。\n\n"
+            f"数据路径: {self.config.data_root}\n"
+            f"输出文件: {self.config.db_path}\n\n"
+            f"此操作可能需要几分钟。是否继续？"
         )
         
-        if reply != QMessageBox.StandardButton.Yes:
+        from PyQt6.QtWidgets import QDialog
+        if reply != QDialog.DialogCode.Accepted:
             return
         
         # 创建进度对话框
-        progress = QProgressDialog("正在更新数据库...", "取消", 0, 0, self)
-        progress.setWindowTitle("Database Update")
-        progress.setWindowModality(Qt.WindowModality.WindowModal)
-        progress.setMinimumDuration(0)
-        progress.setCancelButton(None)  # 不允许取消
+        progress = StyledProgressDialog("Database Update", "正在更新数据库...", self)
         progress.show()
         
         # 启动更新线程
@@ -1151,12 +1147,12 @@ class OverlayWindow(QMainWindow):
                 # 重新加载数据库
                 try:
                     self.db = json.loads(self.config.db_path.read_text(encoding="utf-8"))
-                    QMessageBox.information(self, "成功", message)
+                    StyledDialog.information(self, "成功", message)
                     self.signals.log.emit(f"[DB UPDATE] 成功：{message}")
                 except Exception as e:
-                    QMessageBox.warning(self, "警告", f"数据库更新成功，但重新加载失败：{e}")
+                    StyledDialog.warning(self, "警告", f"数据库更新成功，但重新加载失败：{e}")
             else:
-                QMessageBox.critical(self, "失败", f"数据库更新失败：\\n{message}")
+                StyledDialog.critical(self, "失败", f"数据库更新失败：\n{message}")
                 self.signals.log.emit(f"[DB UPDATE] 失败：{message}")
         
         self.update_thread.progress.connect(on_progress)
@@ -1934,11 +1930,23 @@ class OverlayWindow(QMainWindow):
                     rest_has_voice = self._has_voice_match(rest_result)
                     first_has_voice = self._has_voice_match(first_line['result'])
                     
-                    # 优先返回有语音的内容或长文本
-                    if len(rest_key) > 100 or rest_has_voice or (not first_has_voice and rest_score > first_line['score']):
+                    # 验证匹配质量：长文本应该有足够长度的matched_key
+                    matched_key = rest_result.get('_matched_key', '')
+                    is_good_match = len(matched_key) >= len(rest_key) * 0.6  # 匹配项应至少是查询的60%长度
+                    
+                    # 优先返回有语音的内容或高质量长文本匹配
+                    should_use_rest = (
+                        is_good_match and (
+                            len(rest_key) > 100 
+                            or rest_has_voice 
+                            or (not first_has_voice and rest_score > first_line['score'])
+                        )
+                    )
+                    
+                    if should_use_rest:
                         self.signals.log.emit(
                             f"[MATCH] 混合内容：第一行=标题({first_line['cleaned']}), "
-                            f"后续行=长文本(score={rest_score:.3f}, 有语音={rest_has_voice})"
+                            f"后续行=长文本(score={rest_score:.3f}, matched_len={len(matched_key)}, 有语音={rest_has_voice})"
                         )
                         rest_result['_score'] = round(rest_score, 3)
                         rest_result['_query_key'] = rest_key
@@ -2142,13 +2150,18 @@ class OverlayWindow(QMainWindow):
             if contain_in_ocr:
                 best_k = max(contain_in_ocr, key=len) # 取包含的最具体(最长)项
                 # 关键修复：长查询(>100)不允许匹配到短语(<50)
-                if not (len(key) > 100 and len(best_k) < 50):
+                # 新增：匹配项长度应至少是查询的40%，避免部分词组误匹配
+                length_ratio = len(best_k) / len(key)
+                if not (len(key) > 100 and len(best_k) < 50) and length_ratio >= 0.4:
                     result = dict(self.db.get(best_k, {}))
                     result["_matched_key"] = best_k
-                    return result, 0.99
+                    self.signals.log.emit(
+                        f"[MATCH] 包含匹配：query_len={len(key)}, matched_len={len(best_k)}, ratio={length_ratio:.2f}"
+                    )
+                    return result, 0.95  # 降低评分以反映不完整匹配
                 else:
                     self.signals.log.emit(
-                        f"[MATCH] 跳过短语匹配：query_len={len(key)}, matched_len={len(best_k)}"
+                        f"[MATCH] 跳过短语匹配：query_len={len(key)}, matched_len={len(best_k)}, ratio={length_ratio:.2f}"
                     )
 
             # 1.5.3 被包含匹配 (库文本包含了 OCR 内容 - **部分截屏核心场景**)

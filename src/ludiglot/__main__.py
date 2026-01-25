@@ -45,45 +45,7 @@ from ludiglot.core.wwise_hash import WwiseHash
 from ludiglot.ui.overlay_window import run_gui
 
 
-def _get_windows_system_proxy() -> str | None:
-    """仏Windows注册表读取系统代理设置"""
-    try:
-        import winreg
-        # 打开注册表键
-        with winreg.OpenKey(
-            winreg.HKEY_CURRENT_USER,
-            r"Software\Microsoft\Windows\CurrentVersion\Internet Settings"
-        ) as key:
-            # 检查是否启用代理
-            try:
-                proxy_enable, _ = winreg.QueryValueEx(key, "ProxyEnable")
-                if not proxy_enable:
-                    return None
-            except FileNotFoundError:
-                return None
-            
-            # 获取代理服务器地址
-            try:
-                proxy_server, _ = winreg.QueryValueEx(key, "ProxyServer")
-                if proxy_server:
-                    # 处理多个代理的情况（如 http=...;https=...)
-                    if '=' in proxy_server:
-                        # 提取http代理
-                        for item in proxy_server.split(';'):
-                            if item.startswith('http='):
-                                return 'http://' + item.split('=', 1)[1]
-                            elif item.startswith('https='):
-                                return 'http://' + item.split('=', 1)[1]
-                    else:
-                        # 单一代理地址
-                        if not proxy_server.startswith('http'):
-                            return 'http://' + proxy_server
-                        return proxy_server
-            except FileNotFoundError:
-                return None
-    except Exception:
-        return None
-    return None
+# 已移至 ludiglot.core.git_manager
 
 
 def _is_wuthering_data_valid(data_root: Path) -> bool:
@@ -207,218 +169,31 @@ def _check_and_setup_wuthering_data(config_path: Path) -> bool:
         print("❌ 无效输入，请输入 Y、N 或 C")
     
     # 用户选择克隆
+    from ludiglot.core.git_manager import GitManager
+    
     print("\n" + "="*70)
     print("🔄 开始克隆 WutheringData...")
     print("="*70)
-    print(f"目标位置: {data_root}")
-    print("这可能需要几分钟，请耐心等待...\n")
+    print(f"目标位置: {data_root}\n")
     
-    try:
-        # 确保父目录存在
-        data_root.parent.mkdir(parents=True, exist_ok=True)
-        
-        # 获取代理配置
-        import os
-        env = os.environ.copy()
-        
-        # 检测代理配置
-        proxy_info = []
-        active_proxy = None
-        
-        # 1. 检查Git全局代理
-        try:
-            http_proxy_result = subprocess.run(
-                ["git", "config", "--global", "--get", "http.proxy"],
-                capture_output=True,
-                text=True,
-                timeout=5
-            )
-            if http_proxy_result.returncode == 0 and http_proxy_result.stdout.strip():
-                git_proxy = http_proxy_result.stdout.strip()
-                proxy_info.append(f"Git代理: {git_proxy}")
-                active_proxy = git_proxy
-        except Exception:
-            pass
-        
-        # 2. 检查系统环境变量代理
-        system_env_proxy = env.get('HTTP_PROXY') or env.get('http_proxy') or \
-                           env.get('HTTPS_PROXY') or env.get('https_proxy')
-        if system_env_proxy:
-            proxy_info.append(f"环境变量代理: {system_env_proxy}")
-            if not active_proxy:
-                active_proxy = system_env_proxy
-        
-        # 3. 检查Windows系统代理设置
-        windows_proxy = _get_windows_system_proxy()
-        if windows_proxy:
-            proxy_info.append(f"Windows系统代理: {windows_proxy}")
-            if not active_proxy:
-                # 如果没有Git或环境变量代理，使用Windows系统代理
-                active_proxy = windows_proxy
-                env['HTTP_PROXY'] = windows_proxy
-                env['HTTPS_PROXY'] = windows_proxy
-        
-        if proxy_info:
-            print("🔑 检测到代理:")
-            if active_proxy:
-                print(f"   {active_proxy}")
-            print()
-        else:
-            print("⚠️  未检测到代理，如连接失败请设置:")
-            print("   git config --global http.proxy http://127.0.0.1:7890")
-            print()
-        
-        # 使用 sparse-checkout 只克隆必要的目录
-        try:
-            print("🔄 正在下载数据(~50MB)...\n")
-            
-            # 步骤1: 初始化空仓库
-            subprocess.run(
-                ["git", "init", str(data_root)],
-                capture_output=True,
-                text=True,
-                check=True,
-                env=env
-            )
-            
-            # 步骤2: 添加 remote
-            subprocess.run(
-                ["git", "-C", str(data_root), "remote", "add", "origin", "https://github.com/Dimbreath/WutheringData.git"],
-                capture_output=True,
-                text=True,
-                check=True,
-                env=env
-            )
-            
-            # 步骤3: 启用 sparse-checkout
-            subprocess.run(
-                ["git", "-C", str(data_root), "sparse-checkout", "init", "--cone"],
-                capture_output=True,
-                text=True,
-                check=True,
-                env=env
-            )
-            
-            # 步骤4: 设置只下载 TextMap 和 ConfigDB
-            subprocess.run(
-                ["git", "-C", str(data_root), "sparse-checkout", "set", "TextMap", "ConfigDB"],
-                capture_output=True,
-                text=True,
-                check=True,
-                env=env
-            )
-            
-            # 步骤5: fetch 远程分支（兼容 master 和 main，显示进度）
-            process = subprocess.Popen(
-                ["git", "-C", str(data_root), "fetch", "--depth", "1", "--progress", "origin"],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                bufsize=1,
-                universal_newlines=True,
-                env=env
-            )
-            
-            # 实时打印输出（进度信息在 stderr）
-            try:
-                if process.stderr:
-                    for line in process.stderr:
-                        print(line, end='')
-                
-                process.wait()
-                
-                if process.returncode != 0:
-                    raise subprocess.CalledProcessError(process.returncode, "git fetch")
-            finally:
-                # 确保关闭所有管道
-                if process.stdout:
-                    process.stdout.close()
-                if process.stderr:
-                    process.stderr.close()
-            
-            # 步骤6: checkout 到远程默认分支
-            # 先尝试 master，如果失败再尝试 main
-            checkout_success = False
-            for branch in ["master", "main"]:
-                result = subprocess.run(
-                    ["git", "-C", str(data_root), "checkout", f"origin/{branch}"],
-                    capture_output=True,
-                    text=True,
-                    env=env
-                )
-                if result.returncode == 0:
-                    checkout_success = True
-                    break
-            
-            if not checkout_success:
-                raise subprocess.CalledProcessError(1, "git checkout")
-            
-            # 释放 git 进程锁
-            subprocess.run(
-                ["git", "-C", str(data_root), "gc", "--auto"],
-                capture_output=True,
-                text=True,
-                env=env
-            )
-                
-        except subprocess.CalledProcessError as e:
-            # 清理可能生成的空目录或不完整的文件
-            if data_root.exists():
-                try:
-                    import shutil
-                    shutil.rmtree(data_root)
-                    print(f"\n🗑️  已清理不完整的目录")
-                except Exception:
-                    pass
-            
-            print("\n" + "="*70)
-            print("❌ 克隆失败")
-            print("="*70)
-            print("\n可能的原因：")
-            print("  1. 网络无法访问 GitHub")
-            print("  2. 代理配置不正确或未设置代理")
-            print("  3. Git 命令版本过旧")
-            print("  4. 目标路径没有写入权限")
-            print("\n解决方法：")
-            print("  • 设置 Git 代理：")
-            print("    git config --global http.proxy http://127.0.0.1:7890")
-            print("    git config --global https.proxy http://127.0.0.1:7890")
-            print("  • 或设置环境变量（临时）：")
-            print("    $env:HTTP_PROXY='http://127.0.0.1:7890'")
-            print("    $env:HTTPS_PROXY='http://127.0.0.1:7890'")
-            print("  • 或手动克隆：")
-            print(f"    git clone https://github.com/Dimbreath/WutheringData.git {data_root}")
-            print("\n💡 提示：如果使用代理工具（如 Clash），请确保：")
-            print("   1. 代理工具正在运行")
-            print("   2. 允许局域网连接")
-            print("   3. 端口号正确（通常是 7890 或 7891）")
-            print()
-            return False
-        
+    success = GitManager.fast_clone_wuthering_data(
+        data_root, 
+        progress_callback=lambda line: print(line)
+    )
+    
+    if success:
         print("\n" + "="*70)
         print("✅ 克隆成功！")
         print("="*70)
         print(f"位置：{data_root}\n")
         return True
-        
-    except FileNotFoundError:
+    else:
         print("\n" + "="*70)
-        print("❌ Git 未安装")
+        print("❌ 克隆失败")
         print("="*70)
-        print("\n请先安装 Git：")
-        print("  https://git-scm.com/downloads")
-        print("\n或手动克隆仓库：")
-        print(f"  git clone https://github.com/Dimbreath/WutheringData.git {data_root}")
-        print()
+        print("\n请检查网络连接或手动执行：")
+        print(f"git clone https://github.com/Dimbreath/WutheringData.git {data_root}")
         return False
-    except KeyboardInterrupt:
-        print("\n\n⚠️  用户中断操作。")
-        return False
-    except Exception as e:
-        print("\n" + "="*70)
-        print("❌ 克隆过程出错")
-        print("="*70)
-        print(f"\n错误信息：{e}\n")
         return False
 
 
