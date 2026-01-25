@@ -43,7 +43,28 @@ class AppConfig:
 
 def load_config(path: Path) -> AppConfig:
     if not path.exists():
-        raise FileNotFoundError(f"配置文件不存在: {path}")
+        error_msg = (
+            f"\n{'='*70}\n"
+            f"配置文件不存在: {path}\n"
+            f"{'='*70}\n\n"
+            "Ludiglot 需要一个配置文件才能运行。\n\n"
+            "📝 快速开始：\n"
+            "1. 创建配置目录和文件：\n"
+            f"   mkdir -p {path.parent}\n"
+            f"   touch {path}\n\n"
+            "2. 添加基础配置（复制以下内容到配置文件）：\n"
+            "   {\n"
+            '     "data_root": "data/WutheringData",\n'
+            '     "db_path": "data/game_text_db.json",\n'
+            '     "auto_rebuild_db": true,\n'
+            '     "ocr_backend": "auto",\n'
+            '     "play_audio": true\n'
+            "   }\n\n"
+            "3. 重新运行程序。\n\n"
+            "📖 详细配置说明请参考：README.md\n"
+            f"{'='*70}\n"
+        )
+        raise FileNotFoundError(error_msg)
     raw: Dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
     
     project_root = Path(__file__).resolve().parents[3]

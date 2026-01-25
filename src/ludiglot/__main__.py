@@ -45,6 +45,135 @@ from ludiglot.core.wwise_hash import WwiseHash
 from ludiglot.ui.overlay_window import run_gui
 
 
+def _check_and_setup_wuthering_data(config_path: Path) -> bool:
+    """在终端中检测WutheringData，如不存在则交互式询问是否克隆。
+    
+    Returns:
+        bool: True表示data_root可用或用户选择跳过，False表示用户取消操作
+    """
+    import subprocess
+    
+    # 检查配置文件是否存在
+    if not config_path.exists():
+        return True  # 让load_config处理配置文件缺失的错误
+    
+    try:
+        raw = json.loads(config_path.read_text(encoding="utf-8"))
+    except Exception:
+        return True  # 配置文件解析错误，让后续流程处理
+    
+    data_root_str = raw.get("data_root")
+    
+    # 如果没有配置data_root，直接返回
+    if not data_root_str:
+        return True
+    
+    # 解析data_root路径
+    data_root = Path(data_root_str)
+    if not data_root.is_absolute():
+        project_root = Path(__file__).resolve().parents[2]
+        data_root = (project_root / data_root).resolve()
+    
+    # 如果已经存在，直接返回
+    if data_root.exists():
+        return True
+    
+    # WutheringData不存在，在终端中询问用户
+    print("\n" + "="*70)
+    print("📂 WutheringData 未找到")
+    print("="*70)
+    print(f"\n配置的数据目录不存在：{data_root}")
+    print("\nWutheringData 是鸣潮游戏的文本和音频数据库。")
+    print("仓库大小约 200MB，需要 git 命令。")
+    print("\n选项：")
+    print("  [Y] 从 GitHub 自动克隆 (推荐)")
+    print("  [N] 跳过（稍后手动设置）")
+    print("  [C] 取消启动")
+    print()
+    
+    while True:
+        choice = input("请选择 [Y/N/C]: ").strip().upper()
+        
+        if choice == 'C':
+            return False
+        
+        if choice == 'N':
+            print("\n⚠️  跳过克隆。如需完整功能，请手动克隆：")
+            print(f"   git clone https://github.com/Dimbreath/WutheringData.git {data_root}")
+            return True
+        
+        if choice == 'Y':
+            break
+        
+        print("❌ 无效输入，请输入 Y、N 或 C")
+    
+    # 用户选择克隆
+    print("\n" + "="*70)
+    print("🔄 开始克隆 WutheringData...")
+    print("="*70)
+    print(f"目标位置: {data_root}")
+    print("这可能需要几分钟，请耐心等待...\n")
+    
+    try:
+        # 确保父目录存在
+        data_root.parent.mkdir(parents=True, exist_ok=True)
+        
+        # 执行git clone，实时显示输出
+        process = subprocess.Popen(
+            ["git", "clone", "--progress", "https://github.com/Dimbreath/WutheringData.git", str(data_root)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            universal_newlines=True
+        )
+        
+        # 实时打印输出
+        for line in process.stdout:
+            print(line, end='')
+        
+        process.wait()
+        
+        if process.returncode != 0:
+            print("\n" + "="*70)
+            print("❌ 克隆失败")
+            print("="*70)
+            print("\n请检查：")
+            print("  1. 是否已安装 git 命令")
+            print("  2. 网络连接是否正常")
+            print("  3. 目标路径是否有写入权限")
+            print("\n手动克隆命令：")
+            print(f"  git clone https://github.com/Dimbreath/WutheringData.git {data_root}")
+            print()
+            return False
+        
+        print("\n" + "="*70)
+        print("✅ 克隆成功！")
+        print("="*70)
+        print(f"位置：{data_root}\n")
+        return True
+        
+    except FileNotFoundError:
+        print("\n" + "="*70)
+        print("❌ Git 未安装")
+        print("="*70)
+        print("\n请先安装 Git：")
+        print("  https://git-scm.com/downloads")
+        print("\n或手动克隆仓库：")
+        print(f"  git clone https://github.com/Dimbreath/WutheringData.git {data_root}")
+        print()
+        return False
+    except KeyboardInterrupt:
+        print("\n\n⚠️  用户中断操作。")
+        return False
+    except Exception as e:
+        print("\n" + "="*70)
+        print("❌ 克隆过程出错")
+        print("="*70)
+        print(f"\n错误信息：{e}\n")
+        return False
+
+
 def _load_db(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
@@ -608,7 +737,14 @@ def cmd_run(args: argparse.Namespace) -> None:
 
 
 def cmd_gui(args: argparse.Namespace) -> None:
-    run_gui(Path(args.config))
+    config_path = Path(args.config)
+    
+    # 在启动GUI前先在终端中检测和处理WutheringData
+    if not _check_and_setup_wuthering_data(config_path):
+        print("\n❌ 启动已取消。")
+        return
+    
+    run_gui(config_path)
 
 
 def build_parser() -> argparse.ArgumentParser:
