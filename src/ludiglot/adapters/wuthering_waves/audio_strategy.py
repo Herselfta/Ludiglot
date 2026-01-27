@@ -43,7 +43,21 @@ class WutheringAudioStrategy:
             if "_" in text_key:
                  pass # _add_variants already covers many prefix cases
         
-        # 3. 结果去重并返回
+        # 3. 为对话类型添加性别后缀变体（FavorWord等）
+        gender_candidates = []
+        for name in candidates:
+            # 如果已有性别后缀，保持原样
+            name_lower = name.lower()
+            if '_f_' in name_lower or name_lower.endswith('_f') or '_m_' in name_lower or name_lower.endswith('_m'):
+                continue
+            # 添加女声变体（优先）
+            gender_candidates.append(f"{name}_f")
+            # 添加男声变体
+            gender_candidates.append(f"{name}_m")
+        
+        candidates.extend(gender_candidates)
+        
+        # 4. 结果去重并返回
         dedup: list[str] = []
         seen = set()
         for name in candidates:

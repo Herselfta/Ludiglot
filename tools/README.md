@@ -1,71 +1,59 @@
 # 第三方工具说明 (Third-Party Tools)
 
-本项目在 `tools/` 目录下使用了一些第三方工具，这些工具**不包含在 Git 仓库**中，需要用户自行下载。
+`tools/` 目录存放 Ludiglot 依赖的第三方工具。
 
 ---
 
-## FModel
-
-### 许可证
-[GPL-3.0 License](https://github.com/4sval/FModel/blob/master/LICENSE)
+## FModelCLI (自动管理)
 
 ### 用途
-用于从虚幻引擎游戏中提取资源（.wem 音频文件、.bnk 事件文件等）。
+从虚幻引擎游戏的 PAK 文件中提取 ConfigDB、TextMap 和音频资源。
 
-### 下载
-- **官方网站**: https://fmodel.app/
-- **GitHub**: https://github.com/4sval/FModel
+### 许可证
+GPL-3.0 - https://github.com/Herselfta/FModelCLI
 
 ### 安装说明
-1. 从官方网站下载最新版本的 FModel
-2. 将 `FModel.exe` 放置到 `tools/` 目录下
-3. 或者直接在系统其他位置安装，按需调用
+**无需手动安装**。Ludiglot 会自动完成以下操作：
 
-### 使用步骤
-详见 [DataManagement.md](../docs/DataManagement.md) 中的"音频资源"章节。
+1. 检测 `tools/FModelCLI.exe` 是否存在
+2. 如果不存在，自动从 GitHub 克隆 FModelCLI 仓库
+3. 自动编译并部署到 `tools/` 目录
+
+如果你想手动管理，可以：
+- 从 [Releases](https://github.com/Herselfta/FModelCLI/releases) 下载预编译版本
+- 放置到 `tools/FModelCLI.exe`
+
+### 技术细节
+- 基于 [FModel](https://github.com/4sval/FModel) 和 [CUE4Parse](https://github.com/FabianFG/CUE4Parse)
+- 自包含的 .NET 8.0 单文件可执行程序
+- 支持多 AES 密钥、多语言资源提取
 
 ---
 
 ## vgmstream
 
 ### 许可证
-**ISC License** (与MIT兼容，需保留版权声明)
-
-完整许可证文本见: `tools/vgmstream/COPYING`
-
-**版权所有者**:
-```
-Copyright (c) 2008-2025 Adam Gashlin, Fastelbja, Ronny Elfert, bnnm,
-                        Christopher Snowhill, NicknineTheEagle, bxaimc,
-                        Thealexbarney, CyberBotX, et al
-```
-
-**许可证要求**:
-- ✅ 允许商业使用
-- ✅ 允许修改和分发
-- ⚠️ **必须保留版权声明和许可证文本**
-- ✅ 无专利授权要求
-- ✅ 不要求开源衍生作品
+ISC License（需保留版权声明）
 
 ### 用途
-将 `.wem` 格式的 Wwise 音频文件转换为 `.wav` / `.ogg` 格式。
+将 `.wem` 格式的 Wwise 音频转换为 `.wav`/`.ogg` 格式。
 
 ### 下载
 - **官方 GitHub**: https://github.com/vgmstream/vgmstream
-- **自动构建**: https://vgmstream.org
+- **预编译版本**: https://vgmstream.org
 
 ### 安装说明
-1. 下载预编译的 `vgmstream-cli`
+1. 下载 `vgmstream-cli`
 2. 解压到 `tools/vgmstream/` 目录
 3. 确保 `tools/vgmstream/vgmstream-cli.exe` 存在
-4. **重要**: 保留 `tools/vgmstream/COPYING` 文件（许可证要求）
+4. **重要**: 保留 `tools/vgmstream/COPYING` 文件
 
 ---
 
 ## wwiser
 
 ### 许可证
-MIT License (兼容)
+MIT License
 
 ### 用途
 解析 Wwise `.bnk` 文件，提取音频事件与 Hash 的映射关系。
@@ -74,72 +62,29 @@ MIT License (兼容)
 - **GitHub**: https://github.com/bnnm/wwiser
 
 ### 安装说明
-已包含在项目中：`tools/wwiser.pyz`（Python 脚本打包版本）
+已包含在项目中：`tools/wwiser.pyz`
 
 ---
 
-## 法律合规说明
+## 许可证兼容性
 
-### 为什么 FModel.exe 不在仓库中？
-
-**FModel 使用 GPL-3.0 许可证**，这是一个强 Copyleft 许可证。如果本项目直接包含 FModel.exe 二进制文件，根据 GPL-3.0 的传染性条款，**整个 Ludiglot 项目也必须采用 GPL-3.0**，这与我们的 MIT 许可证不兼容。
-
-### 解决方案
-
-1. **不分发 FModel 二进制文件**：将 `tools/FModel.exe` 加入 `.gitignore`
-2. **提供下载链接**：用户从官方渠道自行下载
-3. **弱耦合设计**：FModel 仅作为可选的资源提取工具，不是核心依赖
-
-### 许可证兼容性
-
-| 工具 | 许可证 | MIT 兼容性 | 分发方式 | 特殊要求 |
-|------|--------|-----------|---------|---------|
-| **FModel** | GPL-3.0 | ❌ 不兼容 | 用户自行下载 | 无 |
-| **vgmstream** | ISC | ✅ 兼容 | 包含在仓库* | 必须保留COPYING文件 |
-| **wwiser** | MIT | ✅ 兼容 | 包含在仓库 | 无 |
-
-**注**: vgmstream 可以包含在仓库中，但必须保留其 `COPYING` 文件以满足ISC许可证要求。当前建议用户自行下载以减小仓库体积。
+| 工具 | 许可证 | 分发方式 | 备注 |
+|------|--------|----------|------|
+| **FModelCLI** | GPL-3.0 | 自动构建 | 从源码编译，不分发二进制 |
+| **vgmstream** | ISC | 用户下载 | 必须保留 COPYING 文件 |
+| **wwiser** | MIT | 包含在仓库 | 无额外要求 |
 
 ---
 
-## 对用户的影响
+## 目录结构
 
-### 首次设置需要额外步骤
-
-用户需要手动下载 FModel 和 vgmstream，但这只需要做一次：
-
-```bash
-# 1. 克隆仓库
-git clone https://github.com/yourusername/Ludiglot.git
-cd Ludiglot
-
-# 2. 下载第三方工具
-# - 从 https://fmodel.app/ 下载 FModel.exe，放到 tools/
-# - 从 https://github.com/vgmstream/vgmstream 下载 vgmstream-cli，解压到 tools/vgmstream/
-
-# 3. 其余步骤与之前相同
-.\setup.ps1
-.\run.ps1
 ```
-
-### 自动化脚本优化（TODO）
-
-可以在 `setup.ps1` 中添加检测和提示逻辑：
-
-```powershell
-if (-not (Test-Path "tools/FModel.exe")) {
-    Write-Warning "FModel.exe 未找到。请从 https://fmodel.app/ 下载并放置到 tools/ 目录。"
-}
-
-if (-not (Test-Path "tools/vgmstream/vgmstream-cli.exe")) {
-    Write-Warning "vgmstream 未找到。请从 https://github.com/vgmstream/vgmstream 下载并解压到 tools/vgmstream/。"
-}
+tools/
+├── FModelCLI.exe          # 自动生成（gitignored）
+├── FModelCLI_src/         # 自动克隆（gitignored）
+├── vgmstream/
+│   ├── vgmstream-cli.exe  # 用户下载
+│   └── COPYING            # 必须保留
+├── wwiser.pyz             # 已包含
+└── README.md              # 本文档
 ```
-
----
-
-## 参考文献
-
-- [GPL-3.0 License](https://www.gnu.org/licenses/gpl-3.0.html)
-- [MIT License Compatibility](https://choosealicense.com/licenses/mit/)
-- [FModel GitHub Repository](https://github.com/4sval/FModel)

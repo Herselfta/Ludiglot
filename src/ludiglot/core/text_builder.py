@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import json
 import re
+import sqlite3
 from pathlib import Path
-from typing import Dict, Iterable, Tuple
+from typing import Dict, Iterable, Tuple, Any
 
 from ludiglot.core.voice_map import build_voice_map_from_configdb
 from ludiglot.core.wwise_hash import WwiseHash
+
 
 
 def normalize_en(text: str) -> str:
@@ -64,8 +66,75 @@ def _extract_map(obj: object) -> Dict[str, str]:
 
 
 def _load_map(path: Path) -> Dict[str, str]:
+    if path.suffix.lower() == ".db":
+        return _load_sqlite_map(path)
     obj = json.loads(path.read_text(encoding="utf-8"))
     return _extract_map(obj)
+
+
+def _load_sqlite_map(path: Path) -> Dict[str, str]:
+    """从 SQLite 数据库提取文本。常见表名为 'Table' 或 'data'，列名为 'TextMapId'/'Key' 和 'Text'/'Content'。"""
+    try:
+        # 预检：检查是否截断
+        with open(path, "rb") as f:
+            header = f.read(100)
+            if len(header) < 100 or header[:15] != b"SQLite format 3":
+                return {}
+            # 第 28-31 字节是文件大小（以页为单位，大端序）
+            page_count = int.from_bytes(header[28:32], "big")
+            # 第 16-17 字节是页大小
+            page_size = int.from_bytes(header[16:18], "big")
+            if page_size == 1: page_size = 65536
+            
+            expected_size = page_count * page_size
+            actual_size = path.stat().st_size
+            if actual_size < expected_size:
+                print(f"⚠️ 警告: 数据库 {path.name} 似乎已截断 (预期 {expected_size} 字节, 实际 {actual_size} 字节)。这通常是由于解包不完整导致的。")
+                # 即使截断，sqlite3 有时也能读到前面的数据，继续尝试
+
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+
+        cursor = conn.cursor()
+        
+        # 探测表名
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        tables = [r[0] for r in cursor.fetchall()]
+        if not tables:
+            return {}
+        
+        # 优先使用 lang_text 或通用表名
+        table_name = None
+        for cand in ["Table", "data", "lang_text", "text"]:
+            if cand in tables:
+                table_name = cand
+                break
+        if not table_name: table_name = tables[0]
+
+        # 探测列名
+        cursor.execute(f"PRAGMA table_info({table_name})")
+        cols = {r[1].lower(): r[1] for r in cursor.fetchall()}
+        
+        id_col = cols.get("textid") or cols.get("textmapid") or cols.get("key") or cols.get("id")
+        text_col = cols.get("text") or cols.get("content") or cols.get("value")
+        
+        if not id_col or not text_col:
+            # 这种情况下尝试猜测第一列和第二列
+            cursor.execute(f"SELECT * FROM {table_name} LIMIT 1")
+            row = cursor.fetchone()
+            if row and len(row) >= 2:
+                id_col = list(cols.values())[0]
+                text_col = list(cols.values())[1]
+            else:
+                return {}
+
+        cursor.execute(f"SELECT {id_col}, {text_col} FROM {table_name}")
+        mapping = {str(r[0]): str(r[1]) for r in cursor.fetchall() if r[0] and r[1]}
+        conn.close()
+        return mapping
+    except Exception as e:
+        print(f"警告: 无法读取 SQLite 数据库 {path.name}: {e}")
+        return {}
+
 
 
 def _iter_items(payload: object) -> Iterable[dict]:
@@ -146,6 +215,7 @@ def find_multitext_paths(data_root: Path) -> Tuple[Path, Path]:
     candidates_en = _candidate_paths(
         data_root,
         [
+            "ConfigDB/en/lang_text.db",
             "TextMap/en/MultiText.json",
             "TextMap/en/Multitext.json",
         ],
@@ -153,6 +223,7 @@ def find_multitext_paths(data_root: Path) -> Tuple[Path, Path]:
     candidates_zh = _candidate_paths(
         data_root,
         [
+            "ConfigDB/zh-Hans/lang_text.db",
             "TextMap/zh-Hans/MultiText.json",
             "TextMap/zh-CN/MultiText.json",
             "TextMap/zh-Hans/Multitext.json",
@@ -160,6 +231,7 @@ def find_multitext_paths(data_root: Path) -> Tuple[Path, Path]:
     )
     en_path = next((p for p in candidates_en if p.exists()), None)
     zh_path = next((p for p in candidates_zh if p.exists()), None)
+
 
     if en_path is None or zh_path is None:
         # 兜底：在 TextMap 下搜索 MultiText.json
@@ -197,36 +269,54 @@ def build_text_db_from_root(data_root: Path) -> Dict[str, dict]:
 
 
 def build_text_db_from_root_all(data_root: Path) -> Dict[str, dict]:
-    text_map_root = data_root / "TextMap"
-    en_root = text_map_root / "en"
-    zh_root = text_map_root / "zh-Hans"
-    if not en_root.exists() or not zh_root.exists():
-        # 兜底使用 MultiText
-        return build_text_db_from_root(data_root)
+    # 语言对定义
+    langs = [("en", "zh-Hans"), ("en", "zh-CN")]
+    
+    # 探测可能的数据目录
+    roots = [
+        data_root / "ConfigDB",
+        data_root / "Client" / "Content" / "Aki" / "ConfigDB",
+        data_root / "TextMap",
+        data_root / "Client" / "Content" / "Aki" / "TextMap",
+    ]
 
     plot_audio = load_plot_audio_map(data_root)
     voice_map = build_voice_map_from_configdb(data_root)
     db: Dict[str, dict] = {}
-    for en_path in en_root.rglob("*.json"):
-        rel = en_path.relative_to(en_root)
-        zh_path = zh_root / rel
-        if not zh_path.exists():
-            continue
+
+    def scan_pair(en_dir: Path, zh_dir: Path):
+        if not en_dir.exists() or not zh_dir.exists():
+            return
+        for ext in ("*.json", "*.db"):
+            for en_path in en_dir.rglob(ext):
+                rel = en_path.relative_to(en_dir)
+                zh_path = zh_dir / rel
+                if not zh_path.exists():
+                    continue
+                try:
+                    partial = build_text_db(en_path, zh_path, plot_audio=plot_audio, voice_map=voice_map)
+                    for key, payload in partial.items():
+                        if key not in db:
+                            db[key] = payload
+                        else:
+                            db[key]["matches"].extend(payload.get("matches", []))
+                except Exception:
+                    continue
+
+    for r in roots:
+        if not r.exists(): continue
+        for en, zh in langs:
+            scan_pair(r / en, r / zh)
+
+    # 兜底：如果完全没有扫到，或者扫出的是空的，尝试使用 MultiText 逻辑兜底
+    if not db:
         try:
-            partial = build_text_db(
-                en_path,
-                zh_path,
-                plot_audio=plot_audio,
-                voice_map=voice_map,
-            )
+            return build_text_db_from_root(data_root)
         except Exception:
-            continue
-        for key, payload in partial.items():
-            if key not in db:
-                db[key] = payload
-            else:
-                db[key]["matches"].extend(payload.get("matches", []))
+            pass
+            
     return db
+
 
 
 def build_text_db_from_maps(

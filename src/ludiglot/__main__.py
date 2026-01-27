@@ -28,6 +28,7 @@ from ludiglot.core.capture import (
     capture_window,
 )
 from ludiglot.core.config import load_config
+from ludiglot.core.game_pak_update import GamePakUpdateError, update_from_game_paks
 from ludiglot.core.ocr import OCREngine
 from ludiglot.core.search import FuzzySearcher
 from ludiglot.core.text_builder import (
@@ -82,6 +83,9 @@ def _check_and_setup_wuthering_data(config_path: Path) -> bool:
         raw = json.loads(config_path.read_text(encoding="utf-8"))
     except Exception:
         return True  # 配置文件解析错误，让后续流程处理
+
+    if raw.get("use_game_paks") or raw.get("game_install_root") or raw.get("game_pak_root"):
+        return True
     
     data_root_str = raw.get("data_root")
     
@@ -194,6 +198,53 @@ def _check_and_setup_wuthering_data(config_path: Path) -> bool:
         print("\n请检查网络连接或手动执行：")
         print(f"git clone https://github.com/Dimbreath/WutheringData.git {data_root}")
         return False
+        return False
+
+
+def _check_and_setup_game_data(config_path: Path) -> bool:
+    """在终端中检测游戏 Pak 解包数据，如不存在则交互式更新。"""
+    if not config_path.exists():
+        return True
+    try:
+        cfg = load_config(config_path)
+    except Exception:
+        return True
+
+    if not (cfg.use_game_paks or cfg.game_install_root or cfg.game_pak_root):
+        return True
+
+    data_root = cfg.game_data_root or cfg.data_root
+    if data_root and _is_wuthering_data_valid(data_root):
+        return True
+
+    if not sys.stdin.isatty():
+        print("\n⚠️  Pak 模式已启用，但数据缺失。请运行 ludiglot pak-update 更新数据。")
+        return False
+
+    print("\n" + "=" * 70)
+    print("📦 游戏 Pak 数据未就绪")
+    print("=" * 70)
+    print("将从本地游戏 Pak 解包文本/音频资源。")
+    print("选项：")
+    print("  [Y] 立即解包并构建数据库 (推荐)")
+    print("  [N] 跳过 (稍后手动执行 ludiglot pak-update)")
+    print("  [C] 取消启动")
+
+    while True:
+        choice = input("请选择 [Y/N/C]: ").strip().upper()
+        if choice == "C":
+            return False
+        if choice == "N":
+            return True
+        if choice == "Y":
+            break
+        print("❌ 无效输入，请输入 Y、N 或 C")
+
+    try:
+        update_from_game_paks(cfg, config_path, cfg.db_path, progress=lambda m: print(m))
+        return True
+    except GamePakUpdateError as exc:
+        print(f"\n❌ Pak 更新失败: {exc}")
         return False
 
 
@@ -771,7 +822,10 @@ def cmd_gui(args: argparse.Namespace) -> None:
         print("="*70 + "\n")
         return
     
-    # 在启动GUI前先在终端中检测和处理WutheringData
+    # 在启动GUI前先在终端中检测和处理WutheringData / Pak 数据
+    if not _check_and_setup_game_data(config_path):
+        print("\n❌ 启动已取消。")
+        return
     if not _check_and_setup_wuthering_data(config_path):
         print("\n❌ 启动已取消。")
         return
@@ -857,6 +911,10 @@ def build_parser() -> argparse.ArgumentParser:
     gui.add_argument("--config", default="config/settings.json")
     gui.set_defaults(func=cmd_gui)
 
+    pak_update = sub.add_parser("pak-update", help="从本地游戏 Pak 解包并重建数据库")
+    pak_update.add_argument("--config", default="config/settings.json")
+    pak_update.set_defaults(func=cmd_pak_update)
+
     return parser
 
 
@@ -867,6 +925,15 @@ def main() -> None:
         cmd_gui(argparse.Namespace(config=args.config))
         return
     args.func(args)
+
+
+def cmd_pak_update(args: argparse.Namespace) -> None:
+    cfg = load_config(Path(args.config))
+    try:
+        update_from_game_paks(cfg, Path(args.config), cfg.db_path, progress=print)
+        print("✅ Pak 更新完成")
+    except GamePakUpdateError as exc:
+        print(f"❌ Pak 更新失败: {exc}")
 
 
 if __name__ == "__main__":

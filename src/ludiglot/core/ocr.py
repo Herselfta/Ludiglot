@@ -284,28 +284,57 @@ class OCREngine:
                         result_container["lines"].append({"text": text.strip(), "conf": 0.92, "box": box})
                         continue
                     
-                    # 计算整行的边界框
-                    min_x, min_y = float('inf'), float('inf')
-                    max_x, max_y = 0, 0
+                    # 收集单词级别的坐标，检测独立元素
+                    word_list = []
                     for word in words:
+                        word_text = getattr(word, "text", "").strip()
                         rect = getattr(word, "bounding_rect", None)
-                        if rect:
-                            min_x = min(min_x, rect.x)
-                            min_y = min(min_y, rect.y)
-                            max_x = max(max_x, rect.x + rect.width)
-                            max_y = max(max_y, rect.y + rect.height)
+                        if not word_text or not rect:
+                            continue
+                        word_list.append({
+                            "text": word_text,
+                            "x": rect.x,
+                            "y": rect.y,
+                            "width": rect.width,
+                            "height": rect.height
+                        })
                     
-                    if min_x != float('inf'):
+                    if not word_list:
+                        box = [[0, 0], [100, 0], [100, 30], [0, 30]]
+                        result_container["lines"].append({"text": text.strip(), "conf": 0.92, "box": box})
+                        continue
+                    
+                    # 检测独立元素（X间距过大）
+                    groups = []
+                    current_group = [word_list[0]]
+                    
+                    for i in range(1, len(word_list)):
+                        prev_word = word_list[i-1]
+                        curr_word = word_list[i]
+                        # 计算间距
+                        gap = curr_word["x"] - (prev_word["x"] + prev_word["width"])
+                        # 如果间距 > 50px，认为是独立元素
+                        if gap > 50:
+                            groups.append(current_group)
+                            current_group = [curr_word]
+                        else:
+                            current_group.append(curr_word)
+                    groups.append(current_group)
+                    
+                    # 每组输出一个条目
+                    for group in groups:
+                        group_text = " ".join([w["text"] for w in group])
+                        min_x = min(w["x"] for w in group)
+                        min_y = min(w["y"] for w in group)
+                        max_x = max(w["x"] + w["width"] for w in group)
+                        max_y = max(w["y"] + w["height"] for w in group)
                         box = [
                             [int(min_x), int(min_y)],
                             [int(max_x), int(min_y)],
                             [int(max_x), int(max_y)],
                             [int(min_x), int(max_y)],
                         ]
-                    else:
-                        box = [[0, 0], [100, 0], [100, 30], [0, 30]]
-                    
-                    result_container["lines"].append({"text": text.strip(), "conf": 0.92, "box": box})
+                        result_container["lines"].append({"text": group_text, "conf": 0.92, "box": box})
                     
             except Exception as e:
                 result_container["error"] = f"{e.__class__.__name__}: {str(e)[:100]}"
@@ -701,6 +730,7 @@ def group_ocr_lines(box_lines: List[Dict[str, object]]) -> List[Tuple[str, float
     智能分组策略：
     1. 基本分行：按y坐标中心距离判断是否同一行
     2. 对话模式：识别"标题+多行内容"模式，自动合并对话行
+    3. 二次分割：按冒号、特殊符号等分隔符进一步拆分
     """
     items: List[Dict[str, object]] = []
     for item in box_lines:
@@ -756,76 +786,223 @@ def group_ocr_lines(box_lines: List[Dict[str, object]]) -> List[Tuple[str, float
     initial_output: List[Tuple[str, float, bool]] = []  # (text, conf, is_title_like)
     for line in lines:
         line.sort(key=lambda x: cast(float, x["x1"]))
-        tokens = [str(t["text"]) for t in line]
-        confs = [float(t["conf"]) for t in line]
-        text = " ".join(tokens)
-        # 简单清理标点空格
-        for punct in [",", ".", "!", "?", ";", ":"]:
-            text = text.replace(f" {punct}", punct)
-        avg_conf = sum(confs) / max(len(confs), 1)
         
-        # 判断是否为标题行（短文本，通常是角色名或任务名）
-        word_count = len(text.split())
-        char_count = len(text)
-        # 检查是否为内容性标点（排除缩写中的句号，如 Ms., Dr., Mr.）
-        # 内容的特征：
-        # 1. 包含句内标点（逗号、问号、叹号、冒号）
-        # 2. 以句号结尾（任何以句号结尾的都视为句子片段，包括"Solution.", "immediately."等）
-        stripped = text.rstrip()
-        ends_with_period = stripped.endswith('.')
-        has_sentence_punct = any(ch in text for ch in [',', '!', '?', ':'])
+        # 检查是否需要拆分同一行的元素
+        # 如果X坐标间距过大，说明是独立的标签/元素
+        line_items = []
+        for i, item in enumerate(line):
+            if i == 0:
+                line_items.append([item])
+            else:
+                prev_item = line[i-1]
+                # 计算X间距
+                gap = cast(float, item["x1"]) - (cast(float, prev_item["x1"]) + 100)  # 假设元素宽度~100px
+                # 如果间距 > 40px，认为是独立元素
+                if gap > 40:
+                    line_items.append([item])
+                else:
+                    line_items[-1].append(item)
         
-        # 判断为句子/内容的条件：有标点符号
-        is_likely_sentence = has_sentence_punct or ends_with_period
-        
-        # 标题特征：短文本（≤3词 且 ≤30字符）且 无句子标点
-        # 允许缩写（Ms. Voss, Dr. Smith）因为它们不会以句号结尾单独成行
-        is_title = word_count <= 3 and char_count <= 30 and not is_likely_sentence
-        
-        initial_output.append((text, avg_conf, is_title))
+        # 对每组独立元素分别处理
+        for item_group in line_items:
+            tokens = [str(t["text"]) for t in item_group]
+            confs = [float(t["conf"]) for t in item_group]
+            # 保留Y坐标和高度信息
+            y_coords = [float(t["y1"]) for t in item_group]
+            heights = [float(t["h"]) for t in item_group]
+            group_y = sum(y_coords) / len(y_coords)
+            group_h = sum(heights) / len(heights)
+            
+            text = " ".join(tokens)
+            # 简单清理标点空格
+            for punct in [",", ".", "!", "?", ";", ":"]:
+                text = text.replace(f" {punct}", punct)
+            avg_conf = sum(confs) / max(len(confs), 1)
+            
+            # 判断是否为标题行（短文本，通常是角色名或任务名）
+            word_count = len(text.split())
+            char_count = len(text)
+            # 检查是否为内容性标点（排除缩写中的句号，如 Ms., Dr., Mr.）
+            # 内容的特征：
+            # 1. 包含句内标点（逗号、问号、叹号、冒号）
+            # 2. 以句号结尾（任何以句号结尾的都视为句子片段，包括"Solution.", "immediately."等）
+            stripped = text.rstrip()
+            ends_with_period = stripped.endswith('.')
+            has_sentence_punct = any(ch in text for ch in [',', '!', '?'])
+            # 末尾冒号不算句子标点（可能是标题格式 "Title: Subtitle"）
+            has_trailing_colon = text.strip().endswith(':')
+            
+            # 判断为句子/内容的条件：有标点符号（但末尾冒号除外）
+            is_likely_sentence = has_sentence_punct or (ends_with_period and not has_trailing_colon)
+            
+            # 标题特征：短文本（≤3词 且 ≤30字符）且 无句子标点
+            # 允许末尾冒号（如 "Event Title:"）
+            is_title = word_count <= 3 and char_count <= 30 and not is_likely_sentence
+            
+            initial_output.append((text, avg_conf, is_title, group_y, group_h))
     
-    # 智能合并：检测"标题+内容"模式
-    # 如果第一行是标题，且后续行不是标题，则将后续行合并为一个段落
+    # 智能合并：识别并合并段落
+    # 策略：连续的短标题保持独立，连续的长文本合并为段落
+    # 重要：检测Y坐标间隔，分离不连续的段落
     final_output: List[Tuple[str, float]] = []
     
-    if len(initial_output) >= 2:
-        first_text, first_conf, first_is_title = initial_output[0]
-        rest_items = initial_output[1:]
-        
-        # 检查是否为"标题+对话"模式
-        # 条件：第一行是标题，且后续至少有1行非标题内容
-        rest_non_titles = [item for item in rest_items if not item[2]]
-        
-        if first_is_title and len(rest_non_titles) >= 1:
-            # 保留标题作为独立行
-            final_output.append((first_text, first_conf))
+    if len(initial_output) >= 1:
+        # 扫描并分组：标题组 vs 内容组
+        i = 0
+        while i < len(initial_output):
+            text, conf, is_title, y, h = initial_output[i]
             
-            # 合并所有后续非标题行为对话内容
-            dialog_texts = []
-            dialog_confs = []
-            for text, conf, is_title in rest_items:
-                if not is_title:  # 只合并对话行
-                    dialog_texts.append(text)
-                    dialog_confs.append(conf)
-                else:  # 如果遇到新的标题，单独输出
-                    if dialog_texts:
-                        merged_dialog = " ".join(dialog_texts)
-                        avg_dialog_conf = sum(dialog_confs) / len(dialog_confs)
-                        final_output.append((merged_dialog, avg_dialog_conf))
-                        dialog_texts = []
-                        dialog_confs = []
-                    final_output.append((text, conf))
-            
-            # 输出剩余的对话
-            if dialog_texts:
-                merged_dialog = " ".join(dialog_texts)
-                avg_dialog_conf = sum(dialog_confs) / len(dialog_confs)
-                final_output.append((merged_dialog, avg_dialog_conf))
-        else:
-            # 非"标题+对话"模式，保持原有分行
-            final_output = [(text, conf) for text, conf, _ in initial_output]
+            if is_title:
+                # 短标题行：检查下一行是否也是标题
+                title_group = [initial_output[i]]
+                i += 1
+                # 最多合并2个连续的短标题（如：标题第1行 + 标题第2行）
+                if i < len(initial_output) and initial_output[i][2] and len(title_group) < 2:
+                    title_group.append(initial_output[i])
+                    i += 1
+                
+                # 输出标题（如果是2行，用空格连接）
+                if len(title_group) == 1:
+                    final_output.append((title_group[0][0], title_group[0][1]))
+                else:
+                    # 合并2行标题
+                    merged_title = " ".join([t[0] for t in title_group])
+                    avg_conf = sum(t[1] for t in title_group) / len(title_group)
+                    final_output.append((merged_title, avg_conf))
+            else:
+                # 长内容行：收集连续且Y坐标紧密的非标题行
+                content_group = [initial_output[i]]
+                prev_y_bottom = y + h  # 当前行的底部Y坐标
+                prev_h = h
+                i += 1
+                
+                while i < len(initial_output) and not initial_output[i][2]:
+                    next_text, next_conf, next_is_title, next_y, next_h = initial_output[i]
+                    # 计算Y间隔
+                    y_gap = next_y - prev_y_bottom
+                    
+                    # 检测段落分隔的两种情况：
+                    # 1. Y间隔 > 1.5倍行高（视觉分段）
+                    # 2. 前一行以句号结尾 且 Y间隔 > 0.5倍行高（语义分段）
+                    prev_text = content_group[-1][0]
+                    is_visual_gap = y_gap > prev_h * 1.5
+                    is_semantic_gap = prev_text.rstrip().endswith('.') and y_gap > prev_h * 0.5
+                    
+                    if is_visual_gap or is_semantic_gap:
+                        break  # 停止合并，开始新段落
+                    content_group.append(initial_output[i])
+                    prev_y_bottom = next_y + next_h
+                    prev_h = next_h
+                    i += 1
+                
+                # 合并当前段落
+                merged_content = " ".join([t[0] for t in content_group])
+                avg_conf = sum(t[1] for t in content_group) / len(content_group)
+                final_output.append((merged_content, avg_conf))
     else:
-        # 只有一行或没有行，直接输出
-        final_output = [(text, conf) for text, conf, _ in initial_output]
+        final_output = [(text, conf) for text, conf, _, _, _ in initial_output]
     
-    return final_output
+    # 二次分割：处理混合条目（如 "Event Duration: Permanent"）
+    # 按冒号分割，但只分割明确的“标签：值”格式
+    split_output: List[Tuple[str, float]] = []
+    
+    # 常见的游戏术语/状态词（都是独立概念）
+    common_game_terms = {
+        'permanent', 'temporary', 'exploration', 'event', 'duration',
+        'active', 'inactive', 'available', 'unavailable', 'complete',
+        'incomplete', 'locked', 'unlocked', 'new', 'ongoing',
+        'recurring', 'combat', 'leisure', 'challenge', 'remaining'
+    }
+    
+    # 常见的标签关键词（冒号前面的部分）
+    label_keywords = {
+        'event', 'duration', 'time', 'remaining', 'status', 'type',
+        'level', 'rank', 'tier', 'phase', 'stage', 'mode'
+    }
+    
+    for text, conf in final_output:
+        # 1. 检测冒号分隔（仅分割明确的标签：值格式）
+        if ':' in text:
+            parts = text.split(':', 1)
+            if len(parts) == 2:
+                before = parts[0].strip()
+                after = parts[1].strip()
+                before_words = len(before.split())
+                after_words = len(after.split())
+                
+                # 检查是否是标签：值格式
+                # 条件：1) 冒号前是1-3个词，2) 冒号前包含标签关键词，3) 冒号后是1-5个词
+                is_label_format = (
+                    1 <= before_words <= 3 and
+                    1 <= after_words <= 5 and
+                    any(keyword in before.lower() for keyword in label_keywords)
+                )
+                
+                if is_label_format:
+                    # 标签：值格式 → 分割
+                    split_output.append((before, conf))
+                    
+                    # 如果值部分的第一个词是术语，单独输出
+                    after_words_list = after.split()
+                    if after_words_list and after_words_list[0].lower() in common_game_terms:
+                        split_output.append((after_words_list[0], conf))
+                        if len(after_words_list) > 1:
+                            rest = ' '.join(after_words_list[1:])
+                            split_output.append((rest, conf))
+                    else:
+                        split_output.append((after, conf))
+                    continue
+        
+        # 2. 检测特殊符号分隔（如 "Permanent * Leisure"，星号是图标）
+        if any(sep in text for sep in ['*', '|', '•', '◆', '★']):
+            # 按这些符号分割
+            import re
+            parts = re.split(r'\s*[*|•◆★]\s*', text)
+            parts = [p.strip() for p in parts if p.strip()]
+            if len(parts) >= 2:
+                # 不直接输出，而是将每个part放入待处理队列，继续检测
+                # 这样可以处理 "Rekindled Duel Permanent * Leisure" → ["Rekindled Duel", "Permanent", "Leisure"]
+                for part in parts:
+                    # 检查这个part是否需要进一步分割（标题+标签组合）
+                    part_words = part.split()
+                    if len(part_words) >= 2 and not any(ch in part for ch in [',', '.', '!', '?', ':']):
+                        last_word = part_words[-1]
+                        if last_word.lower() in common_game_terms and last_word[0].isupper():
+                            # 分离最后的术语词
+                            title_part = ' '.join(part_words[:-1])
+                            split_output.append((title_part, conf))
+                            split_output.append((last_word, conf))
+                            continue
+                    # 否则直接输出
+                    split_output.append((part, conf))
+                continue
+        
+        # 3. 检测"标题 + 标签"组合（如 "Rekindled Duel Permanent"）
+        # 策略：最后一个词如果是常见术语，将其单独分离
+        words = text.split()
+        if len(words) >= 2 and not any(ch in text for ch in [',', '.', '!', '?', ':']):
+            last_word = words[-1]
+            if last_word.lower() in common_game_terms and last_word[0].isupper():
+                # 最后一词是标签术语 → 分离
+                title_part = ' '.join(words[:-1])
+                split_output.append((title_part, conf))
+                split_output.append((last_word, conf))
+                continue
+        
+        # 4. 检测空格分隔的多个术语（如 "Permanent Exploration"）
+        # 只有当所有词都是常见游戏术语时才完全分割
+        if len(words) == 2 and not any(ch in text for ch in [',', '.', '!', '?', ':']):
+            all_capitalized = all(w[0].isupper() for w in words if w)
+            both_common = all(w.lower() in common_game_terms for w in words)
+            
+            if all_capitalized and both_common:
+                # 两个都是常见术语 → 完全分割
+                for word in words:
+                    split_output.append((word, conf))
+                continue
+        
+        # 默认保持不分割
+        split_output.append((text, conf))
+    
+    return split_output
+

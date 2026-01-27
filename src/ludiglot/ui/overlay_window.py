@@ -1135,7 +1135,7 @@ class OverlayWindow(QMainWindow):
         progress.show()
         
         # 启动更新线程
-        self.update_thread = DatabaseUpdateThread(self.config.data_root, self.config.db_path)
+        self.update_thread = DatabaseUpdateThread(self._config_path, self.config.db_path)
         
         def on_progress(msg: str):
             progress.setLabelText(msg)
@@ -1913,8 +1913,110 @@ class OverlayWindow(QMainWindow):
         if not line_info:
             return None
         
+        # 检测多独立条目：如果有多行且每行都有较好的独立匹配，返回多条目
+        multi_items = []
+        
+        for idx, line in enumerate(line_info):
+            cleaned = line['cleaned']
+            
+            # 检测是否为时间格式（如 "8d 8h", "3h 45m", "2d" 等）
+            import re
+            time_pattern = r'^\d+[dhms](\s+\d+[dhms])*$'
+            is_time_format = bool(re.match(time_pattern, cleaned.lower().strip()))
+            
+            if is_time_format:
+                # 时间数字附加到上一个条目
+                if multi_items:
+                    multi_items[-1]['time_suffix'] = cleaned
+                    self.signals.log.emit(f"[FILTER] 时间格式附加到上一条目: {cleaned}")
+                else:
+                    self.signals.log.emit(f"[FILTER] 时间格式但无前置条目，跳过: {cleaned}")
+                continue
+            
+            # 跳过纯数字行
+            digit_ratio = sum(ch.isdigit() for ch in cleaned) / max(len(cleaned), 1)
+            if digit_ratio > 0.8:  # 纯数字
+                self.signals.log.emit(f"[FILTER] 跳过纯数字行: {cleaned} (digit_ratio={digit_ratio:.2f})")
+                continue
+            
+            # 检查是否有高质量的独立匹配
+            matched_key = line['result'].get('_matched_key', '') if isinstance(line['result'], dict) else ''
+            key_len = len(line['key'])
+            matched_len = len(matched_key)
+            
+            # 检测特殊字符污染（如 Bésides, we' e 包含特殊字符）
+            import re
+            special_char_count = len(re.findall(r'[^\w\s\-]', cleaned))  # 非字母数字空格连字符
+            special_char_ratio = special_char_count / max(len(cleaned), 1)
+            has_special_pollution = special_char_ratio > 0.15  # 超过15%特殊字符视为污染
+            
+            # 高质量匹配标准：
+            # 1. 分数足够高 (>0.75) 且无特殊字符污染 或
+            # 2. 匹配长度相近（50%-200%范围）且分数中等 (>0.55)
+            # 3. 长文本（>50字符）且分数>0.60（提高长文本阈值避免误匹配）
+            # 4. 短文本（<15字符）需要更高分数 (>0.85) 避免误匹配
+            is_high_score = line['score'] >= 0.75 and not has_special_pollution
+            is_length_match = matched_len >= key_len * 0.5 and matched_len <= key_len * 2.0
+            is_long_text = key_len > 50 and line['score'] >= 0.60  # 长文本也需要较高分数
+            is_short_text_strict = key_len < 15 and line['score'] >= 0.85  # 短文本严格要求
+            is_good_match = is_high_score or (is_length_match and line['score'] >= 0.55) or is_long_text or is_short_text_strict
+            
+            if has_special_pollution and line['score'] < 0.85:
+                self.signals.log.emit(f"[FILTER] 跳过特殊字符污染: {cleaned} (special_ratio={special_char_ratio:.2f}, score={line['score']:.3f})")
+                continue
+            
+            if is_good_match:
+                multi_items.append(line)
+                self.signals.log.emit(f"[FILTER] 保留条目: {cleaned} (score={line['score']:.3f}, len={key_len})")
+            else:
+                self.signals.log.emit(f"[FILTER] 跳过低质量匹配: {cleaned} (score={line['score']:.3f}, matched_len={matched_len}, key_len={key_len})")
+        
+        # 如果有3+个独立的高质量匹配，返回多条目模式
+        if len(multi_items) >= 3:
+            self.signals.log.emit(f"[MATCH] 检测到 {len(multi_items)} 个独立条目")
+            items = []
+            for line in multi_items:
+                matches = line['result'].get("matches") if isinstance(line['result'], dict) else None
+                match = matches[0] if matches else {}
+                
+                # 获取官方原文和译文，如果有时间后缀则直接附加
+                official_en = match.get("official_en") or ""
+                official_cn = match.get("official_cn") or ""
+                time_suffix = line.get('time_suffix')
+                if time_suffix:
+                    # 如果原文末尾是冒号，直接附加时间；否则用空格隔开
+                    if official_en:
+                        if official_en.rstrip().endswith(':'):
+                            official_en = f"{official_en} {time_suffix}"
+                        else:
+                            official_en = f"{official_en}: {time_suffix}"
+                    if official_cn:
+                        if official_cn.rstrip().endswith('：'):
+                            official_cn = f"{official_cn}{time_suffix}"
+                        else:
+                            official_cn = f"{official_cn}：{time_suffix}"
+                
+                items.append({
+                    "ocr": line['cleaned'],
+                    "query_key": line['key'],
+                    "score": round(line['score'], 3),
+                    "text_key": match.get("text_key"),
+                    "official_en": official_en,
+                    "official_cn": official_cn,
+                })
+            return {
+                "_multi": True,
+                "items": items,
+                # 使用官方原文而非OCR文本或query_key
+                "_official_en": " / ".join([i.get("official_en") or i.get("ocr") or "" for i in items if i.get("official_en") or i.get("ocr")]),
+                "_official_cn": " / ".join([i.get("official_cn") or "" for i in items if i.get("official_cn")]),
+                "_query_key": " / ".join([i["query_key"] for i in items if i.get("query_key")]),
+                "_ocr_text": " / ".join([i["ocr"] for i in items if i.get("ocr")]),
+            }
+        
         # 智能分段：检测混合内容（第一行是标题，后续行是长文本）
-        if len(line_info) >= 2:
+        # 只在没有多个独立匹配时使用，避免误判
+        if len(line_info) >= 2 and len(multi_items) < 3:
             first_line = line_info[0]
             rest_lines = line_info[1:]
             
@@ -2166,16 +2268,21 @@ class OverlayWindow(QMainWindow):
 
             # 1.5.3 被包含匹配 (库文本包含了 OCR 内容 - **部分截屏核心场景**)
             # 用户场景：截取了极长文本的一部分 → 应匹配包含该部分的完整库文本
-            contain_hits = [k for k in self.db.keys() if key in k]  # 移除长度限制，允许匹配任意长度
-            if contain_hits:
-                # 优先选择最短的包含项（最精确的匹配）
-                best_contain = min(contain_hits, key=len)
-                result = dict(self.db.get(best_contain, {}))
-                result["_matched_key"] = best_contain
-                self.signals.log.emit(
-                    f"[MATCH] 部分截屏匹配成功：query_len={len(key)}, matched_len={len(best_contain)}"
-                )
-                return result, 0.98
+            # 限制条件：只对足够长的查询启用（避免短文本误匹配）
+            # 例如："Signs of a Silent Star" (20字符) 不应该匹配到包含它的长描述文本
+            if len(key) >= 50:  # 只对50+字符的查询启用被包含匹配
+                contain_hits = [k for k in self.db.keys() if key in k]
+                if contain_hits:
+                    # 优先选择最短的包含项（最精确的匹配）
+                    best_contain = min(contain_hits, key=len)
+                    # 额外检查：匹配项不应该太长（避免误匹配到无关长文本）
+                    if len(best_contain) <= len(key) * 3:
+                        result = dict(self.db.get(best_contain, {}))
+                        result["_matched_key"] = best_contain
+                        self.signals.log.emit(
+                            f"[MATCH] 部分截屏匹配成功：query_len={len(key)}, matched_len={len(best_contain)}"
+                        )
+                        return result, 0.98
             
             # 1.5.4 长查询松散匹配（处理文本版本差异）
             # 场景：OCR识别"标题+描述"拆分后，或数据库/游戏文本版本不一致
@@ -2218,7 +2325,30 @@ class OverlayWindow(QMainWindow):
             return result, score
 
         key_len = len(key)
-        # 2. 长度过滤候选集，显著加速大批量模糊搜索
+        
+        # 2. 短查询优先精确匹配策略
+        # 对于短文本（<20字符），优先在长度接近的条目中查找，避免误匹配到长条目
+        if key_len < 20:
+            # 严格的长度过滤：±40%
+            min_len = int(key_len * 0.6)
+            max_len = int(key_len * 1.4)
+            strict_candidates = [k for k in self.db.keys() if min_len <= len(k) <= max_len]
+            
+            if strict_candidates:
+                hit = process.extractOne(key, strict_candidates, scorer=fuzz.ratio)
+                if hit:
+                    best_item, fuzzy_score, _ = hit
+                    score = fuzzy_score / 100.0
+                    # 如果在严格范围内找到高分匹配，直接返回
+                    if score >= 0.85:
+                        result = dict(self.db.get(str(best_item), {}))
+                        result["_matched_key"] = str(best_item)
+                        self.signals.log.emit(
+                            f"[MATCH] 短查询精确匹配：query_len={key_len}, matched_len={len(best_item)}, score={score:.3f}"
+                        )
+                        return result, float(score)
+        
+        # 3. 常规长度过滤候选集
         min_len = int(key_len * 0.5)
         max_len = int(key_len * 1.5)
         candidates = [k for k in self.db.keys() if min_len <= len(k) <= max_len]
@@ -2268,35 +2398,72 @@ class OverlayWindow(QMainWindow):
         return not text_key.startswith(prefixes)
 
     def _show_result(self, result: Dict[str, Any]) -> None:
-        self.last_match = result
-        self.last_hash = None
-        self.last_event_name = None
-        if result.get("_multi"):
-            items = result.get("items", [])
-            left = []
-            right = []
-            for item in items:
-                ocr = item.get("ocr") or ""
-                cn = item.get("official_cn") or item.get("text_key") or ""
-                if ocr:
-                    left.append(ocr)
-                if cn:
-                    right.append(cn)
-                self.signals.log.emit(
-                    f"[ITEM] {ocr} -> {item.get('text_key')} (score={item.get('score')})"
-                )
-            self.source_label.setPlainText(" / ".join(left))
-            self.cn_label.setPlainText("\n".join(right) if right else "（未找到中文匹配）")
-            self._last_en_raw = " / ".join(left)
-            self._last_cn_raw = "\n".join(right) if right else "（未找到中文匹配）"
-            self._last_en_is_html = False
-            self._last_cn_is_html = False
-            self.signals.log.emit(f"[QUERY] {result.get('_ocr_text')} -> {result.get('_query_key')}")
-            self.play_btn.setEnabled(False)
-            self.stop_btn.setEnabled(False)
-            self.show()
-            self.raise_()
-            self.activateWindow()
+        try:
+            self.last_match = result
+            self.last_hash = None
+            self.last_event_name = None
+            if result.get("_multi"):
+                items = result.get("items", [])
+                left = []
+                right = []
+                for item in items:
+                    # 使用数据库官方原文，如果不存在则fallback到OCR
+                    en = item.get("official_en") or item.get("ocr") or ""
+                    cn = item.get("official_cn") or item.get("text_key") or ""
+                    if en:
+                        left.append(en)
+                    if cn:
+                        right.append(cn)
+                    self.signals.log.emit(
+                        f"[ITEM] {item.get('ocr')} -> {item.get('text_key')} (score={item.get('score')})"
+                    )
+                # 使用换行分隔多个条目，检测是否包含HTML标签
+                en_joined = "\n".join(left)
+                cn_joined = "\n".join(right) if right else "（未找到中文匹配）"
+                
+                self.signals.log.emit("[WINDOW] 设置文本内容")
+                # 检测英文文本是否包含HTML标签
+                if '<' in en_joined and '>' in en_joined or '【' in en_joined:
+                    html_en = self._convert_game_html(en_joined, lang="en")
+                    self.source_label.setHtml(html_en)
+                    self._last_en_is_html = True
+                else:
+                    self.source_label.setPlainText(en_joined)
+                    self._last_en_is_html = False
+                self._last_en_raw = en_joined
+                
+                # 检测中文文本是否包含HTML标签
+                if '<' in cn_joined and '>' in cn_joined or '【' in cn_joined:
+                    html_cn = self._convert_game_html(cn_joined, lang="cn")
+                    self.cn_label.setHtml(html_cn)
+                    self._last_cn_is_html = True
+                else:
+                    self.cn_label.setPlainText(cn_joined)
+                    self._last_cn_is_html = False
+                self._last_cn_raw = cn_joined
+                
+                # 显示官方原文而非OCR文本
+                official_en = result.get('_official_en') or result.get('_ocr_text') or ''
+                official_cn = result.get('_official_cn') or ''
+                self.signals.log.emit(f"[MATCH] 官方原文: {official_en}")
+                self.signals.log.emit(f"[MATCH] 官方译文: {official_cn}")
+                self.signals.log.emit(f"[QUERY] OCR识别: {result.get('_ocr_text')} -> {result.get('_query_key')}")
+                self.signals.log.emit("[WINDOW] 禁用音频控件（多条目模式）")
+                # 多条目模式不支持音频播放
+                self.play_pause_btn.setEnabled(False)
+                self.audio_slider.setEnabled(False)
+                self.signals.log.emit("[WINDOW] 准备显示多条目结果")
+                self.show()
+                self.signals.log.emit("[WINDOW] 已调用show()")
+                self.raise_()
+                self.signals.log.emit("[WINDOW] 已调用raise_()")
+                self.activateWindow()
+                self.signals.log.emit("[WINDOW] 窗口激活完成")
+                return
+        except Exception as e:
+            self.signals.error.emit(f"显示结果失败: {e}")
+            import traceback
+            self.signals.log.emit(f"[ERROR] {traceback.format_exc()}")
             return
         query_key = result.get("_query_key", "")
         score = result.get("_score")
@@ -2533,23 +2700,35 @@ class OverlayWindow(QMainWindow):
             for name in strategy.build_names(text_key, None):
                 candidates.append((name, strategy.hash_name(name)))
 
-        # 去重并保持顺序
+        # 去重并保持顺序，优先女声
         seen_pair: set[str] = set()
         dedup: list[tuple[str, int]] = []
+        female_candidates: list[tuple[str, int]] = []  # 女声候选（_f后缀）
+        other_candidates: list[tuple[str, int]] = []   # 其他候选
+        
         for name, h in candidates:
             key = f"{name}::{h}"
             if key in seen_pair:
                 continue
             seen_pair.add(key)
-            dedup.append((name, h))
-        candidates = dedup
+            # 检测性别后缀
+            name_lower = name.lower()
+            if '_f_' in name_lower or name_lower.endswith('_f'):
+                female_candidates.append((name, h))
+            else:
+                other_candidates.append((name, h))
+        
+        # 女声优先
+        candidates = female_candidates + other_candidates
+        
         seen_hash: set[int] = set()
         for name, hash_value in candidates:
             if hash_value in seen_hash:
                 continue
             seen_hash.add(hash_value)
             if self.audio_index.find(hash_value):
-                self.signals.log.emit(f"[VOICE] 命中: {name} -> {hash_value}")
+                gender_tag = "[女]" if ('_f_' in name.lower() or name.lower().endswith('_f')) else ""
+                self.signals.log.emit(f"[VOICE] 命中{gender_tag}: {name} -> {hash_value}")
                 self.last_event_name = name
                 return hash_value
         if candidates:

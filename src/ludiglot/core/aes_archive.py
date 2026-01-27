@@ -1,0 +1,169 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+import re
+from typing import Iterable, List
+
+
+_VERSION_RE = re.compile(r"^##\s+([0-9]+(?:\.[0-9]+)*)\s*(\([^\n]+\))?")
+_TABLE_ROW_RE = re.compile(r"^\|(.+)\|$")
+_PAKCHUNK_RE = re.compile(r"pakchunk[-_]?([0-9]+)", re.IGNORECASE)
+
+
+@dataclass(frozen=True)
+class AesKeyEntry:
+    version_label: str
+    version_number: str
+    pak_name: str
+    aes_key: str
+    os: str
+    server: str
+
+
+@dataclass(frozen=True)
+class AesSelection:
+    version_label: str
+    os: str
+    server: str
+    keys: list[AesKeyEntry]
+
+
+def _normalize_os(value: str) -> str:
+    value = value.strip()
+    if not value:
+        return value
+    low = value.lower()
+    if "windows" in low:
+        return "Windows"
+    if "android" in low:
+        return "Android"
+    if "ios" in low:
+        return "iOS"
+    return value
+
+
+def _normalize_server(value: str) -> list[str]:
+    value = value.strip().upper()
+    if not value:
+        return []
+    if "CN" in value and "OS" in value:
+        return ["CN", "OS"]
+    if "CN" in value:
+        return ["CN"]
+    if "OS" in value:
+        return ["OS"]
+    return [value]
+
+
+def _clean_pak_name(raw: str) -> str:
+    raw = raw.strip()
+    if not raw:
+        return raw
+    if "(" in raw:
+        raw = raw.split("(", 1)[0].strip()
+    return raw
+
+
+def _parse_table_row(line: str) -> list[str] | None:
+    match = _TABLE_ROW_RE.match(line.strip())
+    if not match:
+        return None
+    cols = [c.strip() for c in match.group(1).split("|")]
+    if len(cols) < 4:
+        return None
+    return cols
+
+
+def parse_aes_archive(text: str) -> list[AesKeyEntry]:
+    entries: list[AesKeyEntry] = []
+    current_label = ""
+    current_version = ""
+    for raw_line in text.splitlines():
+        line = raw_line.rstrip()
+        version_match = _VERSION_RE.match(line)
+        if version_match:
+            current_version = version_match.group(1)
+            tail = version_match.group(2) or ""
+            current_label = f"{current_version} {tail}".strip()
+            continue
+        row = _parse_table_row(line)
+        if not row:
+            continue
+        if any("PAK" in c.upper() for c in row[:2]) and any("AES" in c.upper() for c in row[:2]):
+            continue
+        if set(c.strip("-: ") for c in row[:4]) == {""}:
+            continue
+        pak_name = _clean_pak_name(row[0])
+        aes_key = row[1].strip()
+        os_name = _normalize_os(row[2])
+        servers = _normalize_server(row[3])
+        if not current_version or not current_label:
+            continue
+        if not pak_name or not aes_key or aes_key.upper() == "TBD":
+            continue
+        if not os_name or not servers:
+            continue
+        for server in servers:
+            entries.append(
+                AesKeyEntry(
+                    version_label=current_label,
+                    version_number=current_version,
+                    pak_name=pak_name,
+                    aes_key=aes_key,
+                    os=os_name,
+                    server=server,
+                )
+            )
+    return entries
+
+
+def list_versions(entries: Iterable[AesKeyEntry]) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for entry in entries:
+        if entry.version_label in seen:
+            continue
+        seen.add(entry.version_label)
+        ordered.append(entry.version_label)
+    return ordered
+
+
+def _pakchunk_id(pak_name: str) -> int | None:
+    match = _PAKCHUNK_RE.search(pak_name)
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except Exception:
+        return None
+
+
+def select_keys(
+    entries: Iterable[AesKeyEntry],
+    version: str,
+    os_name: str,
+    server: str,
+    max_chunks: int = 2,
+) -> AesSelection:
+    filtered: list[AesKeyEntry] = []
+    for entry in entries:
+        if entry.os != os_name:
+            continue
+        if entry.server != server:
+            continue
+        if version not in (entry.version_label, entry.version_number):
+            if not entry.version_label.startswith(version):
+                continue
+        filtered.append(entry)
+
+    main_entries = [e for e in filtered if e.pak_name.lower() == "main"]
+    chunk_entries = [e for e in filtered if _pakchunk_id(e.pak_name) is not None]
+    chunk_entries.sort(key=lambda e: _pakchunk_id(e.pak_name) or -1, reverse=True)
+
+    selected: list[AesKeyEntry] = []
+    if main_entries:
+        selected.append(main_entries[0])
+    selected.extend(chunk_entries[:max_chunks])
+
+    label = main_entries[0].version_label if main_entries else (filtered[0].version_label if filtered else version)
+    return AesSelection(version_label=label, os=os_name, server=server, keys=selected)

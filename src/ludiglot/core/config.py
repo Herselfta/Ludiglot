@@ -15,6 +15,18 @@ class AppConfig:
     zh_json: Path
     db_path: Path
     image_path: Path
+    use_game_paks: bool = False
+    game_install_root: Path | None = None
+    game_pak_root: Path | None = None
+    game_data_root: Path | None = None
+    game_audio_root: Path | None = None
+    game_platform: str | None = None
+    game_server: str | None = None
+    game_version: str | None = None
+    game_languages: list[str] | None = None
+    game_audio_languages: list[str] | None = None
+    aes_archive_url: str | None = None
+    extract_audio: bool | None = None
     auto_rebuild_db: bool = True
     min_db_entries: int = 1000
     ocr_lang: str = "en"
@@ -28,6 +40,7 @@ class AppConfig:
     audio_txtp_cache: Path | None = None
     vgmstream_path: Path | None = None
     wwiser_path: Path | None = None
+    fmodel_root: Path | None = None
     audio_cache_max_mb: int = 2048
     scan_audio_on_start: bool = True
     play_audio: bool = False
@@ -60,6 +73,22 @@ def load_config(path: Path) -> AppConfig:
 
     data_root = resolve_path(raw.get("data_root"))
     db_path = resolve_path(raw.get("db_path"))
+
+    use_game_paks = bool(raw.get("use_game_paks", False))
+    game_install_root = resolve_path(raw.get("game_install_root"))
+    game_pak_root = resolve_path(raw.get("game_pak_root"))
+    game_data_root = resolve_path(raw.get("game_data_root"))
+    game_audio_root = resolve_path(raw.get("game_audio_root"))
+    game_platform = raw.get("game_platform")
+    game_server = raw.get("game_server")
+    game_version = raw.get("game_version")
+    game_languages = raw.get("game_languages")
+    game_audio_languages = raw.get("game_audio_languages")
+    aes_archive_url = raw.get("aes_archive_url")
+    extract_audio = raw.get("extract_audio")
+    if extract_audio is None:
+        extract_audio = raw.get("extract_game_audio")
+
     
     # 智能探测数据库文件（如果配置的路径不存在）
     if db_path and not db_path.exists():
@@ -77,7 +106,7 @@ def load_config(path: Path) -> AppConfig:
     has_db = db_path and db_path.exists()
     
     # 修改逻辑：只有在真正需要 data_root 的时候才报错
-    if data_root and not data_root.exists():
+    if data_root and not data_root.exists() and not use_game_paks:
         # 需要 data_root 的两种情况：1. 明确要求重建 2. 没有 DB 需要生成
         if auto_rebuild or not has_db:
              # 如果用户已经设置了 false 但还是进来了，说明是 has_db 为 false
@@ -97,7 +126,7 @@ def load_config(path: Path) -> AppConfig:
     zh_json = raw.get("zh_json")
     
     # 只有在需要重建或者没有 DB 的时候，才强制要求 MultiText 路径
-    if (not has_db or auto_rebuild) and (not en_json or not zh_json) and data_root:
+    if (not has_db or auto_rebuild) and (not en_json or not zh_json) and data_root and data_root.exists():
         try:
             resolved_en, resolved_zh = find_multitext_paths(data_root)
             en_json = en_json or str(resolved_en)
@@ -110,7 +139,7 @@ def load_config(path: Path) -> AppConfig:
     zh_json_path = resolve_path(zh_json)
     
     # 最终验证：要么有数据库，要么有源数据
-    if not has_db and (not en_json_path or not zh_json_path):
+    if not has_db and (not en_json_path or not zh_json_path) and not use_game_paks:
          raise ValueError("配置中缺少数据库文件 (db_path) 且无法通过 data_root 构建。请至少提供其中之一。")
 
     ocr_mode = raw.get("ocr_mode")
@@ -125,7 +154,25 @@ def load_config(path: Path) -> AppConfig:
     
     vgmstream_path = resolve_path(raw.get("vgmstream_path"))
     wwiser_path = resolve_path(raw.get("wwiser_path"))
+    fmodel_root = resolve_path(raw.get("fmodel_root"))
     
+    # 智能探测 vgmstream_path
+    if vgmstream_path is None or not vgmstream_path.exists():
+        # 1. 尝试从项目内置 tools 找
+        candidate = project_root / "tools" / "vgmstream" / "vgmstream-cli.exe"
+        if candidate.exists():
+            vgmstream_path = candidate
+        # 2. 尝试从 fmodel_root 探测 (FModel/Output/.data/vgmstream/vgmstream-cli.exe)
+        elif fmodel_root:
+            fmodel_vgm = fmodel_root / ".data" / "vgmstream" / "vgmstream-cli.exe"
+            if fmodel_vgm.exists():
+                vgmstream_path = fmodel_vgm
+            else:
+                # 兼容不同层级
+                fmodel_vgm = fmodel_root / "Output" / ".data" / "vgmstream" / "vgmstream-cli.exe"
+                if fmodel_vgm.exists():
+                    vgmstream_path = fmodel_vgm
+
     if audio_cache_path and audio_cache_index_path is None:
         audio_cache_index_path = audio_cache_path / "audio_index.json"
     if audio_cache_path and audio_txtp_cache is None:
@@ -149,6 +196,18 @@ def load_config(path: Path) -> AppConfig:
             
     font_en = raw.get("font_en", "Source Han Serif SC, 思源宋体, serif")
     font_cn = raw.get("font_cn", "Source Han Serif SC, 思源宋体, serif")
+
+    if game_data_root is None:
+        game_data_root = project_root / "data" / "GameData"
+    if game_audio_root is None:
+        game_audio_root = project_root / "data" / "GameAudio"
+
+    if isinstance(game_languages, str):
+        game_languages = [item.strip() for item in game_languages.split(",") if item.strip()]
+    if isinstance(game_audio_languages, str):
+        game_audio_languages = [item.strip() for item in game_audio_languages.split(",") if item.strip()]
+    if isinstance(unrealpak_extra_args := raw.get("unrealpak_extra_args"), str):
+        unrealpak_extra_args = [item.strip() for item in unrealpak_extra_args.split(" ") if item.strip()]
     
     return AppConfig(
         data_root=data_root,
@@ -156,6 +215,18 @@ def load_config(path: Path) -> AppConfig:
         zh_json=zh_json_path,
         db_path=resolve_path(raw.get("db_path", "game_text_db.json")) or project_root / "game_text_db.json",
         image_path=resolve_path(raw.get("image_path")) or project_root / "cache/capture.png",
+        use_game_paks=use_game_paks,
+        game_install_root=game_install_root,
+        game_pak_root=game_pak_root,
+        game_data_root=game_data_root,
+        game_audio_root=game_audio_root,
+        game_platform=game_platform,
+        game_server=game_server,
+        game_version=game_version,
+        game_languages=game_languages,
+        game_audio_languages=game_audio_languages,
+        aes_archive_url=aes_archive_url,
+        extract_audio=bool(extract_audio) if extract_audio is not None else None,
         auto_rebuild_db=bool(raw.get("auto_rebuild_db", True)),
         min_db_entries=int(raw.get("min_db_entries", 1000)),
         ocr_lang=raw.get("ocr_lang", "en"),
@@ -169,6 +240,7 @@ def load_config(path: Path) -> AppConfig:
         audio_txtp_cache=audio_txtp_cache,
         vgmstream_path=vgmstream_path,
         wwiser_path=wwiser_path,
+        fmodel_root=fmodel_root,
         audio_cache_max_mb=int(raw.get("audio_cache_max_mb", 2048)),
         scan_audio_on_start=bool(raw.get("scan_audio_on_start", True)),
         play_audio=bool(raw.get("play_audio", False)),

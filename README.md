@@ -48,7 +48,9 @@
 
 1. **环境准备**：确保安装了 Python 3.10+。
 2. **克隆项目**：`git clone ...`
-3. **放置数据**：将 `WutheringData` 放入 `data/` 目录。
+3. **放置数据**：
+	- 推荐：运行 `python -m ludiglot pak-update` 从本地游戏 Pak 解包数据。
+	- 兼容：将 `WutheringData` 放入 `data/` 目录。
 4. **运行脚本**：执行 `.\run.ps1` (PowerShell) 或 `run.bat` (CMD)。
 
 *详见 **[快速开始指南](docs/usage/quick-start.md)** 获取完整步骤。*
@@ -74,7 +76,8 @@ Ludiglot/
 欢迎所有形式的贡献！无论是 Bug 提交还是特性提案。
 
 - 核心框架：[PyQt6](https://www.riverbankcomputing.com/software/pyqt/)
-- 数据来源：[Dimbreath/WutheringData](https://github.com/Dimbreath/WutheringData)
+- 资源提取：[FModelCLI](https://github.com/Herselfta/FModelCLI) (基于 [FModel](https://github.com/4sval/FModel) / [CUE4Parse](https://github.com/FabianFG/CUE4Parse))
+- 数据来源：[Dimbreath/WutheringData](https://github.com/Dimbreath/WutheringData) / [ClostroOffi/wuwa-aes-archive](https://github.com/ClostroOffi/wuwa-aes-archive)
 - 工具组件：`vgmstream`, `wwiser`, `PaddleOCR`
 
 ---

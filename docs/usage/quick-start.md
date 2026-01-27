@@ -10,6 +10,8 @@
 2.  **Python 3.10+**：项目运行环境。([下载 Python](https://www.python.org/downloads/))
     *   *安装时请勾选 "Add Python to PATH"*
 
+> **注意**：Pak 解包器采用自包含发布，用户无需安装 .NET SDK。（开发者首次构建时需要 .NET 8 SDK）
+
 ## 📥 2. 获取项目
 
 打开 PowerShell 或终端，执行以下命令：
@@ -19,8 +21,13 @@
 git clone https://github.com/yourusername/Ludiglot.git
 cd Ludiglot
 
-# 2. 准备数据目录 (推荐直接克隆 WutheringData)
-# 注意：此仓库约 200MB，包含游戏文本和映射数据
+# 2. 准备数据目录（二选一）
+# A) 推荐：从本地游戏 Pak 解包
+#    运行完成后会自动生成 data/GameData 与数据库
+python -m ludiglot pak-update --config config/settings.json
+
+# B) 兼容旧流程：直接克隆 WutheringData
+#    注意：此仓库约 200MB，包含游戏文本和映射数据
 git clone https://github.com/Dimbreath/WutheringData.git data/WutheringData
 ```
 
@@ -48,11 +55,16 @@ git clone https://github.com/Dimbreath/WutheringData.git data/WutheringData
 默认配置如下：
 ```json
 {
-  "data_root": "data/WutheringData",
+  "use_game_paks": true,
+  "game_install_root": "D:/Games/Wuthering Waves",
+  "pak_extractor": "cue4parse",
+  "data_root": "data/GameData",
   "ocr_mode": "auto",
   "play_audio": true
 }
 ```
+
+> **✨ 智能探测**：如果你填写了 `fmodel_root`，Ludiglot 会自动找到 FModel 内部自带的音频解码工具，无需手动下载。
 
 ## ▶️ 5. 启动程序
 
@@ -81,4 +93,4 @@ A: Windows 原生 OCR 需要系统安装对应的语言包。
 *   确保已安装 **英语(美国)** 和 **中文(简体)**。
 
 **Q: 如何更新数据？**
-A: 进入 `data/WutheringData` 目录并运行 `git pull`，或者在程序托盘图标右键菜单中点击 "Update Database"。
+A: 推荐运行 `python -m ludiglot pak-update --config config/settings.json`，也可在托盘菜单点击 "Update Database"。
