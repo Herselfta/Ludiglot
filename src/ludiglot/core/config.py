@@ -159,9 +159,15 @@ def load_config(path: Path) -> AppConfig:
     # 智能探测 vgmstream_path
     if vgmstream_path is None or not vgmstream_path.exists():
         # 1. 尝试从项目内置 tools 找
-        candidate = project_root / "tools" / "vgmstream" / "vgmstream-cli.exe"
+        # 1. 优先尝试 FModelCLI 自动维护的 .data 目录
+        candidate = project_root / "tools" / ".data" / "vgmstream-cli.exe"
         if candidate.exists():
             vgmstream_path = candidate
+        else:
+            # 2. 兼容旧的独立目录 (如果尚未删除)
+            legacy_candidate = project_root / "tools" / "vgmstream" / "vgmstream-cli.exe"
+            if legacy_candidate.exists():
+                vgmstream_path = legacy_candidate
         # 2. 尝试从 fmodel_root 探测 (FModel/Output/.data/vgmstream/vgmstream-cli.exe)
         elif fmodel_root:
             fmodel_vgm = fmodel_root / ".data" / "vgmstream" / "vgmstream-cli.exe"

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
 from ludiglot.adapters.wuthering_waves.audio_strategy import WutheringAudioStrategy
@@ -213,9 +214,15 @@ def _check_and_setup_game_data(config_path: Path) -> bool:
     if not (cfg.use_game_paks or cfg.game_install_root or cfg.game_pak_root):
         return True
 
-    data_root = cfg.game_data_root or cfg.data_root
-    if data_root and _is_wuthering_data_valid(data_root):
-        return True
+    # 检查 Pak 解包数据是否存在
+    data_root = cfg.data_root
+    if data_root:
+        data_root = Path(data_root).resolve()
+        # 检查关键目录是否存在
+        configdb = data_root / "ConfigDB"
+        if configdb.exists() and any(configdb.iterdir()):
+            # ConfigDB 存在且非空，认为数据就绪
+            return True
 
     if not sys.stdin.isatty():
         print("\n⚠️  Pak 模式已启用，但数据缺失。请运行 ludiglot pak-update 更新数据。")
@@ -299,15 +306,35 @@ def cmd_hash(args: argparse.Namespace) -> None:
 
 def cmd_search(args: argparse.Namespace) -> None:
     db = _load_db(Path(args.db))
-    query = normalize_en(args.query)
+    query_raw = args.query.lower()
+    query_norm = normalize_en(args.query)
 
-    if query in db:
-        print(json.dumps(db[query], ensure_ascii=False, indent=2))
+    if query_norm in db:
+        print(f"Match found for key: {query_norm}")
+        print(json.dumps(db[query_norm], ensure_ascii=False, indent=2))
+        return
+
+    # 内容匹配 (CN/EN)
+    hits = []
+    for k, v in db.items():
+        found = False
+        for m in v.get("matches", []):
+            if query_raw in m.get("official_en", "").lower() or query_raw in m.get("official_cn", "").lower():
+                hits.append((k, m))
+                found = True
+                break # 每一组只出一个
+        if len(hits) >= 10: break
+
+    if hits:
+        print(f"Found {len(hits)} content matches:")
+        for k, m in hits:
+            print(f"\n[Key: {k}]")
+            print(json.dumps(m, ensure_ascii=False, indent=2))
         return
 
     searcher = FuzzySearcher()
-    best, score = searcher.search(query, db.keys())
-    print(f"Best match: {best}  score={score:.3f}")
+    best, score = searcher.search(query_norm, db.keys())
+    print(f"Best key match: {best}  score={score:.3f}")
     print(json.dumps(db.get(best, {}), ensure_ascii=False, indent=2))
 
 
@@ -351,17 +378,34 @@ def _ensure_audio_for_hash(
     vgmstream_path: Path | None,
     hash_value: int,
     audio_index: AudioCacheIndex | None = None,
+    event_name: str | None = None,
 ) -> Path | None:
     audio_path = _find_audio(cache_dir, hash_value)
     if audio_path is not None:
         return audio_path
     if wem_root is None or vgmstream_path is None:
         return None
+        
+    # 1. Try finding by Hash in wem_root (Media/zh)
     wem_path = find_wem_by_hash(wem_root, hash_value)
+    
+    # 2. Fallback: Try finding by Event Name in WwiseExternalSource
+    if wem_path is None and event_name:
+        # Assuming wem_root is .../Media/zh, go up to .../WwiseExternalSource
+        ext_root = wem_root.parents[1] / "WwiseExternalSource"
+        if ext_root.exists():
+            # Try multiple patterns
+            for pat in [f"*{event_name}*.wem", f"zh_{event_name}*.wem"]:
+                matches = list(ext_root.rglob(pat))
+                if matches:
+                    wem_path = matches[0]
+                    break
+    
     if wem_path is None:
         return None
+        
     try:
-        audio_path = convert_single_wem_to_wav(wem_path, vgmstream_path, cache_dir)
+        audio_path = convert_single_wem_to_wav(wem_path, vgmstream_path, cache_dir, output_name=str(hash_value))
     except Exception:
         return None
     if audio_index is not None:
@@ -595,19 +639,19 @@ def _play_audio_for_key(
                 cfg.audio_wem_root,
                 cfg.vgmstream_path,
                 h,
-                audio_index=index
+                audio_index=index,
+                event_name=name,
             )
-            
+    
         # 3. 如果还是没有，尝试通过 BNK Event 提取
-        if audio_path is None and cfg.audio_bnk_root and cfg.audio_txtp_cache and wwiser_path:
-            # 使用当前 candidate 作为 event_name 尝试
+        if audio_path is None and cfg.audio_bnk_root and cfg.audio_txtp_cache and cfg.wwiser_path:
             audio_path = _ensure_audio_for_event(
                 cfg.audio_cache_path,
                 cfg.audio_wem_root,
                 cfg.audio_bnk_root,
                 cfg.audio_txtp_cache,
                 cfg.vgmstream_path,
-                wwiser_path,
+                cfg.wwiser_path,
                 h,
                 name,
                 audio_index=index

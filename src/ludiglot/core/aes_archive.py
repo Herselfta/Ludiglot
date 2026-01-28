@@ -145,16 +145,34 @@ def select_keys(
     server: str,
     max_chunks: int = 2,
 ) -> AesSelection:
+    # First, filter by OS and server
+    all_entries = [e for e in entries if e.os == os_name and e.server == server]
+    
+    # If no version specified, find the latest version
+    if not version:
+        # Get unique versions in order of appearance (newest last in MD file)
+        versions_seen: list[str] = []
+        for e in all_entries:
+            if e.version_label not in versions_seen:
+                versions_seen.append(e.version_label)
+        # Pick the last one (newest) that's NOT a beta
+        latest = None
+        for v in reversed(versions_seen):
+            if "(Beta)" not in v and "(UNKNOWN)" not in v:
+                latest = v
+                break
+        # If all are beta, just use the last one
+        if not latest and versions_seen:
+            latest = versions_seen[-1]
+        version = latest or ""
+    
+    # Filter by version
     filtered: list[AesKeyEntry] = []
-    for entry in entries:
-        if entry.os != os_name:
-            continue
-        if entry.server != server:
-            continue
-        if version not in (entry.version_label, entry.version_number):
-            if not entry.version_label.startswith(version):
-                continue
-        filtered.append(entry)
+    for entry in all_entries:
+        if version in (entry.version_label, entry.version_number):
+            filtered.append(entry)
+        elif entry.version_label.startswith(version):
+            filtered.append(entry)
 
     main_entries = [e for e in filtered if e.pak_name.lower() == "main"]
     chunk_entries = [e for e in filtered if _pakchunk_id(e.pak_name) is not None]
@@ -167,3 +185,4 @@ def select_keys(
 
     label = main_entries[0].version_label if main_entries else (filtered[0].version_label if filtered else version)
     return AesSelection(version_label=label, os=os_name, server=server, keys=selected)
+

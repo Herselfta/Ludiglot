@@ -18,7 +18,8 @@ class ConvertResult:
 
 def default_vgmstream_path() -> Path:
     root = Path(__file__).resolve().parents[3]
-    return root / "tools" / "vgmstream" / "vgmstream-cli.exe"
+    # FModelCLI 自动将 vgmstream 安装到 tools/.data 目录中
+    return root / "tools" / ".data" / "vgmstream-cli.exe"
 
 
 def default_wwiser_path() -> Path:

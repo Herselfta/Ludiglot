@@ -213,24 +213,34 @@ def update_from_game_paks(cfg, config_path: Path, output_db_path: Path, progress
     for key in selection.keys:
         _log(progress, f"[PAK] AES: {key.pak_name} -> {key.aes_key[:10]}...")
 
-    pak_root = cfg.game_pak_root
-    if pak_root is None and cfg.game_install_root:
-        pak_root = cfg.game_install_root / "Client" / "Content" / "Paks"
-    if pak_root is None or not pak_root.exists():
+    # The root directory for all PAK files.
+    # Use the game install root to find paks in Saved/Resources as well.
+    pak_root = cfg.game_install_root
+    if not pak_root:
         if _is_tty():
-            raw = input("请输入游戏 Paks 目录 (例如 .../Client/Content/Paks): ").strip().strip('"')
+            raw = input("请输入游戏安装目录 (例如 .../Wuthering Waves Game): ").strip().strip('"')
             if raw:
                 pak_root = Path(raw)
-        if pak_root is None or not pak_root.exists():
-            raise GamePakUpdateError("找不到游戏 Paks 目录，请设置 game_pak_root")
+        if not pak_root:
+            raise GamePakUpdateError("找不到游戏安装目录，请设置 game_install_root")
+
+    pak_root = Path(pak_root)
+    if not pak_root.exists():
+        raise GamePakUpdateError(f"游戏安装目录不存在: {pak_root}")
+
+    _log(progress, f"[PAK] 游戏根目录: {pak_root}")
 
     # FModelCLI is now the only supported extraction method
     _log(progress, f"[PAK] Paks 目录: {pak_root}")
 
-    data_root = cfg.game_data_root or cfg.data_root
-    if data_root is None:
-        raise GamePakUpdateError("缺少 game_data_root/data_root 配置")
-    data_root = data_root.resolve()
+    # data_root 应该指向项目根目录下的 data/ 目录
+    # 这样解包后的结构是 data/ConfigDB, data/TextMap, data/WwiseAudio_Generated
+    if cfg.data_root:
+        data_root = Path(cfg.data_root).resolve()
+    else:
+        # Fallback to default
+        data_root = Path(__file__).parents[3] / "data"
+        
     data_root.mkdir(parents=True, exist_ok=True)
 
     # 语言探测 (目前 FModelCLI 不支持列表语言，跳过自动探测)
@@ -274,40 +284,46 @@ def update_from_game_paks(cfg, config_path: Path, output_db_path: Path, progress
         filter_str = f"TextMap/{lang}"
         native_extractor.run_extraction(pak_root, keys_str, data_root, filter_str)
 
-    # Audio Extraction (if requested, per audio language)
+    # Audio Extraction (if requested)
     if options.extract_audio:
         audio_root = cfg.game_audio_root or (data_root / "Audio")
         audio_root.mkdir(parents=True, exist_ok=True)
+        
         for audio_lang in options.audio_languages:
-            _log(progress, f"[PAK] 正在提取 WwiseAudio/{audio_lang} ...")
-            # Wwise audio uses short lang codes like "zh", "en", "ja"
-            filter_str = f"WwiseAudio_Generated/Media/{audio_lang}"
-            native_extractor.run_extraction(pak_root, keys_str, audio_root, filter_str)
-            # Also extract Event banks
-            filter_str = f"WwiseAudio_Generated/Event/{audio_lang}"
-            native_extractor.run_extraction(pak_root, keys_str, audio_root, filter_str)
+            _log(progress, f"[PAK] 正在提取语音资源 ({audio_lang}) ...")
+            
+            # 1. Localized Event/Media folders (from your FModel screenshot)
+            # Filter matches parts of the path, e.g. "Event/zh"
+            native_extractor.run_extraction(pak_root, keys_str, audio_root, f"Event/{audio_lang}/")
+            native_extractor.run_extraction(pak_root, keys_str, audio_root, f"Media/{audio_lang}/")
+            
+            # 2. External Source with prefix (e.g. zh_...)
+            native_extractor.run_extraction(pak_root, keys_str, audio_root, f"WwiseExternalSource/{audio_lang}_")
+            
         _log(progress, f"[PAK] 语音资源输出: {audio_root}")
 
     # 整理目录结构：将解包出来的深层目录移动到 data_root 根目录下
-    staged_configdb = data_root / "Client" / "Content" / "Aki" / "ConfigDB"
-    staged_textmap = data_root / "Client" / "Content" / "Aki" / "TextMap"
+    staged_root = data_root / "Client" / "Content" / "Aki"
     
-    if staged_configdb.exists():
-        target = data_root / "ConfigDB"
-        if target.exists():
-            shutil.rmtree(target, ignore_errors=True)
-        shutil.move(str(staged_configdb), str(target))
-        _log(progress, f"[PAK] 已同步 ConfigDB 到 {target}")
-
-    if staged_textmap.exists():
-        target = data_root / "TextMap"
-        if target.exists():
-            shutil.rmtree(target, ignore_errors=True)
-        shutil.move(str(staged_textmap), str(target))
-        _log(progress, f"[PAK] 已同步 TextMap 到 {target}")
+    # 需要移动的文件夹列表
+    to_move = ["ConfigDB", "TextMap", "WwiseAudio_Generated"]
+    
+    for folder in to_move:
+        # Check staged text or audio folders
+        src = staged_root / folder
+        if not src.exists():
+             src = (data_root / "Audio" / "Client" / "Content" / "Aki" / folder)
+            
+        if src.exists():
+            target = data_root / folder
+            if target.exists():
+                shutil.rmtree(target, ignore_errors=True)
+            shutil.move(str(src), str(target))
+            _log(progress, f"[PAK] 已同步 {folder} 到 {target}")
 
     # 清理多余的嵌套目录
     shutil.rmtree(data_root / "Client", ignore_errors=True)
+    shutil.rmtree(data_root / "Audio", ignore_errors=True)
 
 
     # 更新配置文件
@@ -325,8 +341,8 @@ def update_from_game_paks(cfg, config_path: Path, output_db_path: Path, progress
         if options.extract_audio:
             audio_root = cfg.game_audio_root or (data_root / "Audio")
             media_lang = options.audio_languages[0] if options.audio_languages else "zh"
-            raw["audio_wem_root"] = _to_rel_path(config_path, audio_root / "Client" / "Content" / "Aki" / "WwiseAudio_Generated" / "Media" / media_lang)
-            raw["audio_bnk_root"] = _to_rel_path(config_path, audio_root / "Client" / "Content" / "Aki" / "WwiseAudio_Generated" / "Event" / media_lang)
+            raw["audio_wem_root"] = _to_rel_path(config_path, data_root / "WwiseAudio_Generated" / "Media" / media_lang)
+            raw["audio_bnk_root"] = _to_rel_path(config_path, data_root / "WwiseAudio_Generated" / "Event" / media_lang)
         config_path.write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception:
         pass
