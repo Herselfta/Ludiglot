@@ -155,13 +155,24 @@ def convert_single_wem_to_wav(
     wem_path: Path,
     vgmstream_path: Path,
     output_dir: Path,
+    output_name: str | None = None,
 ) -> Path:
+    """Convert a single WEM file to WAV format.
+    
+    Args:
+        wem_path: Path to the WEM file
+        vgmstream_path: Path to vgmstream-cli.exe
+        output_dir: Directory to save the output WAV file
+        output_name: Optional custom output filename (without extension).
+                     If not provided, uses wem_path.stem
+    """
     if not wem_path.exists():
         raise FileNotFoundError(f"WEM 不存在: {wem_path}")
     if not vgmstream_path.exists():
         raise FileNotFoundError(f"vgmstream-cli.exe 不存在: {vgmstream_path}")
     output_dir.mkdir(parents=True, exist_ok=True)
-    out_path = output_dir / f"{wem_path.stem}.wav"
+    stem = output_name if output_name else wem_path.stem
+    out_path = output_dir / f"{stem}.wav"
     cmd = [str(vgmstream_path), "-o", str(out_path), str(wem_path)]
     subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     return out_path

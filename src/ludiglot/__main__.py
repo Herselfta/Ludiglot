@@ -386,13 +386,18 @@ def _ensure_audio_for_hash(
     if wem_root is None or vgmstream_path is None:
         return None
         
-    # 1. Try finding by Hash in wem_root (Media/zh)
+    # 1. Try finding by Hash in wem_root
     wem_path = find_wem_by_hash(wem_root, hash_value)
     
     # 2. Fallback: Try finding by Event Name in WwiseExternalSource
     if wem_path is None and event_name:
-        # Assuming wem_root is .../Media/zh, go up to .../WwiseExternalSource
-        ext_root = wem_root.parents[1] / "WwiseExternalSource"
+        # Check if wem_root is already WwiseExternalSource or if we need to navigate
+        if "WwiseExternalSource" in str(wem_root):
+            ext_root = wem_root
+        else:
+            # Assuming wem_root is .../Media/zh, go up to .../WwiseExternalSource
+            ext_root = wem_root.parents[1] / "WwiseExternalSource"
+        
         if ext_root.exists():
             # Try multiple patterns
             for pat in [f"*{event_name}*.wem", f"zh_{event_name}*.wem"]:

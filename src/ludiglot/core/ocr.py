@@ -7,6 +7,7 @@ import io
 from pathlib import Path
 from typing import Any, Dict, List, Tuple, Union, cast
 
+import re
 try:
     import numpy as np
     from PIL import Image
@@ -732,6 +733,7 @@ def group_ocr_lines(box_lines: List[Dict[str, object]]) -> List[Tuple[str, float
     2. 对话模式：识别"标题+多行内容"模式，自动合并对话行
     3. 二次分割：按冒号、特殊符号等分隔符进一步拆分
     """
+    import re
     items: List[Dict[str, object]] = []
     for item in box_lines:
         text = str(item.get("text", "")).strip()
@@ -752,7 +754,7 @@ def group_ocr_lines(box_lines: List[Dict[str, object]]) -> List[Tuple[str, float
         # 过滤过短且低置信的噪声
         if conf < 0.2 and len(text) < 4:
             continue
-        items.append({"text": text, "conf": conf, "x1": x1, "y1": y1, "cy": cy, "h": h})
+        items.append({"text": text, "conf": conf, "x1": x1, "x2": x2, "y1": y1, "cy": cy, "h": h})
 
     if not items:
         return []
@@ -768,11 +770,12 @@ def group_ocr_lines(box_lines: List[Dict[str, object]]) -> List[Tuple[str, float
             current_y = cast(float, item["cy"])
             current_h = cast(float, item["h"])
             continue
-        threshold = max(12.0, float(current_h) * 0.7)
+        # 更加宽松的分行阈值，允许一定程度的倾斜或基线不齐
+        threshold = max(15.0, float(current_h) * 0.8)
         if current_y is not None and abs(cast(float, item["cy"]) - current_y) <= threshold:
             current.append(item)
-            # 更新行中心
-            current_y = (current_y + cast(float, item["cy"])) / 2.0
+            # 缓慢平均行中心
+            current_y = (current_y * 2 + cast(float, item["cy"])) / 3.0
             current_h = max(float(current_h), cast(float, item["h"]))
         else:
             lines.append(current)
@@ -783,7 +786,7 @@ def group_ocr_lines(box_lines: List[Dict[str, object]]) -> List[Tuple[str, float
         lines.append(current)
 
     # 构建初步输出
-    initial_output: List[Tuple[str, float, bool]] = []  # (text, conf, is_title_like)
+    initial_output: List[Tuple[str, float, bool, float, float]] = []  # (text, conf, is_title, group_y, group_h)
     for line in lines:
         line.sort(key=lambda x: cast(float, x["x1"]))
         
@@ -795,10 +798,10 @@ def group_ocr_lines(box_lines: List[Dict[str, object]]) -> List[Tuple[str, float
                 line_items.append([item])
             else:
                 prev_item = line[i-1]
-                # 计算X间距
-                gap = cast(float, item["x1"]) - (cast(float, prev_item["x1"]) + 100)  # 假设元素宽度~100px
-                # 如果间距 > 40px，认为是独立元素
-                if gap > 40:
+                # 计算实际 X 间距
+                gap = cast(float, item["x1"]) - cast(float, prev_item["x2"])
+                # 如果间距 > 80px (或者行高的2倍)，认为是独立元素
+                if gap > max(80.0, cast(float, item["h"]) * 2.5):
                     line_items.append([item])
                 else:
                     line_items[-1].append(item)
@@ -837,68 +840,85 @@ def group_ocr_lines(box_lines: List[Dict[str, object]]) -> List[Tuple[str, float
             
             # 标题特征：短文本（≤3词 且 ≤30字符）且 无句子标点
             # 允许末尾冒号（如 "Event Title:"）
-            is_title = word_count <= 3 and char_count <= 30 and not is_likely_sentence
+            # 标题特征：极短文本（≤3词 且 ≤30字符）且 无句子结束标点
+            # 修正：如果内容全是小写或者是个残缺单词，不应视为标题
+            is_fragment = word_count == 1 and not text[0].isupper()
+            is_title = (word_count <= 3 and char_count <= 30 and not is_likely_sentence) and not is_fragment
             
             initial_output.append((text, avg_conf, is_title, group_y, group_h))
     
     # 智能合并：识别并合并段落
-    # 策略：连续的短标题保持独立，连续的长文本合并为段落
-    # 重要：检测Y坐标间隔，分离不连续的段落
     final_output: List[Tuple[str, float]] = []
     
     if len(initial_output) >= 1:
-        # 扫描并分组：标题组 vs 内容组
         i = 0
         while i < len(initial_output):
             text, conf, is_title, y, h = initial_output[i]
             
+            # 如果是标题，且后面紧跟着内容，尝试判断是否为"姓名: 对话"模式
             if is_title:
-                # 短标题行：检查下一行是否也是标题
-                title_group = [initial_output[i]]
-                i += 1
-                # 最多合并2个连续的短标题（如：标题第1行 + 标题第2行）
-                if i < len(initial_output) and initial_output[i][2] and len(title_group) < 2:
-                    title_group.append(initial_output[i])
-                    i += 1
+                # 检查是否应该与下一行合并（如果下一行是内容且间距极小）
+                can_merge_with_next = False
+                if i + 1 < len(initial_output):
+                    next_text, next_conf, next_is_title, next_y, next_h = initial_output[i+1]
+                    y_gap = next_y - (y + h)
+                    # 如果间距极小（< 0.5倍行高），且当前是短标题，可能是残卷或由于OCR导致的错误换行
+                    if y_gap < h * 0.5 and not next_is_title:
+                        can_merge_with_next = True
                 
-                # 输出标题（如果是2行，用空格连接）
-                if len(title_group) == 1:
-                    final_output.append((title_group[0][0], title_group[0][1]))
+                if can_merge_with_next:
+                    # 将标题和下一行合并（内容合并模式）
+                    is_title = False # 降级为内容，让下面的内容合并逻辑处理
                 else:
-                    # 合并2行标题
-                    merged_title = " ".join([t[0] for t in title_group])
-                    avg_conf = sum(t[1] for t in title_group) / len(title_group)
-                    final_output.append((merged_title, avg_conf))
-            else:
-                # 长内容行：收集连续且Y坐标紧密的非标题行
-                content_group = [initial_output[i]]
-                prev_y_bottom = y + h  # 当前行的底部Y坐标
-                prev_h = h
-                i += 1
-                
-                while i < len(initial_output) and not initial_output[i][2]:
-                    next_text, next_conf, next_is_title, next_y, next_h = initial_output[i]
-                    # 计算Y间隔
-                    y_gap = next_y - prev_y_bottom
-                    
-                    # 检测段落分隔的两种情况：
-                    # 1. Y间隔 > 1.5倍行高（视觉分段）
-                    # 2. 前一行以句号结尾 且 Y间隔 > 0.5倍行高（语义分段）
-                    prev_text = content_group[-1][0]
-                    is_visual_gap = y_gap > prev_h * 1.5
-                    is_semantic_gap = prev_text.rstrip().endswith('.') and y_gap > prev_h * 0.5
-                    
-                    if is_visual_gap or is_semantic_gap:
-                        break  # 停止合并，开始新段落
-                    content_group.append(initial_output[i])
-                    prev_y_bottom = next_y + next_h
-                    prev_h = next_h
+                    # 保持作为独立标题/姓名
+                    final_output.append((text, conf))
                     i += 1
+                    continue
+
+            # 内容合并逻辑
+            content_group = [initial_output[i]]
+            prev_y_bottom = y + h
+            prev_h = h
+            current_is_title = is_title
+            i += 1
+            
+            while i < len(initial_output):
+                n_text, n_conf, n_is_title, n_y, n_h = initial_output[i]
+                y_gap = n_y - prev_y_bottom
                 
-                # 合并当前段落
-                merged_content = " ".join([t[0] for t in content_group])
-                avg_conf = sum(t[1] for t in content_group) / len(content_group)
-                final_output.append((merged_content, avg_conf))
+                # 系统信息检测：纯数字、大量数字或超长数字段
+                digit_ratio = sum(c.isdigit() for c in n_text) / max(len(n_text), 1)
+                is_system_info = digit_ratio > 0.4 or re.search(r'\d{8,}', n_text)
+                
+                if is_system_info:
+                    break
+
+                # 合并条件：
+                # 1. 下一行不是标题
+                # 2. 或者 下一行是标题但间距极小且上一行没结束
+                should_merge = False
+                if not n_is_title:
+                    # 正常内容合并
+                    is_visual_gap = y_gap > prev_h * 1.6
+                    # 只要没结束且间距合理就合并
+                    if not is_visual_gap:
+                        should_merge = True
+                else:
+                    # 标题合并：只有在间距极小且上一行不是以句号结尾时才合并（处理OCR断词）
+                    if y_gap < prev_h * 0.4 and not content_group[-1][0].rstrip().endswith('.'):
+                        should_merge = True
+                
+                if not should_merge:
+                    break
+                    
+                content_group.append(initial_output[i])
+                prev_y_bottom = n_y + n_h
+                prev_h = n_h
+                i += 1
+            
+            merged_content = " ".join([t[0] for t in content_group])
+            avg_conf = sum(t[1] for t in content_group) / len(content_group)
+            final_output.append((merged_content, avg_conf))
     else:
         final_output = [(text, conf) for text, conf, _, _, _ in initial_output]
     

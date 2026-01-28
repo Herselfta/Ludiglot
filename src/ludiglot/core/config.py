@@ -168,8 +168,9 @@ def load_config(path: Path) -> AppConfig:
             legacy_candidate = project_root / "tools" / "vgmstream" / "vgmstream-cli.exe"
             if legacy_candidate.exists():
                 vgmstream_path = legacy_candidate
+            
         # 2. 尝试从 fmodel_root 探测 (FModel/Output/.data/vgmstream/vgmstream-cli.exe)
-        elif fmodel_root:
+        if (vgmstream_path is None or not vgmstream_path.exists()) and fmodel_root:
             fmodel_vgm = fmodel_root / ".data" / "vgmstream" / "vgmstream-cli.exe"
             if fmodel_vgm.exists():
                 vgmstream_path = fmodel_vgm
