@@ -2178,18 +2178,46 @@ class OverlayWindow(QMainWindow):
             word_bonus = min(word_count / 8.0, 1.0)
             weighted_score = score * (0.6 + 0.2 * length_bonus + 0.2 * word_bonus)
 
-            # 避免长文本误命中短条目
-            # 如果查询长度远大于匹配到的key长度，大幅降低分数
+            # 避免长文本误命中短条目 - 改进版
+            # 使用绝对长度差和比例相结合的方式判断
             if matched_key:
                 key_len = len(key)
                 matched_len = len(matched_key)
-                # 查询文本是匹配key的2倍以上，且匹配key很短
-                if key_len > matched_len * 2 and matched_len < 20:
-                    weighted_score *= 0.3  # 更严格的惩罚
-                    self.signals.log.emit(f"[MATCH] 长度不匹配惩罚: query_len={key_len}, matched_len={matched_len}")
-                # 即使相似度很高，长度差异也要惩罚
+                length_diff = abs(key_len - matched_len)
+                length_ratio = matched_len / max(key_len, 1)  # 匹配条目长度 / 查询长度
+                
+                # 场景1: 长查询(>25字符) 匹配到 短条目(<20字符) → 严重不匹配
+                if key_len > 25 and matched_len < 20:
+                    weighted_score *= 0.2  # 严厉惩罚
+                    self.signals.log.emit(f"[MATCH] 长查询匹配短条目惩罚: query_len={key_len}, matched_len={matched_len}, ratio={length_ratio:.2f}")
+                
+                # 场景2: 长度差异过大（>15字符 且 比例<0.6）
+                elif length_diff > 15 and length_ratio < 0.6:
+                    weighted_score *= 0.4
+                    self.signals.log.emit(f"[MATCH] 长度差异惩罚: diff={length_diff}, ratio={length_ratio:.2f}")
+                
+                # 场景3: 查询长度是匹配的2倍以上
+                elif key_len > matched_len * 2:
+                    weighted_score *= 0.5
+                    self.signals.log.emit(f"[MATCH] 长度比例惩罚: query_len={key_len}, matched_len={matched_len}")
+                
+                # 场景4: 轻度长度不匹配
                 elif key_len > matched_len * 1.5 and score < 0.97:
-                    weighted_score *= 0.7
+                    weighted_score *= 0.75
+            
+            # 新增：优先匹配有语音的条目（对话优先于任务名/角色名）
+            matches = result.get("matches") if isinstance(result, dict) else []
+            has_audio = False
+            if matches:
+                first_match = matches[0]
+                audio_hash = first_match.get("audio_hash")
+                audio_event = first_match.get("audio_event")
+                has_audio = bool(audio_hash or audio_event)
+            
+            # 如果有语音，给予加分（在相似度接近时优先选择有语音的条目）
+            if has_audio:
+                weighted_score *= 1.15  # 给有语音的条目加15%的权重
+                self.signals.log.emit(f"[MATCH] 语音条目加成: has_audio=True, weighted={weighted_score:.3f}")
             
             if weighted_score > best_score:
                 best_score = weighted_score

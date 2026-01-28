@@ -30,7 +30,8 @@ from ludiglot.adapters.wuthering_waves.audio_strategy import WutheringAudioStrat
 from ludiglot.core.audio_extract import find_wem_by_hash
 
 # Configure logging to file
-log_file = project_root / "cache" / "debug_run.log"
+log_file = project_root / "log" / "debug_run.log"
+log_file.parent.mkdir(parents=True, exist_ok=True)
 logging.basicConfig(
     level=logging.DEBUG, 
     format='[%(levelname)s] %(message)s',
@@ -60,6 +61,15 @@ def debug_pipeline():
     engine = OCREngine(lang=cfg.ocr_lang, use_gpu=cfg.ocr_gpu, mode=cfg.ocr_mode)
     
     box_lines = engine.recognize_with_boxes(image_path)
+    
+    # Log RAW OCR output before grouping
+    log(f"\nRAW OCR Output ({len(box_lines)} boxes):")
+    for i, box in enumerate(box_lines):
+        text = box.get("text", "")
+        conf = box.get("conf", 0.0)
+        box_coords = box.get("box", [])
+        log(f"  Box[{i}]: '{text}' (conf={conf:.2f}) coords={box_coords}")
+    
     lines = group_ocr_lines(box_lines)
     
     log(f"OCR Groups found: {len(lines)}")
