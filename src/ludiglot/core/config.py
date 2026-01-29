@@ -15,6 +15,7 @@ class AppConfig:
     zh_json: Path
     db_path: Path
     image_path: Path
+    fonts_root: Path | None = None
     use_game_paks: bool = False
     game_install_root: Path | None = None
     game_pak_root: Path | None = None
@@ -43,8 +44,9 @@ class AppConfig:
     fmodel_root: Path | None = None
     audio_cache_max_mb: int = 2048
     scan_audio_on_start: bool = True
-    play_audio: bool = False
-    capture_mode: str = "image"  # image | region | window | select
+    play_audio: bool = True
+    gender_preference: str = "female"  # "male" or "female"
+    capture_mode: str = "select"  # "window", "region", "fullscreen", "select"
     window_title: str | None = None
     capture_region: dict | None = None
     hotkey_capture: str = "ctrl+shift+o"
@@ -138,9 +140,12 @@ def load_config(path: Path) -> AppConfig:
     en_json_path = resolve_path(en_json)
     zh_json_path = resolve_path(zh_json)
     
-    # 最终验证：要么有数据库，要么有源数据
     if not has_db and (not en_json_path or not zh_json_path) and not use_game_paks:
          raise ValueError("配置中缺少数据库文件 (db_path) 且无法通过 data_root 构建。请至少提供其中之一。")
+
+    fonts_root = resolve_path(raw.get("fonts_root"))
+    if fonts_root is None:
+        fonts_root = (data_root or (project_root / "data")) / "Fonts"
 
     ocr_mode = raw.get("ocr_mode")
     if not ocr_mode:
@@ -190,11 +195,6 @@ def load_config(path: Path) -> AppConfig:
         candidate = audio_wem_root.parents[1] / "Event" / "zh"
         if candidate.exists():
             audio_bnk_root = candidate
-        else:
-            # 兼容旧逻辑
-            candidate = audio_wem_root / "Client" / "Content" / "Aki" / "WwiseAudio_Generated" / "Event" / "zh"
-            if candidate.exists():
-                audio_bnk_root = candidate
             
     if wwiser_path is None:
         candidate = project_root / "tools/wwiser.pyz"
@@ -207,7 +207,7 @@ def load_config(path: Path) -> AppConfig:
     if game_data_root is None:
         game_data_root = project_root / "data" / "GameData"
     if game_audio_root is None:
-        game_audio_root = project_root / "data" / "GameAudio"
+        game_audio_root = project_root / "data" / "WwiseAudio_Generated"
 
     if isinstance(game_languages, str):
         game_languages = [item.strip() for item in game_languages.split(",") if item.strip()]
@@ -222,6 +222,7 @@ def load_config(path: Path) -> AppConfig:
         zh_json=zh_json_path,
         db_path=resolve_path(raw.get("db_path", "game_text_db.json")) or project_root / "game_text_db.json",
         image_path=resolve_path(raw.get("image_path")) or project_root / "cache/capture.png",
+        fonts_root=fonts_root,
         use_game_paks=use_game_paks,
         game_install_root=game_install_root,
         game_pak_root=game_pak_root,

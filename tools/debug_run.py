@@ -23,7 +23,7 @@ from ludiglot.__main__ import (
     _find_audio,
     _play_audio_for_key,
     _get_voice_event_index,
-    _resolve_event_for_text_key,
+    _resolve_events_for_text_key,
     _ensure_audio_for_hash,
 )
 from ludiglot.adapters.wuthering_waves.audio_strategy import WutheringAudioStrategy
@@ -142,21 +142,23 @@ def debug_pipeline():
     
     # Show what the strategy would generate
     strategy = WutheringAudioStrategy()
-    event_from_db = audio_event or _resolve_event_for_text_key(text_key, cfg.data_root)
-    log(f"\nResolved Event: {event_from_db}")
+    events = _resolve_events_for_text_key(text_key, cfg)
+    log(f"\nResolved Events: {events}")
     
-    candidates = strategy.build_names(text_key, event_from_db)
-    log(f"Strategy candidates ({len(candidates)}):")
-    for i, name in enumerate(candidates[:15]):
-        h = strategy.hash_name(name)
-        log(f"  [{i}] {name} -> hash={h}")
-    if len(candidates) > 15:
-        log(f"  ... and {len(candidates) - 15} more")
+    candidates = []
+    if events:
+        main_event = events[0]
+        candidates = strategy.build_names(text_key, main_event)
+        log(f"Strategy candidates for '{main_event}' ({len(candidates)}):")
+        for i, name in enumerate(candidates[:10]):
+            h = strategy.hash_name(name)
+            log(f"  [{i}] {name} -> hash={h}")
     
     # Check voice event index
     event_index = _get_voice_event_index(cfg)
     if event_index:
-        extra = event_index.find_candidates(text_key, event_from_db, limit=8)
+        ref_event = events[0] if events else None
+        extra = event_index.find_candidates(text_key, ref_event, limit=8)
         log(f"\nVoice Event Index extra candidates: {extra}")
     else:
         log("\nVoice Event Index: Not available")

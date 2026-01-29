@@ -13,8 +13,4 @@ Welcome to the Ludiglot documentation. This project is organized following open-
 
 ## 🛠️ Development
 - [Contributing Guide](../CONTRIBUTING.md) - How to help us improve Ludiglot.
-- [Testing Guide](development/testing.md) - Instructions for running tests and verifying environments.
 - [Project Roadmap](development/roadmap.md) - Current progress and future plans.
-
-## 📜 History & Reports
-- [Archive](history/) - Historical fix reports, test results, and old planning documents.

@@ -457,9 +457,10 @@ def _ensure_audio_for_event(
     return audio_path
 def _resolve_hash_for_text_key(
     text_key: str,
-    data_root: Path | None,
+    cfg: AppConfig,
     audio_index: AudioCacheIndex | None,
 ) -> int | None:
+    data_root = cfg.data_root
     strategy = WutheringAudioStrategy()
     if data_root:
         plot_audio = load_plot_audio_map(data_root)
@@ -484,6 +485,17 @@ def _resolve_hash_for_text_key(
             if audio_index and audio_index.find(hash_value):
                 return hash_value
         if candidates:
+            # 同样应用性别筛选
+            pref = (cfg.gender_preference or "female").lower()
+            if pref == "female":
+                f_keywords = ["_f", "nvzhu", "roverf", "female"]
+                f_cands = [c for c in candidates if any(k in c[0].lower() for k in f_keywords)]
+                if f_cands: return f_cands[0][1]
+            elif pref == "male":
+                m_keywords = ["_m", "nanzhu", "roverm", "male"]
+                m_cands = [c for c in candidates if any(k in c[0].lower() for k in m_keywords)]
+                if m_cands: return m_cands[0][1]
+
             return candidates[0][1]
         return None
     return strategy.build_hash(text_key)
@@ -565,17 +577,10 @@ def load_plot_audio_map(data_root: Path) -> Dict[str, str]:
         return {}
 
 
-def _resolve_event_for_text_key(text_key: str, data_root: Path | None) -> str | None:
-    if not data_root:
-        return None
-    plot_audio = load_plot_audio_map(data_root)
-    voice_event = plot_audio.get(text_key)
-    if voice_event:
-        return voice_event
-    from ludiglot.core.voice_map import build_voice_map_from_configdb
-    voice_map = build_voice_map_from_configdb(data_root)
-    candidates = voice_map.get(text_key) or []
-    return candidates[0] if candidates else None
+from ludiglot.core.voice_map import (
+    build_voice_map_from_configdb,
+    _resolve_events_for_text_key
+)
 
 
 def _play_audio_for_key(
@@ -587,52 +592,60 @@ def _play_audio_for_key(
 ) -> bool:
     strategy = WutheringAudioStrategy()
     
-    # 确定初始事件名
-    event_from_db = audio_event or _resolve_event_for_text_key(text_key, cfg.data_root)
+    # 直接由解析器返回已经排序、去重、互换好的候选列表
+    final_events = _resolve_events_for_text_key(text_key, cfg)
+    if audio_event and audio_event not in final_events:
+        final_events.insert(0, audio_event)
+            
+    # 如果此时还是空的，尝试回退到猜测模式
+    if not final_events:
+        final_events = [None]  # 让 strategy.build_names 生成默认猜测
 
-    # 如果提供了 hash，优先尝试直接播放
-    if audio_hash is not None:
-        try:
-            h = int(audio_hash)
-            audio_path = (index.find(h) if index else None) or _find_audio(cfg.audio_cache_path, h)
-            if audio_path is None and cfg.audio_wem_root and cfg.vgmstream_path:
-                audio_path = _ensure_audio_for_hash(
-                    cfg.audio_cache_path,
-                    cfg.audio_wem_root,
-                    cfg.vgmstream_path,
-                    h,
-                    audio_index=index,
-                )
-            if audio_path:
-                AudioPlayer().play(str(audio_path))
-                return True
-        except Exception:
-            pass
+    # 后续播放逻辑...
+    wwiser_path = cfg.wwiser_path or default_wwiser_path()
     
-    # 获取所有候选 Hash 和名称映射
-    # build_names 已经按照优先级排好序了
-    candidates = strategy.build_names(text_key, event_from_db)
+    total_candidates = []
+    seen = set()
+    
+    for event_name in final_events:
+        for name in strategy.build_names(text_key, event_name):
+            if name not in seen:
+                total_candidates.append(name)
+                seen.add(name)
 
     # 从实际音频资源建立索引，补充候选事件名
     event_index = _get_voice_event_index(cfg)
     if event_index:
-        extra_candidates = event_index.find_candidates(text_key, event_from_db, limit=8)
-        for name in extra_candidates:
-            if name not in candidates:
-                candidates.append(name)
+        ref_event = next((e for e in final_events if e), None)
+        extra = event_index.find_candidates(text_key, ref_event, limit=8)
+        for name in extra:
+            if name not in seen:
+                total_candidates.append(name)
+                seen.add(name)
+    
+    # 终极全局排优：不仅是 Event 名，连生成的哈希名也必须符合性别偏好
+    pref = (cfg.gender_preference or "female").lower()
+    f_pats = ["_f_", "nvzhu", "roverf", "_female"]
+    m_pats = ["_m_", "nanzhu", "roverm", "_male"]
+    target_pats = f_pats if pref == "female" else m_pats
+    other_pats = m_pats if pref == "female" else f_pats
+
+    def final_priority(n):
+        nl = n.lower()
+        if any(w in nl for w in target_pats): return 0
+        if any(w in nl for w in other_pats): return 2
+        return 1
+
+    total_candidates.sort(key=final_priority)
+    
+    print(f"[AUDIO] 尝试播放 TextKey: {text_key}")
+    print(f"[AUDIO] 最终排序 (前2名): {total_candidates[:2]}")
     
     # 如果有明确传入的 hash，插入到最前面
     if audio_hash:
-        try:
-            h = int(audio_hash)
-            if h not in [strategy.hash_name(c) for c in candidates]:
-                # 这种情况下无法对应回 event_name，但可以尝试 wem 转换
-                pass 
-        except: pass
-
-    wwiser_path = cfg.wwiser_path or default_wwiser_path()
+        pass
     
-    for name in candidates:
+    for name in total_candidates:
         h = strategy.hash_name(name)
         # 1. 查缓存
         audio_path = (index.find(h) if index else None) or _find_audio(cfg.audio_cache_path, h)

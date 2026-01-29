@@ -47,7 +47,7 @@ from ludiglot.core.text_builder import (
     normalize_en,
     save_text_db,
 )
-from ludiglot.core.voice_map import build_voice_map_from_configdb
+from ludiglot.core.voice_map import build_voice_map_from_configdb, _resolve_events_for_text_key
 from ludiglot.core.voice_event_index import VoiceEventIndex
 
 
@@ -917,8 +917,8 @@ class OverlayWindow(QMainWindow):
         ]
         fonts.extend(default_fonts)
         
-        # 扫描data/fonts目录
-        font_dir = Path(__file__).resolve().parents[3] / "data" / "fonts"
+        # 扫描 Fonts 目录
+        font_dir = self.config.fonts_root
         if font_dir.exists():
             for font_file in font_dir.glob("*.[tT][tT][fF]"):
                 try:
@@ -2524,27 +2524,27 @@ class OverlayWindow(QMainWindow):
                 cn_text = f"<span style='color: #d4af37; font-weight: bold;'>{display_title}</span>\n{cn_text}"
                 self.signals.log.emit(f"[DISPLAY] 标题: {first_line} -> {display_title}, 内容: {text_key}")
 
-        if audio_event:
-            self.last_event_name = audio_event
-
-        if audio_hash:
-            try:
-                self.last_hash = int(audio_hash)
-            except Exception:
-                self.last_hash = None
-        if text_key and self.last_event_name is None:
-            candidates = self.voice_map.get(text_key) or []
-            if candidates:
-                self.last_event_name = candidates[0]
-        if text_key and self.last_hash is None:
-            if self._is_voice_eligible(text_key):
-                self.last_hash = self._resolve_audio_hash(text_key)
-                if self.last_hash is not None:
-                    self.signals.log.emit(f"[MATCH] text_key={text_key} hash={self.last_hash}")
-                else:
-                    self.signals.log.emit(f"[MATCH] text_key={text_key} 未找到对应音频")
+        # 音频识别逻辑优化：统一使用性别重排后的候选
+        if text_key:
+            events = _resolve_events_for_text_key(text_key, self.config)
+            if audio_event and audio_event not in events:
+                events.insert(0, audio_event)
+            
+            self.last_event_name = events[0] if events else audio_event
+            
+            # 优先通过事件列表解析哈希（会自动处理性别重排）
+            if self.last_hash is None and self._is_voice_eligible(text_key):
+                self.last_hash = self._resolve_audio_hash(text_key, events=events)
+            
+            # 如果解析失败，才尝试使用数据库中记录的原始哈希
+            if self.last_hash is None and audio_hash:
+                try: self.last_hash = int(audio_hash)
+                except: pass
+            
+            if self.last_hash:
+                self.signals.log.emit(f"[MATCH] text_key={text_key} hash={self.last_hash}")
             else:
-                self.signals.log.emit(f"[VOICE] 跳过非语音条目: {text_key}")
+                self.signals.log.emit(f"[MATCH] text_key={text_key} 未找到对应音频")
         
         # 显示数据库英文原文（保留HTML标记）
         if en_text:
@@ -2700,7 +2700,7 @@ class OverlayWindow(QMainWindow):
 '''
         return html
 
-    def _resolve_audio_hash(self, text_key: str) -> int | None:
+    def _resolve_audio_hash(self, text_key: str, events: list[str] | None = None) -> int | None:
         if not self.config.audio_cache_path:
             return None
         if self.audio_index is None:
@@ -2712,58 +2712,65 @@ class OverlayWindow(QMainWindow):
             self.audio_index.load()
             self.audio_index.scan()
         strategy = WutheringAudioStrategy()
-        voice_list = self.voice_map.get(text_key, [])
-        candidates: list[tuple[str, int]] = []
+        
+        # 确定候选事件源
+        voice_list = events if events is not None else (self.voice_map.get(text_key, []) or [None])
+        
+        total_names = []
+        seen = set()
 
+        # 1. 从事件生成基础候选
+        for voice in voice_list:
+            if voice:
+                for name in strategy.build_names(text_key, voice):
+                    if name not in seen:
+                        total_names.append(name)
+                        seen.add(name)
+
+        # 2. 从 VoiceIndex 补充候选
         if self.voice_event_index:
             seed_event = voice_list[0] if voice_list else None
             for name in self.voice_event_index.find_candidates(text_key, seed_event, limit=8):
-                candidates.append((name, strategy.hash_name(name)))
-
-        if voice_list:
-            for voice in voice_list:
-                for name in strategy.build_names(text_key, voice):
-                    candidates.append((name, strategy.hash_name(name)))
-        else:
+                if name not in seen:
+                    total_names.append(name)
+                    seen.add(name)
+        
+        # 3. 如果没找到事件，尝试兜底猜测
+        if not total_names:
             for name in strategy.build_names(text_key, None):
-                candidates.append((name, strategy.hash_name(name)))
+                if name not in seen:
+                    total_names.append(name)
+                    seen.add(name)
 
-        # 去重并保持顺序，优先女声
-        seen_pair: set[str] = set()
-        dedup: list[tuple[str, int]] = []
-        female_candidates: list[tuple[str, int]] = []  # 女声候选（_f后缀）
-        other_candidates: list[tuple[str, int]] = []   # 其他候选
-        
-        for name, h in candidates:
-            key = f"{name}::{h}"
-            if key in seen_pair:
-                continue
-            seen_pair.add(key)
-            # 检测性别后缀
-            name_lower = name.lower()
-            if '_f_' in name_lower or name_lower.endswith('_f'):
-                female_candidates.append((name, h))
-            else:
-                other_candidates.append((name, h))
-        
-        # 女声优先
-        candidates = female_candidates + other_candidates
-        
-        seen_hash: set[int] = set()
-        for name, hash_value in candidates:
-            if hash_value in seen_hash:
-                continue
-            seen_hash.add(hash_value)
-            if self.audio_index.find(hash_value):
-                gender_tag = "[女]" if ('_f_' in name.lower() or name.lower().endswith('_f')) else ""
-                self.signals.log.emit(f"[VOICE] 命中{gender_tag}: {name} -> {hash_value}")
-                self.last_event_name = name
-                return hash_value
-        if candidates:
-            cand_str = ", ".join([f"{n}({h})" for n, h in candidates[:3]])
-            self.signals.log.emit(f"[VOICE] 库中无匹配，候选: {cand_str}...")
-            self.last_event_name = candidates[0][0]
-            return candidates[0][1]
+        # --- 全局重排优先：确保所有含女/男标记的候选名遵循偏好 ---
+        pref = (self.config.gender_preference or "female").lower()
+        f_pats = ["_f_", "nvzhu", "roverf", "_female"]
+        m_pats = ["_m_", "nanzhu", "roverm", "_male"]
+        target_pats = f_pats if pref == "female" else m_pats
+        other_pats = m_pats if pref == "female" else f_pats
+
+        def cand_priority(n):
+            nl = n.lower()
+            if any(w in nl for w in target_pats): return 0
+            if any(w in nl for w in other_pats): return 2
+            return 1
+
+        total_names.sort(key=cand_priority)
+
+        # 寻找存在的物理文件
+        for name in total_names:
+            h = strategy.hash_name(name)
+            if self.audio_index.find(h) or self.player.find_audio(h):
+                return h
+            if find_wem_by_hash(self.config.audio_wem_root, h):
+                return h
+            if find_bnk_for_event(self.config.audio_bnk_root, name):
+                return h
+
+        if total_names:
+            self.last_event_name = total_names[0]
+            return strategy.hash_name(total_names[0])
+            
         return None
 
     def _show_error(self, message: str) -> None:

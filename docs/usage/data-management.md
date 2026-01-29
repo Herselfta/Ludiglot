@@ -4,110 +4,81 @@
 
 ### 1. 游戏文本数据（必需）
 
-Ludiglot 支持两种数据源：
+Ludiglot 直接从本地游戏 Pak 解包数据，无需手动下载。
 
-**A. 从本地游戏 Pak 自动解包（推荐）**
+**解包方式**：
+- 运行 `python -m ludiglot pak-update`
+- 或在程序菜单点击 **Update Database**
 
-- **来源**：本机已安装的鸣潮游戏资源
-- **解包工具**：内置 CUE4Parse 解包器（自包含发布，无需安装依赖）
-- **AES 密钥**：自动从 [ClostroOffi/wuwa-aes-archive](https://github.com/ClostroOffi/wuwa-aes-archive) 读取
-- **可选语言**：会列出 `Client/Content/Aki/ConfigDB` 与 `TextMap` 下的语言文件夹供选择
+**自动处理**：
+- **AES 密钥**：自动从 [ClostroOffi/wuwa-aes-archive](https://github.com/ClostroOffi/wuwa-aes-archive) 获取
+- **解包工具**：内置 FModelCLI（自包含发布，无需安装依赖）
+- **语言选择**：根据配置文件中的 `game_languages` 提取对应语言
 
-> **首次使用**：首次运行 `pak-update` 时会自动发布解包器（约 60MB，仅首次需要，用户无需手动操作）
+**输出目录**：
+- `data/ConfigDB/` - 游戏配置数据
+- `data/TextMap/` - 游戏文本数据
 
-**B. 使用 Dimbreath/WutheringData（兼容旧流程）**
+### 2. 游戏音频资源（可选）
 
-**来源**：[Dimbreath/WutheringData](https://github.com/Dimbreath/WutheringData)
+在配置中设置 `extract_audio: true` 后，解包时会自动提取语音资源。
 
-**建议位置**：`data/WutheringData/`
+**输出目录**：
+- `data/WwiseAudio_Generated/Media/<lang>/` - .wem 音频文件
+- `data/WwiseAudio_Generated/Event/<lang>/` - .bnk 事件映射
 
-**获取方式**：
-```bash
-cd data
-git clone https://github.com/Dimbreath/WutheringData.git
-```
+### 3. 游戏字体（自动提取）
 
-**所需文件**：
-- `TextMap/en/MultiText.json` - 英文文本
-- `TextMap/zh-Hans/MultiText.json` - 中文文本
+解包时会自动提取游戏内字体：
+- `data/Fonts/H7GBKHeavy.ttf`
+- `data/Fonts/LaguSansBold.ttf`
+- 以及其他 `.ufont` 文件（自动转换为 `.ttf`）
 
-### 2. 游戏音频资源（可选，用于语音播放）
-
-**来源**：推荐和文本数据一样，直接从游戏 Pak 解包（支持选择语音语言）。
-
-**所需目录**：
-- `Client/Content/Aki/WwiseAudio_Generated/Media/<lang>/`（.wem）
-- `Client/Content/Aki/WwiseAudio_Generated/Event/<lang>/`（.bnk）
-
-> 旧版 FModel 导出流程仍可使用，但不会再作为默认方案。
-
-### 3. 音频转换工具 (vgmstream)
+### 4. 音频转换工具 (vgmstream)
 
 **作用**：将游戏原始 `.wem` 格式转为程序可播放的 `.wav`。
 
-**获取方式（二选一）**：
-1.  **复用 FModel (推荐)**：如果你已安装 FModel，Ludiglot 可以自动从 FModel 的内部目录提取 vgmstream。只需在配置中设置 `fmodel_root`。
-2.  **手动下载**：从 [vgmstream release](https://github.com/vgmstream/vgmstream/releases) 下载 Windows 版本，解压到项目根目录的 `tools/vgmstream/` 下，确保包含 `vgmstream-cli.exe`。
+**获取方式**：
+- FModelCLI 会自动下载并管理 vgmstream 到 `tools/.data/` 目录
+- 无需手动配置
 
 ---
 
-## 路径规范
+## 配置文件说明
 
-### 配置文件中的路径（使用相对路径）
+### 核心配置项
 
 ```json
 {
-   "use_game_paks": true,
-   "game_install_root": "D:/Games/Wuthering Waves",
-   "pak_extractor": "cue4parse",
-   "cue4parse_extractor_path": null,
-   "game_platform": "Windows",
-   "game_server": "CN",
-   "game_version": "2.8",
-   "game_languages": ["en", "zh-Hans"],
-   "game_audio_languages": ["zh"],
-   "unrealpak_path": "C:/Program Files/Epic Games/UE_4.26/Engine/Binaries/Win64/UnrealPak.exe",
-   "data_root": "data/GameData",
-   "audio_wem_root": "data/GameAudio/Client/Content/Aki/WwiseAudio_Generated/Media/zh",
-   "audio_bnk_root": "data/GameAudio/Client/Content/Aki/WwiseAudio_Generated/Event/zh",
-   "audio_cache_path": "cache/audio",
-   "vgmstream_path": null
+  "use_game_paks": true,
+  "game_install_root": "D:/Games/Wuthering Waves Game",
+  "game_platform": "Windows",
+  "game_server": "OS",
+  "game_languages": ["en", "zh-Hans"],
+  "game_audio_languages": ["zh"],
+  "extract_audio": true,
+  "data_root": "data",
+  "fonts_root": "data/Fonts"
 }
 ```
 
-### 运行时处理（自动转换为绝对路径）
+| 配置项 | 说明 |
+|--------|------|
+| `use_game_paks` | 是否从游戏 Pak 解包数据 |
+| `game_install_root` | 游戏安装目录（包含 `Client` 文件夹） |
+| `game_platform` | 平台：Windows / Android / iOS |
+| `game_server` | 区服：OS（国际服）/ CN（国服） |
+| `game_languages` | 文本语言列表 |
+| `game_audio_languages` | 语音语言列表 |
+| `extract_audio` | 是否解包语音资源 |
+| `data_root` | 数据输出根目录 |
+| `fonts_root` | 字体目录 |
 
-- **Windows OCR 要求**：必须使用绝对路径（如 `C:\Users\...\img.jpg`）
-- **自动处理**：代码会自动将相对路径转换为绝对路径
-- **用户无需关心**：配置文件中只需使用相对路径即可
+### 路径处理
 
-### 语言包依赖（Windows OCR）
-
-**要求**：Windows 系统必须安装对应语言包
-
-- 识别英文：需要"英语"语言包
-- 识别中文：需要"中文(简体)"语言包
-
-**检查方式**：
-1. 打开 Settings（设置）
-2. Time & Language → Language（时间和语言 → 语言）
-3. 确认已安装"English (United States)"和"中文(简体，中国)"
-
-**启动检测**：程序启动时会自动检测并提示缺失的语言包
-
----
-
-## Ludiglot 的职责
-
-### 数据处理
-1. **构建索引**：从 WutheringData 构建搜索数据库（`cache/game_text_db.json`）
-2. **转换音频**：使用 vgmstream 将 `.wem` 转为 `.wav`/`.ogg`
-3. **缓存管理**：在 `cache/audio/` 管理转换后的音频
-
-### 数据隔离
-- **不追踪用户数据**：所有 `data/`, `cache/` 目录在 `.gitignore` 中排除
-- **配置文件保护**：`config/settings.json` 不会被提交到 Git
-- **私有文档保护**：`PrivateDevDoc/` 仅用于开发，不会公开
+- **配置文件**：使用相对路径（如 `data/Fonts`）
+- **运行时**：自动转换为绝对路径
+- **Windows OCR**：要求绝对路径，程序自动处理
 
 ---
 
@@ -116,54 +87,57 @@ git clone https://github.com/Dimbreath/WutheringData.git
 ```
 Ludiglot/
 ├── data/                          # 用户数据（不追踪）
-│   ├── GameData/                  # 从游戏 Pak 解包的文本数据
-│   │   ├── TextMap/
-│   │   └── ConfigDB/
-│   └── GameAudio/                 # 从游戏 Pak 解包的语音资源
-│       └── Client/Content/Aki/WwiseAudio_Generated/
-│           ├── Media/zh/
-│           └── Event/zh/
+│   ├── ConfigDB/                  # 游戏配置数据
+│   │   └── <lang>/
+│   ├── TextMap/                   # 游戏文本数据
+│   │   └── <lang>/
+│   ├── WwiseAudio_Generated/      # 游戏音频资源
+│   │   ├── Media/<lang>/          # .wem 文件
+│   │   └── Event/<lang>/          # .bnk 文件
+│   └── Fonts/                     # 游戏字体
+│       ├── H7GBKHeavy.ttf
+│       └── LaguSansBold.ttf
 ├── cache/                         # 运行时缓存（不追踪）
-│   ├── capture.png                # OCR 截图
 │   ├── game_text_db.json          # 构建的文本数据库
+│   ├── aes_archive.md             # AES 密钥缓存
 │   └── audio/                     # 转换后的音频缓存
-│       ├── audio_index.json       # 音频索引
-│       ├── txtp/                  # TXTP 缓存
-│       └── *.wav/*.ogg            # 转换后的音频文件
+│       ├── audio_index.json
+│       └── *.wav
 ├── config/
 │   ├── settings.example.json      # 配置模板（追踪）
 │   └── settings.json              # 用户配置（不追踪）
-└── PrivateDevDoc/                 # 私有开发文档（不追踪）
+└── tools/
+    ├── FModelCLI.exe              # 解包工具
+    └── .data/                     # 工具依赖
+        └── vgmstream-cli.exe
 ```
 
 ---
 
-## 注意事项
+## 数据更新流程
 
-### Windows OCR 特殊要求
+游戏版本更新后，只需重新运行解包命令：
 
-1. **绝对路径**：`storage.StorageFile.get_file_from_path_async` 要求绝对路径
-   - ✅ 正确：`C:\Users\Username\Ludiglot\cache\capture.png`
-   - ❌ 错误：`./cache/capture.png`
+```bash
+python -m ludiglot pak-update
+```
 
-2. **语言包检查**：OcrEngine 只能识别已安装语言包的语言
-   - 程序启动时会自动检测
-   - 缺失时会提供安装指引
+或在程序菜单点击 **Update Database**。
 
-3. **内存流转换**（待实现）：
-   - 当前：截图保存到硬盘 → OCR 读取文件
-   - 优化：截图保持在内存 → 内存流 → OCR
-   - 逻辑：`OpenCV/PIL Image → Bytes → InMemoryRandomAccessStream → BitmapDecoder → OCR`
+程序会自动：
+1. 获取最新 AES 密钥
+2. 增量更新数据
+3. 重建搜索数据库
 
-### 数据更新流程
+---
 
-1. **Pak 数据更新（推荐）**：
-   ```bash
-   python -m ludiglot pak-update --config config/settings.json
-   ```
+## Windows OCR 语言包
 
-2. **旧版 WutheringData 更新**：
-   ```bash
-   cd data/WutheringData
-   git pull
-   ```
+Windows 原生 OCR 需要系统安装对应语言包：
+
+1. 打开 **设置 > 时间和语言 > 语言和区域**
+2. 确认已安装：
+   - **English (United States)** - 英文识别
+   - **中文(简体，中国)** - 中文识别
+
+程序启动时会自动检测并提示缺失的语言包。

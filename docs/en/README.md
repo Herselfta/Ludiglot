@@ -5,10 +5,10 @@
 **Intelligent Game Text Translation Assistant | Real-time OCR + Voice Playback**
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](../LICENSE)
 [![Platform: Windows](https://img.shields.io/badge/platform-Windows-0078D6?logo=windows)](https://www.microsoft.com/windows)
 
-[English](README_EN.md) | [简体中文](README.md)
+[English](README.md) | [简体中文](../../README.md)
 
 </div>
 
@@ -16,105 +16,57 @@
 
 ## ✨ Features
 
-- **🔍 Smart OCR**: Windows native OCR (startup < 0.1s, recognition ~0.05s) with auto-fallback
-- **🎯 Mixed Content Recognition**: Intelligently distinguishes single-line titles from multi-line descriptions
-- **🌏 Instant Translation**: Overlay window displays Chinese translation with title highlighting
-- **🎵 Voice Playback**: Auto-play character voices (Hash/Event dual matching)
-- **⌨️ Global Hotkeys**: `Alt+W` for quick screenshot, `Alt+Q` to toggle overlay
+- **🔍 Smart OCR**: Windows native OCR priority (startup < 0.1s), auto-fallback to PaddleOCR/Tesseract
+- **🌏 Instant Translation**: Non-intrusive overlay displays official Chinese text
+- **🎵 Voice Playback**: Auto-play corresponding official voice-over with Wwise logic
+- **⌨️ Global Hotkeys**: Hotkey screenshot, history, smart title separation
+- **📦 One-Click Extraction**: Built-in FModelCLI for auto-extracting text, audio, and fonts from game Pak
+
+---
 
 ## 📦 Quick Start
 
-### One-Click Installation (Recommended)
+1. **Prerequisites**: Python 3.10+ installed
+2. **Clone**: `git clone ...`
+3. **Setup**: Run `.\setup.ps1` (creates venv, installs dependencies)
+4. **Configure**: Edit `config/settings.json` with your game path
+5. **Extract Data**: Click "Update Database" in menu or run `python -m ludiglot pak-update`
+6. **Run**: Execute `.\run.ps1`
 
-```bash
-# 1. Clone repository
-git clone https://github.com/yourusername/Ludiglot.git
-cd Ludiglot
+---
 
-# 2. Setup environment (Windows)
-.\setup.ps1        # PowerShell
-# or
-setup.bat          # CMD
+## 📁 Directory Structure
 
-# 3. Run application
-.\run.ps1          # PowerShell
-# or
-run.bat            # CMD
-```
-
-### Manual Installation
-
-```bash
-# Create virtual environment
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1  # Windows PowerShell
-
-# Install dependencies
-pip install -e .
-
-# Optional: Install Windows OCR
-pip install winrt-Windows.Media.Ocr winrt-Windows.Graphics.Imaging winrt-Windows.Storage.Streams
-```
-
-## 🎮 Usage
-
-### Configuration
-
-Copy and edit the config file:
-
-```bash
-copy config\settings.example.json config\settings.json
-```
-
-### Launch GUI
-
-```bash
-python -m ludiglot
-```
-
-### CLI Commands
-
-```bash
-# Build text database
-python -m ludiglot build --en MultiText_EN.json --zh MultiText_ZH.json
-
-# OCR screenshot
-python -m ludiglot ocr --image screenshot.png --db game_text_db.json
-
-# Extract audio
-python -m ludiglot audio-extract --wem-root /path/to/wem --cache audio_cache/
-```
-
-## 📁 Project Structure
-
-```
+```text
 Ludiglot/
-├── src/ludiglot/
-│   ├── core/              # Core modules (OCR, lookup, smart_match)
-│   ├── adapters/          # Game adapters
-│   └── ui/                # GUI interface
-├── config/                # Configuration files
-├── tools/                 # Utility tools
-├── setup.ps1              # One-click setup script
-└── run.ps1                # One-click run script
+├── src/ludiglot/       # Source code (Core/UI/Adapters)
+├── docs/               # Documentation
+├── tools/              # Third-party tools (FModelCLI, wwiser, etc.)
+├── config/             # Configuration files
+├── cache/              # Runtime cache (database, audio cache)
+└── data/               # Extracted data
+    ├── ConfigDB/       # Game config data
+    ├── TextMap/        # Game text data
+    ├── WwiseAudio_Generated/  # Game audio assets
+    └── Fonts/          # Extracted game fonts
 ```
+
+---
 
 ## 🤝 Contributing
 
-Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
+Contributions are welcome! See [CONTRIBUTING.md](../../CONTRIBUTING.md) for details.
 
 ## 📜 License
 
-This project is licensed under the [MIT License](LICENSE).
+This project is licensed under the [MIT License](../../LICENSE).
 
 ## 🙏 Acknowledgments
 
 - [PyQt6](https://www.riverbankcomputing.com/software/pyqt/) - GUI framework
-- [Windows.Media.Ocr](https://docs.microsoft.com/en-us/uwp/api/windows.media.ocr) - Windows OCR
-- [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR) - Alternative OCR engine
+- [FModelCLI](https://github.com/Herselfta/FModelCLI) - Pak extraction (based on FModel/CUE4Parse)
+- [ClostroOffi/wuwa-aes-archive](https://github.com/ClostroOffi/wuwa-aes-archive) - AES keys
 - [vgmstream](https://github.com/vgmstream/vgmstream) - Game audio decoder
-- [FModel](https://fmodel.app/) - Game resource extractor
-- [WutheringData](https://github.com/Dimbreath/WutheringData) - Wuthering Waves game text and audio database
 
 ---
 

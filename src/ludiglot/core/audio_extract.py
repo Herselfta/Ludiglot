@@ -89,6 +89,9 @@ def find_wem_by_event_name(
             token = token[len(prefix) :]
             break
 
+    # 增强匹配：生成去除非字母数字的版本
+    clean_token = "".join(c for c in token if c.isalnum())
+    
     candidates: list[Path] = []
     roots = [wem_root]
     if external_root:
@@ -99,6 +102,13 @@ def find_wem_by_event_name(
         for path in root.rglob("*.wem"):
             stem = path.stem.lower()
             if token in stem:
+                candidates.append(path)
+                continue
+            
+            # 策略2：去除干扰字符后包含 (解决 FavorWord vs favor_word 不同命名风格的问题)
+            clean_stem = "".join(c for c in stem if c.isalnum())
+            # 只有当 clean_token 长度足够时才使用模糊匹配，避免误匹配短ID
+            if len(clean_token) > 5 and clean_token in clean_stem:
                 candidates.append(path)
 
     if not candidates:

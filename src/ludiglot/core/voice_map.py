@@ -1,8 +1,14 @@
 from __future__ import annotations
 
 import json
+import os
+import re
+import sqlite3
 from pathlib import Path
-from typing import Any, Dict, Iterable
+from typing import Dict, Iterable, Any, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ludiglot.core.config import AppConfig
 
 
 def _iter_items(payload: Any) -> Iterable[dict]:
@@ -41,107 +47,242 @@ def _normalize_voice_event(voice: str) -> str:
     # 如果有路径，取最后一部分
     if "/" in raw:
         raw = raw.split("/")[-1]
-    # 如果有点号分段（如命名空间），取最后一部分
-    if "." in raw:
-        raw = raw.split(".")[-1]
-    return raw.strip()
+def _normalize_voice_event(path: str) -> str | None: # Changed signature and logic
+    if not path or not isinstance(path, str):
+        return None
+    # 移除路径和扩展名 (例如 "Aki/Audio/Event/play_vo_test.bnk" -> "play_vo_test")
+    segment = path.rsplit("/", 1)[-1]
+    if "." in segment:
+        segment = segment.split(".")[0]
+    return segment
+
+
+# Heuristic patterns for blob scanning
+_TEXT_KEY_PATTERN = re.compile(rb'[A-Z][a-zA-Z0-9_]{3,}_[0-9]{3,}(?:_[a-zA-Z0-9_]+)?')
+_AUDIO_PATTERN = re.compile(rb'play_[a-zA-Z0-9_]+')
 
 
 def build_voice_map_from_configdb(data_root: Path, cache_path: Path | None = None) -> Dict[str, list[str]]:
     configdb = data_root / "ConfigDB"
-    if not configdb.exists():
+    config_dir = data_root / "Config"
+    
+    scan_dirs = []
+    if configdb.exists(): scan_dirs.append(configdb)
+    if config_dir.exists(): scan_dirs.append(config_dir)
+    
+    if not scan_dirs:
         return {}
 
-    json_paths = list(configdb.rglob("*.json"))
-    latest = _latest_mtime(json_paths)
+    json_paths = []
+    db_paths = []
+    for d in scan_dirs:
+        json_paths.extend(d.rglob("*.json"))
+        db_paths.extend(d.rglob("*.db"))
 
-    # 提升至 v4 以应用全字段扫描逻辑
-    cache_version = 4
+    all_paths = json_paths + db_paths
+    latest = _latest_mtime(all_paths)
+    
+    # 增加版本号以强制重建 (v6: 增加 Blob 启发式扫描)
+    cache_version = "v6"
+    
     if cache_path and cache_path.exists():
         try:
-            cached = json.loads(cache_path.read_text(encoding="utf-8"))
-            if (
-                isinstance(cached, dict)
-                and cached.get("configdb_mtime") == latest
-                and cached.get("voice_map_version") == cache_version
-            ):
-                data = cached.get("voice_map")
-                if isinstance(data, dict):
-                    return {k: list(v) for k, v in data.items() if isinstance(v, list)}
+            cache_data = json.loads(cache_path.read_text(encoding="utf-8"))
+            if cache_data.get("mtime") == latest and cache_data.get("version") == cache_version:
+                return cache_data.get("mapping", {})
         except Exception:
             pass
 
     voice_map: Dict[str, list[str]] = {}
     
-    # 增加扫描深度，识别更多潜在的音频关联字段
-    TEXT_KEYS = {"Content", "Title", "TextKey", "Text", "Id", "Tid", "TidText"}
-    AUDIO_KEYS = {"Voice", "FileName", "Audio", "Event", "VoiceEvent", "Audio1", "Audio2", "Audio3"}
+    # 扩展关键词，适应更多场景
+    audio_keys = {"Voice", "FileName", "Audio", "AudioEventName", "AudioEvent", "WwiseEvent", "EventName", "Sound"}
+    text_keys = {"Id", "Key", "TextKey", "TextId", "TextMapId", "DialogId", "EntryId"}
 
-    for path in json_paths:
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            continue
-        
-        for item in _iter_items(payload):
-            # 1. 寻找所有可能的音频事件名
-            found_events = []
-            for ak in AUDIO_KEYS:
-                val = item.get(ak)
-                if isinstance(val, str) and val.strip():
-                    ev = _normalize_voice_event(val)
-                    if ev: found_events.append(ev)
-                elif isinstance(val, list):
-                    for v in val:
-                        if isinstance(v, str):
-                            ev = _normalize_voice_event(v)
-                            if ev: found_events.append(ev)
-                        elif isinstance(v, dict): # 处理像 LostHealthEventMap 这种结构
-                            for v_val in v.values():
-                                if isinstance(v_val, str):
-                                    ev = _normalize_voice_event(v_val)
-                                    if ev: found_events.append(ev)
-
-            if not found_events and path.name == "PlotAudio.json":
-                # PlotAudio 特写：如果 FileName 为空，尝试用 Id
-                fid = item.get("Id")
-                if isinstance(fid, str):
-                    found_events.append(_normalize_voice_event(fid))
-
-            if not found_events:
+    for path in all_paths:
+        if path.suffix.lower() == ".json":
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                for item in _iter_items(data):
+                    _process_item(item, voice_map, text_keys, audio_keys, path.name)
+            except Exception:
                 continue
-                
-            # 2. 寻找所有可能的文本 Key
-            found_text_keys = []
-            for tk in TEXT_KEYS:
-                val = item.get(tk)
-                if isinstance(val, str) and val.strip():
-                    found_text_keys.append(val.strip())
-                elif isinstance(val, (int, float)): # 有些 ID 是数字
-                    found_text_keys.append(str(val))
-
-            # 3. 交叉关联
-            for t_key in found_text_keys:
-                # 过滤掉一些明显不是 TextKey 的过短数字
-                if t_key.isdigit() and len(t_key) < 5 and path.name != "SubtitleText.json":
-                    continue
-                
-                for ev in found_events:
-                    if ev not in voice_map.get(t_key, []):
-                        voice_map.setdefault(t_key, []).append(ev)
-
+        elif path.suffix.lower() == ".db":
+            try:
+                _scan_db_file(path, voice_map, text_keys, audio_keys)
+            except Exception:
+                continue
+    
     if cache_path:
         cache_path.parent.mkdir(parents=True, exist_ok=True)
-        cache_path.write_text(
-            json.dumps(
-                {
-                    "configdb_mtime": latest,
-                    "voice_map_version": cache_version,
-                    "voice_map": voice_map,
-                },
-                ensure_ascii=False,
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
+        cache_path.write_text(json.dumps({
+            "mtime": latest,
+            "version": cache_version,
+            "mapping": voice_map
+        }, ensure_ascii=False), encoding="utf-8")
+        
     return voice_map
+
+
+def _process_item(item: dict, voice_map: Dict[str, list[str]], text_keys: set, audio_keys: set, filename: str) -> None: # Changed signature
+    # 1. 寻找所有可能的音频 Event
+    found_events = []
+    for ak in audio_keys:
+        val = item.get(ak)
+        if val and isinstance(val, str) and val.strip():
+            normalized_event = _normalize_voice_event(val)
+            if normalized_event:
+                found_events.append(normalized_event)
+        elif val and isinstance(val, list):
+            # 处理列表形式的音频 (如 [ "play_1", "play_2" ])
+            for v in val:
+                if isinstance(v, str):
+                    normalized_event = _normalize_voice_event(v)
+                    if normalized_event:
+                        found_events.append(normalized_event)
+        elif val and isinstance(val, dict): # Added dict handling for audio events
+            for v_val in val.values():
+                if isinstance(v_val, str):
+                    normalized_event = _normalize_voice_event(v_val)
+                    if normalized_event:
+                        found_events.append(normalized_event)
+
+    if not found_events:
+        return
+        
+    # 2. 寻找所有可能的文本 Key
+    found_text_keys = []
+    for tk in text_keys:
+        val = item.get(tk)
+        if isinstance(val, str) and val.strip():
+            found_text_keys.append(val.strip())
+        elif isinstance(val, (int, float)):
+            found_text_keys.append(str(val))
+
+    # 3. 交叉关联
+    for t_key in found_text_keys:
+        # 过滤短数字 (不再依赖 filename)
+        if t_key.isdigit() and len(t_key) < 5:
+            continue
+        
+        for ev in found_events:
+            if ev not in voice_map.get(t_key, []):
+                voice_map.setdefault(t_key, []).append(ev)
+
+
+def _scan_db_file(path: Path, voice_map: Dict[str, list[str]], text_keys: set, audio_keys: set) -> None:
+    """通用 SQLite 扫描逻辑，具备 Blob 启发式识别能力。"""
+    if path.stat().st_size < 100:
+        return
+
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        tables = [r[0] for r in cursor.fetchall()]
+        
+        for table in tables:
+            # 1. 常规列扫描
+            cursor.execute(f"PRAGMA table_info({table})")
+            cols_info = cursor.fetchall()
+            cols = [c[1] for c in cols_info]
+            cols_map = {c.lower(): c for c in cols}
+            
+            target_text_cols = [cols_map[k.lower()] for k in text_keys if k.lower() in cols_map]
+            target_audio_cols = [cols_map[k.lower()] for k in audio_keys if k.lower() in cols_map]
+            
+            if target_text_cols and target_audio_cols:
+                select_cols = target_text_cols + target_audio_cols
+                cursor.execute(f"SELECT {', '.join(select_cols)} FROM {table}")
+                while True:
+                    rows = cursor.fetchmany(1000)
+                    if not rows: break
+                    for row in rows:
+                        t_keys = [str(val).strip() for val in row[:len(target_text_cols)] if val is not None]
+                        v_events = [_normalize_voice_event(str(val)) for val in row[len(target_text_cols):] if val is not None]
+                        for tk in t_keys:
+                            if tk.isdigit() and len(tk) < 5: continue
+                            for ev in v_events:
+                                if ev and ev not in voice_map.get(tk, []):
+                                    voice_map.setdefault(tk, []).append(ev)
+            
+            # 2. 启发式 Blob 扫描 (针对没有显式列名的加密/包装数据)
+            blob_cols = [c[1] for c in cols_info if "blob" in (c[2] or "").lower() or "bindata" in c[1].lower() or "data" in c[1].lower()]
+            if blob_cols:
+                # 针对含有二进制数据的表运行启发式扫描
+                cursor.execute(f"SELECT {', '.join(blob_cols)} FROM {table}")
+                row_count = 0
+                while True:
+                    rows = cursor.fetchmany(500)
+                    if not rows: break
+                    for row in rows:
+                        row_count += 1
+                        for val in row:
+                            if isinstance(val, (bytes, bytearray)):
+                                k_list = _TEXT_KEY_PATTERN.findall(val)
+                                a_list = _AUDIO_PATTERN.findall(val)
+                                if k_list and a_list:
+                                    for kb in k_list:
+                                        tk = kb.decode('utf-8', errors='ignore')
+                                        if tk.isdigit() and len(tk) < 5: continue 
+                                        for ab in a_list:
+                                            ev = _normalize_voice_event(ab.decode('utf-8', errors='ignore'))
+                                            if ev and ev not in voice_map.get(tk, []):
+                                                voice_map.setdefault(tk, []).append(ev)
+    finally:
+        conn.close()
+
+
+def _resolve_events_for_text_key(text_key: str, cfg: AppConfig | None) -> list[str]:
+    """返回所有可能的音频事件名列表，按优先级排序。
+    此函数现在位于 core.voice_map 中以避免循环导入。
+    """
+    if not cfg or not cfg.data_root:
+        return []
+    
+    candidates = []
+    
+    # 延迟导入以避免某些环境下的循环风险
+    from ludiglot.core.text_builder import load_plot_audio_map
+    
+    # 1. 尝试从 PlotAudio 获取官方指定的 Event
+    plot_audio = load_plot_audio_map(cfg.data_root)
+    voice_event = plot_audio.get(text_key)
+    if voice_event:
+        candidates.append(voice_event)
+        
+    # 2. 尝试从 voice_map 获取所有候选（包含 Blob 提取的）
+    cache_path = cfg.data_root.parent / "cache" / "voice_map_v6.json"
+    voice_map = build_voice_map_from_configdb(cfg.data_root, cache_path=cache_path)
+    extra = voice_map.get(text_key) or []
+    for ev in extra:
+        if ev not in candidates:
+            candidates.append(ev)
+            
+    # --- 增强：性别版本自动补充 ---
+    pref = (cfg.gender_preference or "female").lower()
+    auto_cands = []
+    for c in candidates:
+        if "nanzhu" in c.lower() and pref == "female":
+            auto_cands.append(c.lower().replace("nanzhu", "nvzhu"))
+        elif "nvzhu" in c.lower() and pref == "male":
+            auto_cands.append(c.lower().replace("nvzhu", "nanzhu"))
+    
+    for ac in auto_cands:
+        if ac not in candidates:
+            candidates.append(ac)
+            
+    # --- 全局重排优先性能 ---
+    f_pats = ["_f_", "nvzhu", "roverf", "_female"]
+    m_pats = ["_m_", "nanzhu", "roverm", "_male"]
+    target_pats = f_pats if pref == "female" else m_pats
+    other_pats = m_pats if pref == "female" else f_pats
+
+    def cand_priority(n):
+        nl = n.lower()
+        if any(w in nl for w in target_pats): return 0
+        if any(w in nl for w in other_pats): return 2
+        return 1
+
+    candidates.sort(key=cand_priority)
+    return candidates

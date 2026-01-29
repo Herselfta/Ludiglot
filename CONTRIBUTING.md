@@ -18,6 +18,15 @@
 - 使用 **mypy** 进行类型检查
 - 添加必要的文档字符串
 
+### 架构与开发规范 (Architecture & Guidelines)
+
+为了保持代码的高可维护性和逻辑的统一，本项目遵循严格的开发规范。在开始贡献之前，请务必阅读以下文档：
+
+1.  **[开发原则与协作规范](docs/DEVELOPMENT_PRINCIPLES.md)**：包含核心分层原则、逻辑下沉要求以及 AI 协作协议。
+2.  **[架构设计手册](docs/design/architecture.md)**：包含目录结构、模块职责以及数据流水线说明。
+
+**核心红线**：禁止在 UI 层编写业务逻辑；禁止在根目录创建临时脚本。
+
 ### 报告问题
 
 遇到 Bug？请[提交 Issue](https://github.com/yourusername/Ludiglot/issues) 并包含：

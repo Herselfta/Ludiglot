@@ -281,7 +281,9 @@ def build_text_db_from_root_all(data_root: Path) -> Dict[str, dict]:
     ]
 
     plot_audio = load_plot_audio_map(data_root)
-    voice_map = build_voice_map_from_configdb(data_root)
+    # 启用缓存，确保 voice_map 可读
+    cache_path = data_root.parent / "cache" / "voice_map_v6.json"
+    voice_map = build_voice_map_from_configdb(data_root, cache_path=cache_path)
     db: Dict[str, dict] = {}
 
     def scan_pair(en_dir: Path, zh_dir: Path):
