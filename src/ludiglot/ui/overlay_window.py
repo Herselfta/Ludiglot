@@ -74,6 +74,7 @@ class OverlayWindow(QMainWindow):
     """无边框、置顶覆盖层窗口（MVP）。"""
 
     capture_requested = pyqtSignal(bool)
+    resources_loaded = pyqtSignal()
 
     def __init__(self, config: AppConfig, config_path: Path) -> None:
         super().__init__()
@@ -148,6 +149,10 @@ class OverlayWindow(QMainWindow):
         self._sync_config_timer = QTimer(self)
         self._sync_config_timer.timeout.connect(self._persist_window_position)
         self._sync_config_timer.start(5000)  # 每 5 秒同步一次
+
+    def closeEvent(self, event) -> None:
+        print("[DEBUG] OverlayWindow closeEvent", flush=True)
+        super().closeEvent(event)
 
     def _install_terminal_logger(self) -> None:
         """将 stdout/stderr/Qt警告 同步写入日志文件。"""
@@ -1247,6 +1252,7 @@ class OverlayWindow(QMainWindow):
         self._external_wem_root = self._resolve_external_wem_root()
 
         self.signals.status.emit("就绪")
+        self.resources_loaded.emit()
 
     def _resolve_external_wem_root(self) -> Path | None:
         if not self.config.audio_wem_root:
@@ -1617,8 +1623,23 @@ class OverlayWindow(QMainWindow):
             self.signals.status.emit("未提取到可用文本")
             self.signals.log.emit("[OCR] 归一化后为空，跳过")
             return
-        self.signals.result.emit(result)
+        
+        print(f"[DEBUG] _capture_and_process: Got result. Keys: {list(result.keys())}", flush=True)
+        
+        # Deepcopy to ensure thread safety and detach from DB
+        try:
+             import copy
+             safe_result = copy.deepcopy(result)
+             print("[DEBUG] _capture_and_process: Emitting safe_result...", flush=True)
+             self.signals.result.emit(safe_result)
+             print("[DEBUG] _capture_and_process: Result emitted.", flush=True)
+        except Exception as e:
+             print(f"[ERROR] CRITICAL: Failed to emit result signal: {e}", flush=True)
+             self.signals.error.emit(f"Internal Error: Signal Emission Failed: {e}")
+             return
+
         self.signals.status.emit("就绪")
+        print("[DEBUG] _capture_and_process: Status emitted. Done.", flush=True)
 
 
     def _capture_image(self, selected_region: CaptureRegion | None) -> None:
@@ -2426,6 +2447,7 @@ class OverlayWindow(QMainWindow):
         return not text_key.startswith(prefixes)
 
     def _show_result(self, result: Dict[str, Any]) -> None:
+        print("[DEBUG] _show_result called", flush=True)
         try:
             self.last_match = result
             self.last_hash = None
@@ -2593,11 +2615,15 @@ class OverlayWindow(QMainWindow):
         self.signals.log.emit(f"[QUERY] {result.get('_ocr_text')} -> {query_key}")
         
         # 确保窗口显示并置顶
+        self.signals.log.emit("[DEBUG] Calling show_and_activate...")
         self.show_and_activate()
+        self.signals.log.emit("[DEBUG] show_and_activate returned.")
         
         # 自动播放逻辑
         if self.config.play_audio and has_audio:
+            self.signals.log.emit("[DEBUG] Calling play_audio...")
             self.play_audio()
+            self.signals.log.emit("[DEBUG] play_audio returned.")
     
     def _convert_game_html(self, text: str, lang: str = "cn") -> str:
         """将游戏的自定义HTML标记转换为标准HTML格式，并包装为完整HTML文档。
@@ -2760,7 +2786,7 @@ class OverlayWindow(QMainWindow):
         # 寻找存在的物理文件
         for name in total_names:
             h = strategy.hash_name(name)
-            if self.audio_index.find(h) or self.player.find_audio(h):
+            if self.audio_index.find(h):
                 return h
             if find_wem_by_hash(self.config.audio_wem_root, h):
                 return h
@@ -3388,7 +3414,14 @@ def run_gui(config_path: Path) -> None:
     tray.activated.connect(lambda reason: window.capture_requested.emit(True) if reason == QSystemTrayIcon.ActivationReason.DoubleClick else None)
     tray.show()
 
-    app.exec()
+    print("[DEBUG] Entering app.exec()", flush=True)
+    try:
+        ret = app.exec()
+        print(f"[DEBUG] app.exec() returned with {ret}", flush=True)
+    except Exception as e:
+        print(f"[ERROR] Exception in app.exec(): {e}", flush=True)
+    finally:
+        print("[DEBUG] Application exiting.", flush=True)
 
 
 class ScreenSelector(QWidget):
@@ -3485,6 +3518,12 @@ class ScreenSelector(QWidget):
         # 调试信息
         print(f"[ScreenSelector] 背景Pixmap尺寸: {background.size()}, DPR: {background.devicePixelRatio()}")
         return background
+
+        return background
+
+    def closeEvent(self, event) -> None:
+        print("[DEBUG] ScreenSelector closeEvent", flush=True)
+        super().closeEvent(event)
 
     def paintEvent(self, event) -> None:
         """绘制背景和半透明遮罩。"""
