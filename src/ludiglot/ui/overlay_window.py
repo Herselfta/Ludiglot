@@ -49,6 +49,7 @@ from ludiglot.core.text_builder import (
 )
 from ludiglot.core.voice_map import build_voice_map_from_configdb, _resolve_events_for_text_key
 from ludiglot.core.voice_event_index import VoiceEventIndex
+from ludiglot.core.matcher import TextMatcher
 
 
 class PersistentMenu(QMenu):
@@ -83,7 +84,9 @@ class OverlayWindow(QMainWindow):
         self.signals = UiSignals()
         self.log_path = Path(__file__).resolve().parents[3] / "log" / "gui.log"
         self._install_terminal_logger()
-        self.searcher = FuzzySearcher()
+        # self.searcher = FuzzySearcher() # TextMatcher now handles this
+        self.matcher: TextMatcher | None = None
+        self.audio_resolver: AudioResolver | None = None
         self.engine = OCREngine(
             lang=config.ocr_lang,
             use_gpu=config.ocr_gpu,
@@ -94,10 +97,10 @@ class OverlayWindow(QMainWindow):
         self.voice_event_index: VoiceEventIndex | None = None
         self.audio_index: AudioCacheIndex | None = None
         self.last_match: Dict[str, Any] | None = None
+        self.last_text_key: str | None = None
         self.last_hash: int | None = None
         self.last_event_name: str | None = None
         self.player = AudioPlayer()
-        self._external_wem_root: Path | None = None
         self._hotkey_listener = None
         self._win_hotkey_filter = None
         self._win_hotkey_ids: list[int] = []
@@ -1251,6 +1254,8 @@ class OverlayWindow(QMainWindow):
 
         self._external_wem_root = self._resolve_external_wem_root()
 
+        self._init_matcher()
+
         self.signals.status.emit("就绪")
         self.resources_loaded.emit()
 
@@ -1306,6 +1311,18 @@ class OverlayWindow(QMainWindow):
         self.voice_event_index = index
         if index.names:
             self.signals.log.emit(f"[VOICE] 事件索引: {len(index.names)} 项")
+
+    def _init_matcher(self) -> None:
+        if self.db:
+            from ludiglot.core.matcher import TextMatcher
+            from ludiglot.core.audio_resolver import AudioResolver
+
+            self.matcher = TextMatcher(self.db, self.voice_map, self.voice_event_index)
+            self.matcher.set_logger(self.signals.log.emit)
+            self.signals.log.emit("[MATCHER] 匹配服务已初始化")
+
+            self.audio_resolver = AudioResolver(self.config, self.voice_event_index)
+            self.signals.log.emit("[AUDIO] 解析服务已初始化")
 
     def _should_rebuild_db(self) -> bool:
         if not self.config.auto_rebuild_db:
@@ -1509,12 +1526,14 @@ class OverlayWindow(QMainWindow):
 
     def _translate_title(self, title: str) -> str:
         """尝试将标题（如角色名、招式名）翻译为中文。"""
+        if not self.matcher:
+            return ""
         try:
-            cleaned = self._clean_ocr_line(title)
+            cleaned = "".join(ch if ch.isalnum() or ch.isspace() else " " for ch in title).strip()
             key = normalize_en(cleaned)
             if not key:
                 return ""
-            result, score = self._search_db(key)
+            result, score = self.matcher.search_key(key)
             if isinstance(result, dict):
                 # 1. 尝试直接获取
                 cn = result.get("official_cn") or result.get("cn")
@@ -1618,7 +1637,11 @@ class OverlayWindow(QMainWindow):
         for text, conf in lines:
             self.signals.log.emit(f"  - {text} (conf={conf:.3f})")
 
-        result = self._lookup_best(lines)
+        if not self.matcher:
+             self.signals.error.emit("匹配服务未就绪")
+             return
+
+        result = self.matcher.match(lines)
         if result is None:
             self.signals.status.emit("未提取到可用文本")
             self.signals.log.emit("[OCR] 归一化后为空，跳过")
@@ -2546,27 +2569,24 @@ class OverlayWindow(QMainWindow):
                 cn_text = f"<span style='color: #d4af37; font-weight: bold;'>{display_title}</span>\n{cn_text}"
                 self.signals.log.emit(f"[DISPLAY] 标题: {first_line} -> {display_title}, 内容: {text_key}")
 
-        # 音频识别逻辑优化：统一使用性别重排后的候选
-        if text_key:
-            events = _resolve_events_for_text_key(text_key, self.config)
-            if audio_event and audio_event not in events:
-                events.insert(0, audio_event)
-            
-            self.last_event_name = events[0] if events else audio_event
-            
-            # 优先通过事件列表解析哈希（会自动处理性别重排）
-            if self.last_hash is None and self._is_voice_eligible(text_key):
-                self.last_hash = self._resolve_audio_hash(text_key, events=events)
-            
-            # 如果解析失败，才尝试使用数据库中记录的原始哈希
-            if self.last_hash is None and audio_hash:
-                try: self.last_hash = int(audio_hash)
-                except: pass
-            
-            if self.last_hash:
-                self.signals.log.emit(f"[MATCH] text_key={text_key} hash={self.last_hash}")
+        # 音频识别逻辑：委托给 AudioResolver
+        self.last_text_key = text_key
+        if text_key and self.audio_resolver:
+            res = self.audio_resolver.resolve(text_key, db_event=audio_event, db_hash=audio_hash)
+            if res:
+                self.last_hash = res.hash_value
+                self.last_event_name = res.event_name
+                self.signals.log.emit(f"[MATCH] text_key={text_key} hash={self.last_hash} ({res.source_type})")
             else:
                 self.signals.log.emit(f"[MATCH] text_key={text_key} 未找到对应音频")
+        elif text_key:
+             # 回退到数据库原始哈希
+             if audio_hash:
+                 try: self.last_hash = int(audio_hash)
+                 except: pass
+             self.last_event_name = audio_event
+             if self.last_hash:
+                 self.signals.log.emit(f"[MATCH] text_key={text_key} 使用数据库哈希={self.last_hash}")
         
         # 显示数据库英文原文（保留HTML标记）
         if en_text:
@@ -2726,78 +2746,6 @@ class OverlayWindow(QMainWindow):
 '''
         return html
 
-    def _resolve_audio_hash(self, text_key: str, events: list[str] | None = None) -> int | None:
-        if not self.config.audio_cache_path:
-            return None
-        if self.audio_index is None:
-            self.audio_index = AudioCacheIndex(
-                self.config.audio_cache_path,
-                index_path=self.config.audio_cache_index_path,
-                max_mb=self.config.audio_cache_max_mb,
-            )
-            self.audio_index.load()
-            self.audio_index.scan()
-        strategy = WutheringAudioStrategy()
-        
-        # 确定候选事件源
-        voice_list = events if events is not None else (self.voice_map.get(text_key, []) or [None])
-        
-        total_names = []
-        seen = set()
-
-        # 1. 从事件生成基础候选
-        for voice in voice_list:
-            if voice:
-                for name in strategy.build_names(text_key, voice):
-                    if name not in seen:
-                        total_names.append(name)
-                        seen.add(name)
-
-        # 2. 从 VoiceIndex 补充候选
-        if self.voice_event_index:
-            seed_event = voice_list[0] if voice_list else None
-            for name in self.voice_event_index.find_candidates(text_key, seed_event, limit=8):
-                if name not in seen:
-                    total_names.append(name)
-                    seen.add(name)
-        
-        # 3. 如果没找到事件，尝试兜底猜测
-        if not total_names:
-            for name in strategy.build_names(text_key, None):
-                if name not in seen:
-                    total_names.append(name)
-                    seen.add(name)
-
-        # --- 全局重排优先：确保所有含女/男标记的候选名遵循偏好 ---
-        pref = (self.config.gender_preference or "female").lower()
-        f_pats = ["_f_", "nvzhu", "roverf", "_female"]
-        m_pats = ["_m_", "nanzhu", "roverm", "_male"]
-        target_pats = f_pats if pref == "female" else m_pats
-        other_pats = m_pats if pref == "female" else f_pats
-
-        def cand_priority(n):
-            nl = n.lower()
-            if any(w in nl for w in target_pats): return 0
-            if any(w in nl for w in other_pats): return 2
-            return 1
-
-        total_names.sort(key=cand_priority)
-
-        # 寻找存在的物理文件
-        for name in total_names:
-            h = strategy.hash_name(name)
-            if self.audio_index.find(h):
-                return h
-            if find_wem_by_hash(self.config.audio_wem_root, h):
-                return h
-            if find_bnk_for_event(self.config.audio_bnk_root, name):
-                return h
-
-        if total_names:
-            self.last_event_name = total_names[0]
-            return strategy.hash_name(total_names[0])
-            
-        return None
 
     def _show_error(self, message: str) -> None:
         self.status_label.setText(message)
@@ -2857,20 +2805,26 @@ class OverlayWindow(QMainWindow):
             self.audio_index.load()
             self.audio_index.scan()
         
-        path = self.audio_index.find(self.last_hash)
-        if path is None and self.config.audio_wem_root and self.config.vgmstream_path:
-            wem_path = find_wem_by_hash(self.config.audio_wem_root, self.last_hash)
-            if wem_path is not None:
-                try:
-                    path = convert_single_wem_to_wav(
-                        wem_path,
-                        self.config.vgmstream_path,
-                        self.config.audio_cache_path,
-                    )
-                    self.audio_index.add_file(path)
-                except Exception as exc:
-                    self.signals.error.emit(f"转码失败: {exc}")
-                    return
+        path = None
+        if self.audio_resolver:
+            # 重新尝试定位物理文件 (处理可能的延迟加载)
+            res = self.audio_resolver.resolve(self.last_text_key, db_event=self.last_event_name, db_hash=self.last_hash)
+            if res:
+                self.last_hash = res.hash_value
+                self.last_event_name = res.event_name
+                
+                # 如果是 cache，直接获取路径
+                if res.source_type == 'cache':
+                    path = self.audio_resolver.audio_index.find(res.hash_value)
+                elif res.source_type == 'wem' or res.source_type == 'bnk':
+                    # 需要触发提取逻辑
+                    path = self._ensure_audio_from_event()
+        
+        # 兜底：如果 resolver 没搞定，尝试原始 index
+        if path is None and self.last_hash:
+            if self.audio_index:
+                path = self.audio_index.find(self.last_hash)
+        
         if path is None:
             path = self._ensure_audio_from_event()
         
@@ -2902,34 +2856,16 @@ class OverlayWindow(QMainWindow):
         if not txtp_cache:
             return None
         wwiser_path = self.config.wwiser_path or default_wwiser_path()
-        text_key = None
-        if self.last_match and isinstance(self.last_match, dict):
-            matches = self.last_match.get("matches") or []
-            if matches:
-                text_key = matches[0].get("text_key")
+        text_key = self.last_text_key
 
-        event_candidates: list[str] = []
-        if self.last_event_name:
-            event_candidates.append(self.last_event_name)
-        if text_key:
-            strategy = WutheringAudioStrategy()
-            event_candidates.extend(strategy.build_names(text_key, self.last_event_name))
-        if text_key and self.voice_event_index:
-            event_candidates.extend(self.voice_event_index.find_candidates(text_key, self.last_event_name, limit=8))
-        if text_key:
-            for ev in self.voice_map.get(text_key, []):
-                if isinstance(ev, str) and ev.strip():
-                    event_candidates.append(ev.strip())
-
-        # 去重并限制数量，避免过多尝试
-        seen = set()
-        unique: list[str] = []
-        for ev in event_candidates:
-            if ev in seen:
-                continue
-            seen.add(ev)
-            unique.append(ev)
-        event_candidates = unique[:6]
+        event_candidates = []
+        if self.audio_resolver:
+            event_candidates = self.audio_resolver.get_candidates(text_key, self.last_event_name)
+        
+        if not event_candidates and self.last_event_name:
+            event_candidates = [self.last_event_name]
+            
+        event_candidates = event_candidates[:8]
 
         for event_name in event_candidates:
             # 0. 尝试直接从 ExternalSource/WEM 命中（剧情常见）
@@ -2938,7 +2874,7 @@ class OverlayWindow(QMainWindow):
                 direct_wem = find_wem_by_event_name(
                     self.config.audio_wem_root,
                     event_name,
-                    external_root=self._external_wem_root,
+                    external_root=self.config.audio_external_root,
                 )
             if direct_wem is not None:
                 try:

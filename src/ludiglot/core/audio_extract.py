@@ -144,9 +144,17 @@ def find_bnk_for_event(bnk_root: Path, event_name: str | None) -> Path | None:
          if len(parts) > 2:
              sub_token = "_".join(parts[-2:])
     
+    # 增强式搜索：尝试匹配 stem 的任何一部分
+    # 比如 vo_main_..._f 应该能匹配到 play_vo_main_..._22.bnk
+    # 我们核心的任务是找到那个包含哈希的包
     for path in bnk_root.rglob("*.bnk"):
         stem = path.stem.lower()
-        if token in stem or core in stem or (sub_token and sub_token in stem):
+        # 如果 token 是 vo_..._f，去掉 _f 后匹配
+        base_token = token
+        if token.endswith("_f") or token.endswith("_m"):
+            base_token = token[:-2]
+            
+        if token in stem or core in stem or base_token in stem or (sub_token and sub_token in stem):
             return path
             
     # 3. 针对 鸣潮 的特殊回退：角色名直接作为 Bank 名 (例如 VO_Linnai.bnk)

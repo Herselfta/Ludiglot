@@ -154,32 +154,87 @@ def _iter_items(payload: object) -> Iterable[dict]:
 
 
 def load_plot_audio_map(data_root: Path) -> Dict[str, str]:
-    path = data_root / "ConfigDB" / "PlotAudio.json"
-    if not path.exists():
-        return {}
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
+    json_path = data_root / "ConfigDB" / "PlotAudio.json"
+    db_path = data_root / "ConfigDB" / "db_plot_audio.db"
+    
     mapping: Dict[str, str] = {}
-    for item in _iter_items(payload):
-        text_key = (
-            item.get("TextKey")
-            or item.get("TextMapId")
-            or item.get("TextId")
-            or item.get("Key")
-            or item.get("Content")
-        )
-        file_name = (
-            item.get("FileName")
-            or item.get("AudioEventName")
-            or item.get("AudioEvent")
-            or item.get("Voice")
-        )
-        if not text_key or not file_name:
-            continue
-        mapping[str(text_key)] = str(file_name)
+    
+    # 1. 尝试 JSON
+    if json_path.exists():
+        try:
+            payload = json.loads(json_path.read_text(encoding="utf-8"))
+            for item in _iter_items(payload):
+                text_key = (
+                    item.get("TextKey")
+                    or item.get("TextMapId")
+                    or item.get("TextId")
+                    or item.get("Key")
+                    or item.get("Content")
+                )
+                file_name = (
+                    item.get("FileName")
+                    or item.get("AudioEventName")
+                    or item.get("AudioEvent")
+                    or item.get("Voice")
+                )
+                if text_key and file_name:
+                    mapping[str(text_key)] = str(file_name)
+        except Exception:
+            pass
+            
+    # 2. 尝试 SQLite
+    if db_path.exists():
+        try:
+            import sqlite3
+            import re
+            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+            cursor = conn.cursor()
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            tables = [r[0] for r in cursor.fetchall()]
+            
+            # 匹配 vo_ 或 play_vo_ 开头的音频事件名（BLOB 扫描用）
+            audio_pat = re.compile(rb'(?:play_vo_|vo_)[a-zA-Z0-9_]{3,}')
+            
+            for tbl in tables:
+                cursor.execute(f"PRAGMA table_info({tbl})")
+                cols_info = cursor.fetchall()
+                cols = {r[1].lower(): r[1] for r in cols_info}
+                
+                # 寻找 ID 列
+                tk_col = cols.get("id") or cols.get("textkey") or cols.get("key") or cols.get("textmapid") or cols.get("textid") or cols.get("content")
+                
+                # 寻找音频列
+                fn_col = cols.get("filename") or cols.get("audioeventname") or cols.get("audioevent") or cols.get("voice")
+                
+                # 寻找 BLOB 列
+                blob_col = next((c[1] for c in cols_info if "blob" in (c[2] or "").lower() or c[1].lower() == "bindata"), None)
+                
+                if tk_col:
+                    if fn_col:
+                        # 情况 A：存在平铺列
+                        cursor.execute(f"SELECT {tk_col}, {fn_col} FROM {tbl}")
+                        for r in cursor.fetchall():
+                            if r[0] and r[1]:
+                                mapping[str(r[0])] = str(r[1])
+                                
+                    if blob_col and (not fn_col or tbl.lower() == "plotaudio"):
+                        # 情况 B：扫描 BLOB (针对 plotaudio 表或缺失平铺列的情况)
+                        cursor.execute(f"SELECT {tk_col}, {blob_col} FROM {tbl}")
+                        for tid, blob in cursor.fetchall():
+                            if not tid or not isinstance(blob, (bytes, bytearray)):
+                                continue
+                            matches = audio_pat.findall(blob)
+                            if matches:
+                                event_name = matches[0].decode('ascii', errors='ignore').strip()
+                                if event_name:
+                                    mapping[str(tid)] = event_name
+            conn.close()
+        except Exception:
+            pass
+            
     return mapping
+
+# The old logic is replaced by the updated load_plot_audio_map
 
 
 def _parse_event_name(value: str) -> str:
