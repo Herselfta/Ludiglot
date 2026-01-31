@@ -1565,11 +1565,16 @@ class OverlayWindow(QMainWindow):
         self.capture_requested.emit(True)
 
     def _capture_and_process_async(self, force_select: bool = False) -> None:
+        import time
+        t_start = time.time()
         selected_region: CaptureRegion | None = None
         self.signals.log.emit("[HOTKEY] 触发捕获")
         if force_select or self.config.capture_mode == "select":
             self.signals.status.emit("请选择 OCR 区域…")
+            t_select_start = time.time()
             selected_region = self._select_region()
+            t_select_end = time.time()
+            self.signals.log.emit(f"[PERF] 区域选择耗时: {(t_select_end - t_select_start):.3f}s")
             if selected_region is None:
                 self.signals.status.emit("已取消")
                 return
@@ -1578,14 +1583,23 @@ class OverlayWindow(QMainWindow):
             args=(selected_region,),
             daemon=True,
         ).start()
+        self.signals.log.emit(f"[PERF] 异步调用总耗时: {(time.time() - t_start):.3f}s")
 
     def _capture_and_process(self, selected_region: CaptureRegion | None) -> None:
+        import time
+        t_total_start = time.time()
+        
         self.signals.status.emit("捕获中…")
+        
+        # 1. 截图
+        t_capture_start = time.time()
         try:
             self._capture_image(selected_region)
         except Exception as exc:
             self.signals.error.emit(f"截图失败: {exc}")
             return
+        t_capture_end = time.time()
+        self.signals.log.emit(f"[PERF] 截图耗时: {(t_capture_end - t_capture_start):.3f}s")
 
         # 过小截图会触发 OCR 底层异常，直接跳过并提示
         try:
@@ -1601,6 +1615,8 @@ class OverlayWindow(QMainWindow):
         except Exception:
             pass
 
+        # 2. OCR识别
+        t_ocr_start = time.time()
         try:
             image_path = self._preprocess_image(self.config.image_path)
             if self.config.ocr_backend == "windows":
@@ -1617,6 +1633,8 @@ class OverlayWindow(QMainWindow):
                 "paddle": "PaddleOCR",
             }.get(backend, backend)
             self.signals.log.emit(f"[OCR] 后端: {backend_label}")
+            t_ocr_end = time.time()
+            self.signals.log.emit(f"[PERF] OCR识别耗时: {(t_ocr_end - t_ocr_start):.3f}s")
         except Exception as exc:
             self.signals.error.emit(f"OCR 失败: {exc}")
             return
@@ -1626,12 +1644,16 @@ class OverlayWindow(QMainWindow):
             self.signals.log.emit("[OCR] 未识别到文本")
             return
 
+        # 3. 文本分组和质量检查
+        t_group_start = time.time()
         lines = group_ocr_lines(box_lines)
         if self.config.ocr_backend == "auto" and self._needs_tesseract(lines):
             self.signals.log.emit("[OCR] 质量较差，切换 Tesseract")
             tess_path = getattr(self, "_tesseract_image_path", image_path)
             box_lines = self.engine.recognize_with_boxes(tess_path, prefer_tesseract=True)
             lines = group_ocr_lines(box_lines)
+        t_group_end = time.time()
+        self.signals.log.emit(f"[PERF] 文本分组耗时: {(t_group_end - t_group_start):.3f}s")
 
         self.signals.log.emit("[OCR] 识别结果:")
         for text, conf in lines:
@@ -1641,7 +1663,12 @@ class OverlayWindow(QMainWindow):
              self.signals.error.emit("匹配服务未就绪")
              return
 
+        # 4. 文本匹配
+        t_match_start = time.time()
         result = self.matcher.match(lines)
+        t_match_end = time.time()
+        self.signals.log.emit(f"[PERF] 文本匹配耗时: {(t_match_end - t_match_start):.3f}s")
+        
         if result is None:
             self.signals.status.emit("未提取到可用文本")
             self.signals.log.emit("[OCR] 归一化后为空，跳过")
@@ -1649,6 +1676,8 @@ class OverlayWindow(QMainWindow):
         
         print(f"[DEBUG] _capture_and_process: Got result. Keys: {list(result.keys())}", flush=True)
         
+        # 5. 结果传递
+        t_emit_start = time.time()
         # Deepcopy to ensure thread safety and detach from DB
         try:
              import copy
@@ -1660,7 +1689,11 @@ class OverlayWindow(QMainWindow):
              print(f"[ERROR] CRITICAL: Failed to emit result signal: {e}", flush=True)
              self.signals.error.emit(f"Internal Error: Signal Emission Failed: {e}")
              return
+        t_emit_end = time.time()
+        self.signals.log.emit(f"[PERF] 结果传递耗时: {(t_emit_end - t_emit_start):.3f}s")
 
+        t_total_end = time.time()
+        self.signals.log.emit(f"[PERF] ===== 总耗时: {(t_total_end - t_total_start):.3f}s =====")
         self.signals.status.emit("就绪")
         print("[DEBUG] _capture_and_process: Status emitted. Done.", flush=True)
 
@@ -2470,12 +2503,20 @@ class OverlayWindow(QMainWindow):
         return not text_key.startswith(prefixes)
 
     def _show_result(self, result: Dict[str, Any]) -> None:
+        import time
+        t_show_start = time.time()
         print("[DEBUG] _show_result called", flush=True)
+        self.signals.log.emit(f"[PERF] _show_result 开始")
+        
         try:
+            t1 = time.time()
             self.last_match = result
             self.last_hash = None
             self.last_event_name = None
+            self.signals.log.emit(f"[PERF] 初始化变量: {(time.time()-t1)*1000:.1f}ms")
+            
             if result.get("_multi"):
+                t2 = time.time()
                 items = result.get("items", [])
                 left = []
                 right = []
@@ -2493,7 +2534,9 @@ class OverlayWindow(QMainWindow):
                 # 使用换行分隔多个条目，检测是否包含HTML标签
                 en_joined = "\n".join(left)
                 cn_joined = "\n".join(right) if right else "（未找到中文匹配）"
+                self.signals.log.emit(f"[PERF] 多条目处理: {(time.time()-t2)*1000:.1f}ms")
                 
+                t3 = time.time()
                 self.signals.log.emit("[WINDOW] 设置文本内容")
                 # 检测英文文本是否包含HTML标签
                 if '<' in en_joined and '>' in en_joined or '【' in en_joined:
@@ -2504,7 +2547,9 @@ class OverlayWindow(QMainWindow):
                     self.source_label.setPlainText(en_joined)
                     self._last_en_is_html = False
                 self._last_en_raw = en_joined
+                self.signals.log.emit(f"[PERF] 设置英文: {(time.time()-t3)*1000:.1f}ms")
                 
+                t4 = time.time()
                 # 检测中文文本是否包含HTML标签
                 if '<' in cn_joined and '>' in cn_joined or '【' in cn_joined:
                     html_cn = self._convert_game_html(cn_joined, lang="cn")
@@ -2514,6 +2559,7 @@ class OverlayWindow(QMainWindow):
                     self.cn_label.setPlainText(cn_joined)
                     self._last_cn_is_html = False
                 self._last_cn_raw = cn_joined
+                self.signals.log.emit(f"[PERF] 设置中文: {(time.time()-t4)*1000:.1f}ms")
                 
                 # 显示官方原文而非OCR文本
                 official_en = result.get('_official_en') or result.get('_ocr_text') or ''
@@ -2526,12 +2572,16 @@ class OverlayWindow(QMainWindow):
                 self.play_pause_btn.setEnabled(False)
                 self.audio_slider.setEnabled(False)
                 self.signals.log.emit("[WINDOW] 准备显示多条目结果")
+                
+                t5 = time.time()
                 self.show()
                 self.signals.log.emit("[WINDOW] 已调用show()")
                 self.raise_()
                 self.signals.log.emit("[WINDOW] 已调用raise_()")
                 self.activateWindow()
                 self.signals.log.emit("[WINDOW] 窗口激活完成")
+                self.signals.log.emit(f"[PERF] 显示窗口: {(time.time()-t5)*1000:.1f}ms")
+                self.signals.log.emit(f"[PERF] _show_result 总耗时: {(time.time()-t_show_start)*1000:.1f}ms")
                 return
         except Exception as e:
             self.signals.error.emit(f"显示结果失败: {e}")
@@ -2543,6 +2593,7 @@ class OverlayWindow(QMainWindow):
         matches = result.get("matches") or []
         
         # 提取显示内容（英文原文 + 中文翻译）
+        t6 = time.time()
         en_text = ""
         cn_text = ""
         text_key = None
@@ -2562,14 +2613,18 @@ class OverlayWindow(QMainWindow):
             
             # 如果有标题，添加到显示开头（不加【】）
             if first_line:
+                t_title = time.time()
                 title_cn = self._translate_title(first_line)
+                self.signals.log.emit(f"[PERF] 标题翻译: {(time.time()-t_title)*1000:.1f}ms")
                 display_title = title_cn or first_line
                 # 标题样式：加粗、暗金色（和游戏原生一致）
                 en_text = f"<span style='color: #d4af37; font-weight: bold;'>{first_line}</span>\n{en_text}"
                 cn_text = f"<span style='color: #d4af37; font-weight: bold;'>{display_title}</span>\n{cn_text}"
                 self.signals.log.emit(f"[DISPLAY] 标题: {first_line} -> {display_title}, 内容: {text_key}")
+        self.signals.log.emit(f"[PERF] 提取文本内容: {(time.time()-t6)*1000:.1f}ms")
 
         # 音频识别逻辑：委托给 AudioResolver
+        t7 = time.time()
         self.last_text_key = text_key
         if text_key and self.audio_resolver:
             res = self.audio_resolver.resolve(text_key, db_event=audio_event, db_hash=audio_hash)
@@ -2587,8 +2642,10 @@ class OverlayWindow(QMainWindow):
              self.last_event_name = audio_event
              if self.last_hash:
                  self.signals.log.emit(f"[MATCH] text_key={text_key} 使用数据库哈希={self.last_hash}")
+        self.signals.log.emit(f"[PERF] 音频解析: {(time.time()-t7)*1000:.1f}ms")
         
         # 显示数据库英文原文（保留HTML标记）
+        t8 = time.time()
         if en_text:
             # 检测是否包含HTML标记
             if '<' in en_text and '>' in en_text or '【' in en_text:
@@ -2608,8 +2665,10 @@ class OverlayWindow(QMainWindow):
             self.source_label.setPlainText(f"{ocr_original}{score_info}")
             self._last_en_raw = f"{ocr_original}{score_info}"
             self._last_en_is_html = False
+        self.signals.log.emit(f"[PERF] 设置英文显示: {(time.time()-t8)*1000:.1f}ms")
         
         # 渲染中文文本（支持HTML标记）
+        t9 = time.time()
         if cn_text:
             # 检测是否包含HTML标记
             if '<' in cn_text and '>' in cn_text or '【' in cn_text:
@@ -2626,17 +2685,24 @@ class OverlayWindow(QMainWindow):
             self.cn_label.setPlainText("（未找到中文匹配）")
             self._last_cn_raw = "（未找到中文匹配）"
             self._last_cn_is_html = False
+        self.signals.log.emit(f"[PERF] 设置中文显示: {(time.time()-t9)*1000:.1f}ms")
         
         # 设置音频控件状态
+        t10 = time.time()
         has_audio = self.last_hash is not None
         self.play_pause_btn.setEnabled(has_audio)
         self.audio_slider.setEnabled(has_audio)
         
         self.signals.log.emit(f"[QUERY] {result.get('_ocr_text')} -> {query_key}")
+        self.signals.log.emit(f"[PERF] 设置音频控件: {(time.time()-t10)*1000:.1f}ms")
+        
+        self.signals.log.emit(f"[PERF] _show_result 单条目总耗时: {(time.time()-t_show_start)*1000:.1f}ms")
         
         # 确保窗口显示并置顶
         self.signals.log.emit("[DEBUG] Calling show_and_activate...")
+        t11 = time.time()
         self.show_and_activate()
+        self.signals.log.emit(f"[PERF] show_and_activate: {(time.time()-t11)*1000:.1f}ms")
         self.signals.log.emit("[DEBUG] show_and_activate returned.")
         
         # 自动播放逻辑

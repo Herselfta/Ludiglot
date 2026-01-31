@@ -3,6 +3,7 @@ import re
 import time
 from typing import Any, Dict, List, Tuple, Optional
 from ludiglot.core.search import FuzzySearcher
+from ludiglot.core.indexed_search import IndexedSearchEngine
 from ludiglot.core.text_builder import normalize_en
 from ludiglot.core.smart_match import build_smart_candidates
 from ludiglot.core.voice_event_index import VoiceEventIndex
@@ -37,6 +38,11 @@ class TextMatcher:
         self.voice_map = voice_map or {}
         self.voice_event_index = voice_event_index
         self.searcher = FuzzySearcher()
+        
+        # 先初始化 log_callback
+        self.log_callback = None
+        
+        # 别名映射
         self.alias_map = {
             "hp": "mainhp",
             "atk": "mainatk",
@@ -47,7 +53,11 @@ class TextMatcher:
             "critdamage": "maincritdmg",
             "critdmgbonus": "maincritdmg",
         }
-        self.log_callback = None
+        
+        # 然后初始化索引化搜索引擎（可能调用 log）
+        db_keys = list(db.keys())
+        self.indexed_searcher = IndexedSearchEngine(db_keys)
+        self.log(f"[MATCHER] 索引引擎已初始化 ({len(db_keys)} keys)")
 
     def set_logger(self, callback):
         self.log_callback = callback
@@ -58,7 +68,21 @@ class TextMatcher:
 
     def match(self, lines: List[Tuple[str, float]]) -> Dict[str, Any] | None:
         """Main entry point: find best DB entry for OCR lines."""
-        return self._lookup_best(lines)
+        start = time.time()
+        result = self._lookup_best(lines)
+        elapsed = time.time() - start
+        
+        # 性能监控日志
+        if elapsed > 1.0:
+            self.log(f"[PERF] match() 耗时较长: {elapsed:.2f}s")
+        
+        # 缓存统计
+        cache_stats = self.indexed_searcher.get_cache_stats()
+        hit_rate = cache_stats['hits'] / max(cache_stats['hits'] + cache_stats['misses'], 1) * 100
+        if cache_stats['hits'] + cache_stats['misses'] > 100:
+            self.log(f"[CACHE] 命中率: {hit_rate:.1f}% (hits={cache_stats['hits']}, misses={cache_stats['misses']})")
+        
+        return result
 
     def _clean_ocr_line(self, text: str) -> str:
         # 去掉图标/分隔符噪声，保留字母数字与空格
@@ -105,91 +129,81 @@ class TextMatcher:
         return max_len <= 16 and avg_words <= 2.2
 
     def search_key(self, key: str) -> tuple[Dict[str, Any], float]:
-        # 1. 直接匹配
-        if key in self.db:
+        """
+        高性能搜索实现 - 使用索引化搜索引擎
+        
+        优化策略：
+        1. 精确匹配
+        2. 前缀匹配
+        3. 子串匹配（包含关系）
+        4. 模糊搜索（使用长度预筛选）
+        """
+        # 1. 精确匹配（最快）
+        if self.indexed_searcher.exact_match(key):
             result = dict(self.db[key])
             result["_matched_key"] = key
             return result, 1.0
 
-        # 1.5 子串匹配优化
-        if len(key) >= 10:
-            # 前缀匹配
-            prefix_hits = [k for k in self.db.keys() if k.startswith(key)]
+        key_len = len(key)
+        
+        # 2. 前缀匹配（针对长查询）
+        if key_len >= 10:
+            prefix_hits = self.indexed_searcher.prefix_search(key, max_results=1)
             if prefix_hits:
-                best_prefix = min(prefix_hits, key=len)
+                best_prefix = prefix_hits[0]
                 result = dict(self.db.get(best_prefix, {}))
                 result["_matched_key"] = best_prefix
                 return result, 0.99
-            
-            # 包含匹配 (OCR 包含库项)
-            contain_in_ocr = [k for k in self.db.keys() if len(k) >= 10 and k in key]
+        
+        # 3. 子串匹配优化
+        if key_len >= 10:
+            # 查找包含query的键（OCR包含库项的情况）
+            contain_in_ocr = self.indexed_searcher.substring_search(key, direction='in')
             if contain_in_ocr:
+                # 选择最长的匹配（最具体）
                 best_k = max(contain_in_ocr, key=len)
                 length_ratio = len(best_k) / len(key)
                 
-                # 只有在覆盖度极高时才直接返回 0.95
                 if length_ratio >= 0.85:
                     result = dict(self.db.get(best_k, {}))
                     result["_matched_key"] = best_k
                     self.log(f"[MATCH] 高覆盖子串匹配：ratio={length_ratio:.2f}")
                     return result, 0.95
                 elif length_ratio >= 0.6:
-                    # 中等覆盖度，记录但允许继续搜索（由后方的模糊搜索兜底，或者直接降低分值）
-                    self.log(f"[MATCH] 中覆盖子串匹配：ratio={length_ratio:.2f}，降低分值以待进一步匹配")
-                    # 这里先不返回，让它进入后的逻辑，或者返回一个较低的基础分
-                else:
-                    self.log(f"[MATCH] 跳过低覆盖子串匹配：ratio={length_ratio:.2f}")
-
-            # 被包含匹配 (库项包含 OCR)
-            if len(key) >= 50:
-                contain_hits = [k for k in self.db.keys() if key in k]
-                if contain_hits:
-                    best_contain = min(contain_hits, key=len)
-                    if len(best_contain) <= len(key) * 3:
+                    # 中等覆盖度，记录但继续搜索
+                    self.log(f"[MATCH] 中覆盖子串匹配：ratio={length_ratio:.2f}，继续搜索更优匹配")
+            
+            # 查找被query包含的键（库项包含OCR的情况）
+            if key_len >= 50:
+                contained_keys = self.indexed_searcher.substring_search(key, direction='contains')
+                if contained_keys:
+                    best_contain = min(contained_keys, key=len)
+                    if len(best_contain) <= key_len * 3:
                         result = dict(self.db.get(best_contain, {}))
                         result["_matched_key"] = best_contain
-                        self.log(f"[MATCH] 部分截屏匹配成功：query_len={len(key)}, matched_len={len(best_contain)}")
+                        self.log(f"[MATCH] 部分截屏匹配成功：query_len={key_len}, matched_len={len(best_contain)}")
                         return result, 0.98
-
-            # 松散匹配
-            if len(key) >= 100 and fuzz:
-                min_len = int(len(key) * 0.7)
-                max_len = int(len(key) * 5.0)
-                anchor = key[50:100] if len(key) >= 100 else key[:50]
-                candidates = [k for k in self.db.keys() if min_len <= len(k) <= max_len and anchor in k]
-                
-                self.log(f"[MATCH] 松散匹配：query_len={len(key)}, 候选数量={len(candidates)}")
-                if candidates:
-                    best_loose = max(candidates, key=lambda k: fuzz.token_set_ratio(key, k))
-                    similarity = fuzz.token_set_ratio(key, best_loose) / 100.0
-                    self.log(f"[MATCH] 最佳候选：key_len={len(best_loose)}, similarity={similarity:.3f}")
-                    if similarity >= 0.45:
-                        result = dict(self.db.get(best_loose, {}))
-                        result["_matched_key"] = best_loose
-                        return result, similarity
-
-        # 2. 短查询精确匹配
-        key_len = len(key)
-        if key_len < 20 and fuzz:
-            min_len = int(key_len * 0.6)
-            max_len = int(key_len * 1.4)
-            candidates = [k for k in self.db.keys() if min_len <= len(k) <= max_len]
-            if candidates:
-                hit = process.extractOne(key, candidates, scorer=fuzz.ratio)
-                if hit:
-                    best_item, score_val, _ = hit
-                    score = score_val / 100.0
-                    if score >= 0.85:
-                        result = dict(self.db.get(str(best_item), {}))
-                        result["_matched_key"] = str(best_item)
-                        self.log(f"[MATCH] 短查询精确匹配：query_len={key_len}, matched_len={len(best_item)}, score={score:.3f}")
-                        return result, score
-
-        # 3. 常规模糊搜索
-        best, score = self.searcher.search(key, self.db.keys())
-        result = dict(self.db.get(best, {}))
-        result["_matched_key"] = best
-        return result, score
+        
+        # 4. 短查询精确匹配（严格相似度）
+        if key_len < 20:
+            fuzzy_results = self.indexed_searcher.fuzzy_search(key, top_k=1, score_threshold=0.85)
+            if fuzzy_results:
+                best_item, score = fuzzy_results[0]
+                result = dict(self.db.get(best_item, {}))
+                result["_matched_key"] = best_item
+                self.log(f"[MATCH] 短查询精确匹配：query_len={key_len}, matched_len={len(best_item)}, score={score:.3f}")
+                return result, score
+        
+        # 5. 常规模糊搜索（使用索引加速）
+        fuzzy_results = self.indexed_searcher.fuzzy_search(key, top_k=1, score_threshold=0.4)
+        if fuzzy_results:
+            best_item, score = fuzzy_results[0]
+            result = dict(self.db.get(best_item, {}))
+            result["_matched_key"] = best_item
+            return result, score
+        
+        # 6. 未找到任何匹配
+        return {}, 0.0
 
     def _lookup_best(self, lines: list[tuple[str, float]]) -> Dict[str, Any] | None:
         best_result: Dict[str, Any] | None = None
@@ -325,8 +339,15 @@ class TextMatcher:
         self.log(f"[SEARCH] 智能匹配策略={strategy}, 评估 {len(candidates)} 个候选...")
 
         start_time = time.time()
-        for text, conf in candidates:
-             if best_score > 0.96 and len(best_text.split()) > 5: break
+        
+        # 优化：减少候选数量，优先处理高质量候选
+        max_candidates = 5 if len(candidates) > 10 else len(candidates)
+        
+        for idx, (text, conf) in enumerate(candidates[:max_candidates]):
+             # 早期退出：如果已经找到高质量匹配，停止搜索
+             if best_score > 0.96 and len(best_text.split()) > 5:
+                 self.log(f"[SEARCH] 早期退出：已找到高质量匹配 (score={best_score:.3f})")
+                 break
              
              key = normalize_en(text)
              if not key: continue

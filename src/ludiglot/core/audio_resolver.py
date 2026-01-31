@@ -126,7 +126,10 @@ class AudioResolver:
         return final_names
 
     def resolve(self, text_key: str | None, db_event: str | None = None, db_hash: int | None = None) -> AudioResolution | None:
-        """全流程解析音频。"""
+        """全流程解析音频。
+        
+        优化：避免慢速文件系统扫描，优先使用缓存和直接路径。
+        """
         candidates = self.get_candidates(text_key, db_event)
         
         final_candidates: list[tuple[str, int]] = []
@@ -140,18 +143,34 @@ class AudioResolver:
 
         index = self.audio_index
         wem_root = self.config.audio_wem_root
-        bnk_root = self.config.audio_bnk_root
-        external_root = self.config.audio_external_root
         
+        # === 第一优先级：缓存查找（O(1)，非常快） ===
         for name, h in final_candidates:
             if index and index.find(h):
                 return AudioResolution(h, name, 'cache')
-            if wem_root and find_wem_by_hash(wem_root, h):
-                return AudioResolution(h, name, 'wem')
-            if external_root and find_wem_by_event_name(wem_root, name, external_root=external_root):
-                return AudioResolution(h, name, 'wem')
-            if bnk_root and find_bnk_for_event(bnk_root, name):
-                return AudioResolution(h, name, 'bnk')
         
-        # 兜底
-        return AudioResolution(final_candidates[0][1], final_candidates[0][0], 'unknown')
+        # === 第二优先级：直接路径查找（O(1)） ===
+        if wem_root:
+            for name, h in final_candidates:
+                direct = wem_root / f"{h}.wem"
+                if direct.exists():
+                    return AudioResolution(h, name, 'wem')
+        
+        # === 第三优先级：使用数据库提供的hash（跳过慢速扫描） ===
+        if db_hash:
+            # 检查缓存中是否有这个hash
+            if index and index.find(int(db_hash)):
+                return AudioResolution(int(db_hash), final_candidates[0][0] if final_candidates else "unknown", 'cache')
+            # 检查直接路径
+            if wem_root:
+                direct = wem_root / f"{db_hash}.wem"
+                if direct.exists():
+                    return AudioResolution(int(db_hash), final_candidates[0][0] if final_candidates else "unknown", 'wem')
+            # 返回db_hash作为后备，让播放器尝试
+            return AudioResolution(int(db_hash), final_candidates[0][0] if final_candidates else "unknown_from_db", "db_fallback")
+        
+        # === 最后：返回计算的hash（跳过BNK扫描，太慢） ===
+        if final_candidates:
+            return AudioResolution(final_candidates[0][1], final_candidates[0][0], 'computed')
+        
+        return None
