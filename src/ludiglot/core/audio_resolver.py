@@ -186,20 +186,43 @@ class AudioResolver:
                 return cached
         
         wem_root = self.config.audio_wem_root
+        external_root = self.config.audio_external_root
         bnk_root = self.config.audio_bnk_root
-        # 2. 检查 WEM 物理文件
+        
+        # 2. 检查 WEM 物理文件 (多目录搜寻)
+        search_roots = []
+        if wem_root: search_roots.append(wem_root)
+        if external_root: search_roots.append(external_root)
+        
         wem_file = None
-        if wem_root:
-            wem_file = find_wem_by_hash(wem_root, hash_value)
+        for root in search_roots:
+            wem_file = find_wem_by_hash(root, hash_value)
             if not wem_file and event_name:
-                wem_file = find_wem_by_event_name(wem_root, event_name)
+                wem_file = find_wem_by_event_name(root, event_name)
+            if wem_file:
+                break
         
         if wem_file:
             log(f"[AUDIO] 发现 WEM 文件: {wem_file.name}")
             try:
-                wav_path = convert_single_wem_to_wav(wem_file, self.config.audio_cache_path)
-                if wav_path and index:
-                    index.add(hash_value, wav_path)
+                wav_path = convert_single_wem_to_wav(
+                    wem_file, 
+                    self.config.audio_cache_path,
+                    self.config.vgmstream_path
+                )
+                if wav_path:
+                    # 为了兼容 AudioCacheIndex (只识别数字文件名)，重命名为 hash.wav
+                    final_path = wav_path.parent / f"{hash_value}{wav_path.suffix}"
+                    if final_path != wav_path:
+                         # 如果目标存在且有效，直接使用
+                        if final_path.exists() and final_path.stat().st_size > 0:
+                            wav_path = final_path
+                        else:
+                            shutil.move(wav_path, final_path)
+                            wav_path = final_path
+                    
+                    if index:
+                        index.add_file(wav_path)
                 return wav_path
             except Exception as e:
                 log(f"[ERROR] WEM 转码失败: {e}")
@@ -234,9 +257,23 @@ class AudioResolver:
             if txtp_file:
                 log(f"[AUDIO] 发现/生成 TXTP: {txtp_file.name}")
                 try:
-                    wav_path = convert_txtp_to_wav(txtp_file, self.config.audio_cache_path)
-                    if wav_path and index:
-                        index.add(hash_value, wav_path)
+                    wav_path = convert_txtp_to_wav(
+                        txtp_file,
+                        self.config.vgmstream_path,
+                        self.config.audio_cache_path
+                    )
+                    if wav_path:
+                        # 重命名为 hash.wav
+                        final_path = wav_path.parent / f"{hash_value}{wav_path.suffix}"
+                        if final_path != wav_path:
+                            if final_path.exists() and final_path.stat().st_size > 0:
+                                wav_path = final_path
+                            else:
+                                shutil.move(wav_path, final_path)
+                                wav_path = final_path
+                        
+                        if index:
+                            index.add_file(wav_path)
                     return wav_path
                 except Exception as e:
                     log(f"[ERROR] TXTP 转码失败: {e}")
