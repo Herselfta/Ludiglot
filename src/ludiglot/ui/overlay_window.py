@@ -1764,7 +1764,50 @@ class OverlayWindow(QMainWindow):
         return CaptureRegion(left=int(left), top=int(top), width=int(width), height=int(height))
 
     def _preprocess_image(self, image_path: Path) -> Path:
-        return image_path
+        try:
+            from PIL import Image, ImageOps
+            img = Image.open(image_path)
+            
+            # 1. 尺寸优化：如果高度较小，进行放大
+            processed = False
+            # Windows OCR 对大号字体识别效果更好，提高阈值到 600
+            # 统一使用 3.0 倍放大，除非图像特别大
+            if img.height < 600:
+                 scale = 3.0
+                 # 限制最大宽度，避免过大 (4K屏通常不超过 3840)
+                 if img.width * scale > 3500:
+                     scale = 3500 / img.width
+                 
+                 if scale > 1.0:
+                     new_size = (int(img.width * scale), int(img.height * scale))
+                     img = img.resize(new_size, Image.Resampling.LANCZOS)
+                     processed = True
+                     self.signals.log.emit(f"[PRE] 放大图像: {scale:.1f}x ({img.width}x{img.height})")
+
+            # 2. 模式转换：转为灰度
+            if img.mode != 'L':
+                img = img.convert('L')
+                processed = True
+                
+            # 3. 对比度增强
+            img = ImageOps.autocontrast(img)
+            processed = True
+            
+            # Save Debug Image
+            try:
+                debug_p = image_path.parent / "last_ocr_input.png"
+                img.save(debug_p)
+            except Exception: pass
+            
+            if processed:
+                processed_path = image_path.parent / f"{image_path.stem}_proc{image_path.suffix}"
+                img.save(processed_path)
+                return processed_path
+                
+            return image_path
+        except Exception as e:
+            self.signals.log.emit(f"[PRE] 预处理失败: {e}")
+            return image_path
 
     def _validate_capture(self, image_path: Path) -> None:
         try:

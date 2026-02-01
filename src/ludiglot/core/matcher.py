@@ -305,7 +305,8 @@ class TextMatcher:
                 rest_key = normalize_en(rest_text)
                 rest_result, rest_score = self.search_key(rest_key)
                 
-                if rest_score >= 0.5 and len(rest_text.split()) >= 5:
+                rest_word_count = len(rest_text.split())
+                if rest_score >= 0.5 and rest_word_count >= 3:
                     rest_has_voice = self._has_voice_match(rest_result)
                     first_has_voice = self._has_voice_match(first_line['result'])
                     matched_key = rest_result.get('_matched_key', '')
@@ -394,7 +395,7 @@ class TextMatcher:
             
              if has_audio:
                  # FIX: Only apply audio bonus if the base score is decent
-                 if score > 0.8: 
+                 if score > 0.65: 
                      weighted_score *= 1.15
                      self.log(f"[MATCH] 语音条目加成: has_audio=True, weighted={weighted_score:.3f}")
                  else:
