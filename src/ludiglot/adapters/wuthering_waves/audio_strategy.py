@@ -31,13 +31,13 @@ class WutheringAudioStrategy:
             candidates.append(event_name)
             # 对于已经有明确事件名的情况，只添加基础的前缀变体，不盲目生成 nosub_xx
             self._add_variants(candidates, event_name)
-            # self._add_story_variants(candidates, event_name) # 注释掉：避免污染精准映射
+            self._add_story_variants(candidates, event_name) # 恢复：剧情 ID 变体生成
         
         # 2. 处理基于 text_key 的启发式猜测
         if text_key:
             candidates.append(text_key)
             self._add_variants(candidates, text_key)
-            # self._add_story_variants(candidates, text_key) # 完全禁用启发式剧情变体猜测，以防误中
+            self._add_story_variants(candidates, text_key) # 恢复：剧情 ID 变体生成
             
             # 特殊处理：如果 text_key 形如 Dialog_1001_1，尝试 vo_Dialog_1001_1
             if "_" in text_key:

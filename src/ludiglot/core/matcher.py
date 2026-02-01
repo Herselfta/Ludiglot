@@ -414,7 +414,7 @@ class TextMatcher:
         elapsed = time.time() - start_time
         if best_result:
             # 修改：增加全局置信度阈值
-            if best_score < 0.35:
+            if best_score < 0.55:
                 self.log(f"[SEARCH] 耗时: {elapsed:.2f}s, 最佳匹配权重过低 ({best_score:.3f}), 丢弃结果")
                 return None
             

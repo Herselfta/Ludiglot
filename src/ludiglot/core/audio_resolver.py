@@ -9,7 +9,12 @@ from ludiglot.core.voice_map import _resolve_events_for_text_key
 from ludiglot.core.voice_event_index import VoiceEventIndex
 from ludiglot.core.audio_mapper import AudioCacheIndex
 from ludiglot.adapters.wuthering_waves.audio_strategy import WutheringAudioStrategy
-from ludiglot.core.audio_extract import find_wem_by_hash, find_bnk_for_event, find_wem_by_event_name
+from ludiglot.core.audio_extract import (
+    find_wem_by_hash, find_bnk_for_event, find_wem_by_event_name, 
+    default_wwiser_path, find_txtp_for_event, 
+    convert_single_wem_to_wav, generate_txtp_for_bnk, convert_txtp_to_wav
+)
+import shutil
 
 class AudioResolution(NamedTuple):
     hash_value: int
@@ -50,78 +55,65 @@ class AudioResolver:
                 # 数据库自带的 Event 放在 Stage 0 的末尾，作为参考而非绝对权威。
                 events.append(clean_db_event)
 
+        # 0. 准备阶段容器
         stages: list[list[str]] = [
-            events,
-            [],
-            []
+            events,  # Stage 0: DB/TextMap (Highest Confidence)
+            [],      # Stage 1: Strategy Heuristics (High Confidence)
+            []       # Stage 2: Fuzzy/Index Search (Low Confidence)
         ]
 
+        # 1. 填充 Stage 1 (Strategy) 和 Stage 2 (Fuzzy)
         if text_key:
             stages[1].extend(self.strategy.build_names(text_key, None))
             
-            # 限制剧情 ID 的模糊搜索：如果 ID 看起来很长且具有典型的剧情结构，禁止模糊发现
-            is_story_id = "_" in text_key and sum(ch.isdigit() for ch in text_key) >= 3
-            if self._voice_event_index and not is_story_id:
+            # 恢复模糊搜索：无论是否是 Story ID，如果 Strategy 没命中，都需要 Fuzzy 作为兜底
+            # 旧版逻辑证明这是必要的，且通过分级排序可以避免误匹配
+            if self._voice_event_index:
                  seed = events[0] if events else None
                  stages[2].extend(self._voice_event_index.find_candidates(text_key, seed, limit=8))
-            elif is_story_id:
-                 # 对于剧情 ID，即使没搜到，也不允许模糊 fallback 到邻近 ID
-                 pass
+
         elif db_event:
-            # 只有事件名时，添加其变体
             stages[1].extend(self.strategy.build_names(None, db_event))
 
-        pref = (self.config.gender_preference or "female").lower()
-        f_pats = ["_f_", "nvzhu", "roverf", "_female"]
-        m_pats = ["_m_", "nanzhu", "roverm", "_male"]
-        target_pats = f_pats if pref == "female" else m_pats
-        other_pats = m_pats if pref == "female" else f_pats
-
-        def get_priority(n):
-            nl = n.lower()
-            if any(w in nl for w in target_pats): return 0
-            if any(w in nl for w in other_pats): return 2
-            return 1
-
-        # 收集所有阶段的候选者
-        all_stage_names: list[str] = []
-        for stage_names in stages:
-            for name in stage_names:
-                if name and name not in all_stage_names:
-                    all_stage_names.append(name)
-        
-        # 为没有性别标记的候选者主动生成性别版本，确保第一时间覆盖
-        extra_gendered = []
-        for name in all_stage_names:
-            nl = name.lower()
-            if not any(w in nl for w in ["_f", "_m", "nanzhu", "nvzhu", "roverf", "roverm"]):
-                extra_gendered.append(f"{name}_f")
-                extra_gendered.append(f"{name}_m")
-        
-        all_stage_names.extend(extra_gendered)
-
+        # 2. 定义性别排序优先级
         pref = (self.config.gender_preference or "female").lower()
         f_pats = ["_f", "nvzhu", "roverf", "_female"]
         m_pats = ["_m", "nanzhu", "roverm", "_male"]
         target_pats = f_pats if pref == "female" else m_pats
         other_pats = m_pats if pref == "female" else f_pats
 
-        def get_priority(n):
+        def get_priority(n: str) -> int:
             nl = n.lower()
-            # 优先匹配指定性别的，然后是中性的，最后是反性别的
-            if any(w in nl for w in target_pats): return 0
-            if any(w in nl for w in other_pats): return 2
-            return 1
+            if any(w in nl for w in target_pats): return 0  # 命中偏好性别
+            if any(w in nl for w in other_pats): return 2   # 命中相反性别
+            return 1                                        # 中性/未知
 
+        # 3. 分阶段处理：生成性别变体 -> 组内排序 -> 合并
         final_names: list[str] = []
         seen = set()
-        # 全局按照性别偏好排序
-        sorted_all = sorted(all_stage_names, key=get_priority)
-        for name in sorted_all:
-            if not name or name in seen:
-                continue
-            seen.add(name)
-            final_names.append(name)
+
+        for stage_names in stages:
+            # A. 为当前阶段的每个候选项生成性别变体 (扩充)
+            # 这样做是为了保证：Stage 1 的 "Name_F" 仍然属于 Stage 1，优于 Stage 2 的任何东西
+            expanded_stage = []
+            for name in stage_names:
+                if not name: continue
+                expanded_stage.append(name)
+                
+                nl = name.lower()
+                # 如果本身是中性的，尝试生成性别变体
+                if not any(w in nl for w in ["_f", "_m", "nanzhu", "nvzhu", "roverf", "roverm"]):
+                    expanded_stage.append(f"{name}_f")
+                    expanded_stage.append(f"{name}_m")
+            
+            # B. 组内排序
+            stage_sorted = sorted(expanded_stage, key=get_priority)
+            
+            # C. 添加到最终列表 (去重)
+            for name in stage_sorted:
+                if name not in seen:
+                    seen.add(name)
+                    final_names.append(name)
             
         return final_names
 
@@ -172,5 +164,81 @@ class AudioResolver:
         # === 最后：返回计算的hash（跳过BNK扫描，太慢） ===
         if final_candidates:
             return AudioResolution(final_candidates[0][1], final_candidates[0][0], 'computed')
+        
+        return None
+
+    def ensure_playable_audio(
+        self, 
+        hash_value: int, 
+        text_key: str | None, 
+        event_name: str | None,
+        log_callback: Any = None
+    ) -> Path | None:
+        """确保音频可播放（提取WEM/生成TXTP/转码WAV）。"""
+        def log(msg):
+            if log_callback: log_callback(msg)
+        
+        index = self.audio_index
+        # 1. 再次检查缓存 (可能刚刚被另一个线程生成了)
+        if index:
+            cached = index.find(hash_value)
+            if cached: 
+                return cached
+        
+        wem_root = self.config.audio_wem_root
+        bnk_root = self.config.audio_bnk_root
+        # 2. 检查 WEM 物理文件
+        wem_file = None
+        if wem_root:
+            wem_file = find_wem_by_hash(wem_root, hash_value)
+            if not wem_file and event_name:
+                wem_file = find_wem_by_event_name(wem_root, event_name)
+        
+        if wem_file:
+            log(f"[AUDIO] 发现 WEM 文件: {wem_file.name}")
+            try:
+                wav_path = convert_single_wem_to_wav(wem_file, self.config.audio_cache_path)
+                if wav_path and index:
+                    index.add(hash_value, wav_path)
+                return wav_path
+            except Exception as e:
+                log(f"[ERROR] WEM 转码失败: {e}")
+                return None
+
+        # 3. 检查 BNK 并生成 TXTP
+        if bnk_root and (event_name or hash_value):
+            log(f"[AUDIO] 尝试从 BNK 提取: {event_name or hash_value}")
+            txtp_cache = self.config.audio_txtp_cache
+            if not txtp_cache and self.config.audio_cache_path:
+                txtp_cache = self.config.audio_cache_path / "txtp_cache"
+                txtp_cache.mkdir(exist_ok=True)
+            
+            # 使用 wwiser 生成 txtp
+            bnk_file = None
+            if event_name:
+                bnk_file = find_bnk_for_event(bnk_root, event_name)
+            
+            # 如果没找到 BNK 但有 event_name，或许可以直接搜现有的 txtp?
+            txtp_file = None
+            if event_name:
+                 txtp_file = find_txtp_for_event(txtp_cache, event_name)
+            
+            if not txtp_file and bnk_file and txtp_cache:
+                try:
+                    # 调用 wwiser
+                    wwiser_path = default_wwiser_path() 
+                    txtp_file = generate_txtp_for_bnk(bnk_file, event_name or str(hash_value), txtp_cache)
+                except Exception as e:
+                    log(f"[ERROR] BNK 处理失败: {e}")
+            
+            if txtp_file:
+                log(f"[AUDIO] 发现/生成 TXTP: {txtp_file.name}")
+                try:
+                    wav_path = convert_txtp_to_wav(txtp_file, self.config.audio_cache_path)
+                    if wav_path and index:
+                        index.add(hash_value, wav_path)
+                    return wav_path
+                except Exception as e:
+                    log(f"[ERROR] TXTP 转码失败: {e}")
         
         return None

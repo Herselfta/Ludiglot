@@ -2872,129 +2872,60 @@ class OverlayWindow(QMainWindow):
             self.audio_index.scan()
         
         path = None
-        if self.audio_resolver:
-            # 重新尝试定位物理文件 (处理可能的延迟加载)
-            res = self.audio_resolver.resolve(self.last_text_key, db_event=self.last_event_name, db_hash=self.last_hash)
-            if res:
-                self.last_hash = res.hash_value
-                self.last_event_name = res.event_name
-                
-                # 如果是 cache，直接获取路径
-                if res.source_type == 'cache':
-                    path = self.audio_resolver.audio_index.find(res.hash_value)
-                elif res.source_type == 'wem' or res.source_type == 'bnk':
-                    # 需要触发提取逻辑
-                    path = self._ensure_audio_from_event()
-        
-        # 兜底：如果 resolver 没搞定，尝试原始 index
-        if path is None and self.last_hash:
-            if self.audio_index:
-                path = self.audio_index.find(self.last_hash)
-        
-        if path is None:
-            path = self._ensure_audio_from_event()
-        
-        if path is None:
-            self.signals.status.emit("未找到对应音频文件")
-            return
-
-        self.signals.status.emit(f"正在播放: {path.name}")
-        self.player.play(str(path), block=False)
-        
-        # 启用音频控制UI
-        self.play_pause_btn.setEnabled(True)
-        if self._icon_pause:
-            self.play_pause_btn.setIcon(self._icon_pause)
-        self.audio_slider.setEnabled(True)
-        self.audio_slider.setValue(0)
-        self.audio_timer.start()
-
-    def _ensure_audio_from_event(self) -> Path | None:
-        if self.last_hash is None:
-            return None
-        if not self.config.audio_cache_path:
-            return None
-        if not self.config.audio_wem_root or not self.config.audio_bnk_root:
-            return None
-        if not self.config.vgmstream_path:
-            return None
-        txtp_cache = self.config.audio_txtp_cache
-        if not txtp_cache:
-            return None
-        wwiser_path = self.config.wwiser_path or default_wwiser_path()
-        text_key = self.last_text_key
-
-        event_candidates = []
-        if self.audio_resolver:
-            event_candidates = self.audio_resolver.get_candidates(text_key, self.last_event_name)
-        
-        if not event_candidates and self.last_event_name:
-            event_candidates = [self.last_event_name]
+        try:
+            print("[DEBUG] play_audio started", flush=True)
+            if self.audio_resolver:
+                # 重新尝试定位物理文件 (处理可能的延迟加载)
+                res = self.audio_resolver.resolve(self.last_text_key, db_event=self.last_event_name, db_hash=self.last_hash)
+                if res:
+                    self.last_hash = res.hash_value
+                    self.last_event_name = res.event_name
+                    print(f"[DEBUG] play_audio resolved: {res.source_type}", flush=True)
+                    
+                    # 如果是 cache，直接获取路径
+                    if res.source_type == 'cache':
+                        path = self.audio_resolver.audio_index.find(res.hash_value)
+                    elif res.source_type == 'wem' or res.source_type == 'bnk':
+                        # 需要触发提取逻辑
+                        print("[DEBUG] Triggering ensure_playable_audio (1)...", flush=True)
+                        path = self.audio_resolver.ensure_playable_audio(
+                            self.last_hash, self.last_text_key, self.last_event_name, log_callback=self.signals.log.emit
+                        )
             
-        event_candidates = event_candidates[:8]
-
-        for event_name in event_candidates:
-            # 0. 尝试直接从 ExternalSource/WEM 命中（剧情常见）
-            direct_wem = None
-            if self.config.audio_wem_root:
-                direct_wem = find_wem_by_event_name(
-                    self.config.audio_wem_root,
-                    event_name,
-                    external_root=self.config.audio_external_root,
-                )
-            if direct_wem is not None:
-                try:
-                    path = convert_single_wem_to_wav(
-                        direct_wem,
-                        self.config.vgmstream_path,
-                        self.config.audio_cache_path,
-                    )
-                    # 若有 hash，额外生成 hash 命名副本，方便缓存索引命中
-                    if self.last_hash is not None:
-                        target = self.config.audio_cache_path / f"{self.last_hash}.wav"
-                        if path != target and not target.exists():
-                            try:
-                                shutil.copyfile(path, target)
-                                path = target
-                            except Exception:
-                                pass
-                    if self.audio_index:
-                        self.audio_index.add_file(path)
-                    return path
-                except Exception as exc:
-                    self.signals.log.emit(f"[VOICE] WEM 转码失败: {exc}")
-            
-            bnk_path = find_bnk_for_event(self.config.audio_bnk_root, event_name)
-            if bnk_path is None:
-                self.signals.log.emit(f"[VOICE] 未找到 BNK: {event_name}")
-                continue
-            try:
-                txtp_files = generate_txtp_for_bnk(
-                    bnk_path,
-                    self.config.audio_wem_root,
-                    txtp_cache,
-                    wwiser_path,
-                    log_callback=self.signals.log.emit,
-                )
-            except Exception as exc:
-                self.signals.log.emit(f"[VOICE] TXTP 生成失败: {exc}")
-                continue
-            if not txtp_files:
-                self.signals.log.emit(f"[VOICE] TXTP 为空: {bnk_path.name}")
-                continue
-            txtp_dir = txtp_cache / bnk_path.stem
-            # 传入 hash 以便在没有命名的 TXTP 中寻找 (例如 3157737296.txtp)
-            txtp_path = find_txtp_for_event(txtp_dir, event_name, self.last_hash) or txtp_files[0]
-            output_path = self.config.audio_cache_path / f"{self.last_hash}.wav"
-            try:
-                path = convert_txtp_to_wav(txtp_path, self.config.vgmstream_path, output_path)
+            # 兜底：如果 resolver 没搞定，尝试原始 index
+            if path is None and self.last_hash:
                 if self.audio_index:
-                    self.audio_index.add_file(path)
-                return path
-            except Exception as exc:
-                self.signals.log.emit(f"[VOICE] TXTP 转码失败: {exc}")
-                continue
-        return None
+                    path = self.audio_index.find(self.last_hash)
+            
+            if path is None and self.audio_resolver:
+                print("[DEBUG] Triggering ensure_playable_audio (fallback)...", flush=True)
+                path = self.audio_resolver.ensure_playable_audio(
+                    self.last_hash, self.last_text_key, self.last_event_name, log_callback=self.signals.log.emit
+                )
+            
+            if path is None:
+                self.signals.status.emit("未找到对应音频文件")
+                print("[DEBUG] play_audio: path not found", flush=True)
+                return
+
+            self.signals.status.emit(f"正在播放: {path.name}")
+            print(f"[DEBUG] Invoking self.player.play: {path}", flush=True)
+            self.player.play(str(path), block=False)
+            
+            # 启用音频控制UI
+            self.play_pause_btn.setEnabled(True)
+            if self._icon_pause:
+                self.play_pause_btn.setIcon(self._icon_pause)
+            self.audio_slider.setEnabled(True)
+            self.audio_slider.setValue(0)
+            self.audio_timer.start()
+        except Exception as e:
+            print(f"[ERROR] play_audio crashed: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
+            self.signals.error.emit(f"播放失败: {e}")
+
+
 
     def closeEvent(self, event) -> None:
         """关闭前保存所有状态"""
@@ -3334,33 +3265,74 @@ class OverlayWindow(QMainWindow):
         self._win_hotkey_ids = []
 
     def _select_region(self) -> CaptureRegion | None:
-        """选择屏幕区域并转换为物理像素坐标。"""
+        """选择屏幕区域并转换为物理像素坐标（适配多屏不同DPI）。"""
         selector = ScreenSelector()
         rect = selector.get_region()
         
         if rect is None or rect.width() <= 0 or rect.height() <= 0:
             return None
+            
+        print(f"[框选] 逻辑坐标: {rect}")
+
+        # 1. 找到选区中心所在的屏幕
+        center = rect.center()
+        target_screen = QGuiApplication.primaryScreen()
+        target_index = 0
+        screens = QGuiApplication.screens()
         
-        # ScreenSelector 返回的是逻辑坐标
-        # 对于截图操作（mss等库），需要物理像素坐标
-        screen = QGuiApplication.primaryScreen()
-        dpr = screen.devicePixelRatio() if screen else 1.0
+        for idx, screen in enumerate(screens):
+            if screen.geometry().contains(center):
+                target_screen = screen
+                target_index = idx
+                break
         
-        # 转换为物理坐标
-        physical_left = int(rect.x() * dpr)
-        physical_top = int(rect.y() * dpr)
-        physical_width = int(rect.width() * dpr)
-        physical_height = int(rect.height() * dpr)
+        dpr = target_screen.devicePixelRatio()
+        print(f"[框选] 命中屏幕: {target_screen.name()} (Index {target_index}), DPR: {dpr}")
+
+        # 2. 计算相对于该屏幕左上角的**逻辑偏移**
+        screen_geo = target_screen.geometry()
+        rel_x = rect.x() - screen_geo.x()
+        rel_y = rect.y() - screen_geo.y()
         
-        print(f"[框选] 逻辑坐标: ({rect.x()}, {rect.y()}, {rect.width()}, {rect.height()})")
-        print(f"[框选] 物理坐标: ({physical_left}, {physical_top}, {physical_width}, {physical_height})")
-        print(f"[框选] DPI缩放比: {dpr}")
+        # 3. 转换为**物理偏移**
+        phy_x_local = int(rel_x * dpr)
+        phy_y_local = int(rel_y * dpr)
+        phy_w = int(rect.width() * dpr)
+        phy_h = int(rect.height() * dpr)
+        
+        # 4. 映射到 MSS 的全局物理体系
+        # mss.monitors[0] 是组合桌面，[1] 是第一块屏，以此类推
+        # 假设 Qt screens 顺序与 mss monitors 顺序一致 (通常是 true)
+        import mss
+        final_x, final_y = 0, 0
+        
+        try:
+            with mss.mss() as sct:
+                # 能够匹配的数量
+                count = len(sct.monitors) - 1 
+                if target_index < count:
+                    mss_mon = sct.monitors[target_index + 1] # +1 跳过 All
+                    final_x = mss_mon['left'] + phy_x_local
+                    final_y = mss_mon['top'] + phy_y_local
+                    
+                    print(f"[框选] MSS Monitor[{target_index+1}]: {mss_mon}")
+                else:
+                    # 兜底：如果索引对不上，尝试使用主屏逻辑或简单逻辑
+                    print("[框选] 警告：MSS 屏幕数量不匹配，回退到主屏估算")
+                    final_x = phy_x_local
+                    final_y = phy_y_local
+        except Exception as e:
+            print(f"[框选] MSS 坐标映射失败: {e}")
+            final_x = int(rect.x() * dpr)
+            final_y = int(rect.y() * dpr)
+
+        print(f"[框选] 最终物理坐标: ({final_x}, {final_y}, {phy_w}, {phy_h})")
         
         return CaptureRegion(
-            left=physical_left,
-            top=physical_top,
-            width=physical_width,
-            height=physical_height,
+            left=final_x,
+            top=final_y,
+            width=phy_w,
+            height=phy_h,
         )
 
 
@@ -3426,122 +3398,32 @@ def run_gui(config_path: Path) -> None:
         print("[DEBUG] Application exiting.", flush=True)
 
 
-class ScreenSelector(QWidget):
-    """全屏选区控件，返回用户选定的区域（全局坐标）。
-    
-    修复高DPI屏幕下的坐标偏移问题：
-    - 考虑设备像素比（devicePixelRatio）
-    - 使用物理像素进行截图和显示
-    - 在返回坐标时转换回逻辑坐标
-    """
-
+class ScreenOverlay(QWidget):
+    """单屏幕覆盖窗口"""
     region_selected = pyqtSignal(QRect)
 
-    def __init__(self) -> None:
-        super().__init__()
-        screen = QGuiApplication.primaryScreen()
+    def __init__(self, screen, parent=None):
+        super().__init__(parent)
         self._screen = screen
+        self.setGeometry(screen.geometry()) # 逻辑坐标
         
-        # 获取设备像素比（High DPI 缩放比例）
-        self._device_pixel_ratio = screen.devicePixelRatio() if screen else 1.0
-        
-        # 使用虚拟几何作为逻辑坐标系
-        self._virtual_rect = screen.virtualGeometry() if screen else QRect(0, 0, 1920, 1080)
-        
-        # 设置窗口几何（逻辑坐标）
-        self.setGeometry(self._virtual_rect)
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
             | Qt.WindowType.Tool
         )
-        self.setWindowState(Qt.WindowState.WindowFullScreen)
+        # 每个窗口只负责自己所在的屏幕，避免跨屏DPI问题
+        self.setScreen(screen)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
         
         self.rubber_band: QRubberBand | None = None
         self.origin: QPoint | None = None
-        self._selected_rect: QRect | None = None
-        self._background = self._capture_background()
-        
-        # 调试信息
-        print(f"[ScreenSelector] 设备像素比: {self._device_pixel_ratio}")
-        print(f"[ScreenSelector] 虚拟几何(逻辑): {self._virtual_rect}")
-        print(f"[ScreenSelector] 物理分辨率: {screen.geometry() if screen else 'N/A'}")
-
-    def get_region(self) -> QRect | None:
-        try:
-            loop = QEventLoop()
-            self.region_selected.connect(loop.quit)
-            self.show()
-            self.raise_()
-            self.activateWindow()
-            loop.exec()
-            self.hide()
-            return self._selected_rect
-        except Exception as e:
-            print(f"[ScreenSelector ERROR] {e}")
-            import traceback
-            traceback.print_exc()
-            self.hide()
-            return None
-
-    def _capture_background(self) -> QPixmap:
-        """捕获屏幕背景，考虑高DPI缩放。"""
-        # 创建逻辑尺寸的背景pixmap
-        background = QPixmap(self._virtual_rect.size())
-        if background.isNull():
-            # 如果pixmap创建失败，返回最小有效pixmap
-            background = QPixmap(1920, 1080)
-        background.fill(Qt.GlobalColor.black)
-        
-        painter = QPainter(background)
-        if not painter.isActive():
-            return background
-        
-        # 遍历所有屏幕并捕获
-        for screen in QGuiApplication.screens():
-            # grabWindow(0) 返回整个屏幕的截图
-            # 返回的pixmap已经包含了正确的devicePixelRatio信息
-            pix = screen.grabWindow(0)
-            
-            # 获取屏幕的逻辑几何（Qt自动处理DPI）
-            screen_geom = screen.geometry()
-            
-            # 计算屏幕在虚拟桌面中的偏移量（逻辑坐标）
-            offset = screen_geom.topLeft() - self._virtual_rect.topLeft()
-            
-            # Qt的drawPixmap会自动处理DPI缩放
-            # 如果pix有devicePixelRatio，会按逻辑尺寸绘制
-            painter.drawPixmap(offset, pix)
-        
-        painter.end()
-        
-        # 调试信息
-        print(f"[ScreenSelector] 背景Pixmap尺寸: {background.size()}, DPR: {background.devicePixelRatio()}")
-        return background
-
-        return background
-
-    def closeEvent(self, event) -> None:
-        print("[DEBUG] ScreenSelector closeEvent", flush=True)
-        super().closeEvent(event)
 
     def paintEvent(self, event) -> None:
-        """绘制背景和半透明遮罩。"""
-        if self._background is None or self._background.isNull():
-            return
-        
         painter = QPainter(self)
-        if not painter.isActive():
-            return
-        
-        # 绘制背景截图，Qt会自动处理DPI缩放
-        painter.drawPixmap(self.rect(), self._background, self._background.rect())
-        
-        # 添加半透明深色遮罩以便看清框选区域
-        painter.fillRect(self.rect(), QColor(0, 0, 0, 80))
-        
+        if not painter.isActive(): return
+        painter.fillRect(self.rect(), QColor(0, 0, 0, 80)) # 半透明遮罩
         painter.end()
 
     def mousePressEvent(self, event) -> None:
@@ -3557,31 +3439,68 @@ class ScreenSelector(QWidget):
             self.rubber_band.setGeometry(QRect(self.origin, event.pos()).normalized())
 
     def mouseReleaseEvent(self, event) -> None:
-        """鼠标释放时，转换坐标到全局物理像素坐标。"""
-        if self.rubber_band is None or not self.origin:
-            self._selected_rect = None
-        else:
-            # 获取选区的窗口本地坐标（逻辑坐标）
+        if self.rubber_band and self.origin:
             rect = self.rubber_band.geometry().normalized()
-            
-            # 转换到全局坐标（逻辑坐标系）
-            # 窗口本地坐标 + 窗口全局位置
+            # 转换为全局逻辑坐标
             global_top_left = self.mapToGlobal(rect.topLeft())
-            
-            # 创建全局坐标的矩形（逻辑坐标）
-            self._selected_rect = QRect(global_top_left, rect.size())
-            
-            # 调试输出
-            print(f"[ScreenSelector] 选中区域(逻辑): x={global_top_left.x()}, y={global_top_left.y()}, w={rect.width()}, h={rect.height()}")
-            print(f"[ScreenSelector] 物理坐标预估: x={int(global_top_left.x()*self._device_pixel_ratio)}, y={int(global_top_left.y()*self._device_pixel_ratio)}, w={int(rect.width()*self._device_pixel_ratio)}, h={int(rect.height()*self._device_pixel_ratio)}")
-        
-        self.region_selected.emit(self._selected_rect or QRect())
-        self.close()
+            global_rect = QRect(global_top_left, rect.size())
+            self.region_selected.emit(global_rect)
+        else:
+            self.region_selected.emit(QRect())
 
     def keyPressEvent(self, event) -> None:
         if event.key() == Qt.Key.Key_Escape:
-            self._selected_rect = None
             self.region_selected.emit(QRect())
-            self.close()
-            return
-        super().keyPressEvent(event)
+        else:
+            super().keyPressEvent(event)
+
+
+class ScreenSelector(QObject):
+    """全屏选区控制器，管理多屏覆盖窗口。"""
+    region_selected_signal = pyqtSignal(QRect)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._overlays: list[ScreenOverlay] = []
+        self._selected_rect: QRect | None = None
+        self._loop: QEventLoop | None = None
+
+        # 为每个屏幕创建一个覆盖窗口
+        screens = QGuiApplication.screens()
+        for screen in screens:
+            overlay = ScreenOverlay(screen)
+            overlay.region_selected.connect(self._on_region_selected)
+            self._overlays.append(overlay)
+            
+        print(f"[ScreenSelector] 已初始化 {len(self._overlays)} 个屏幕覆盖层")
+
+    def get_region(self) -> QRect | None:
+        try:
+            self._loop = QEventLoop()
+            
+            for overlay in self._overlays:
+                overlay.showFullScreen() 
+                overlay.raise_()
+                overlay.activateWindow()
+            
+            self._loop.exec()
+            
+            # 清理
+            for overlay in self._overlays:
+                overlay.close()
+                
+            return self._selected_rect
+        except Exception as e:
+            print(f"[ScreenSelector ERROR] {e}")
+            import traceback
+            traceback.print_exc()
+            for overlay in self._overlays:
+                overlay.close()
+            return None
+
+    def _on_region_selected(self, rect: QRect) -> None:
+        # 当任意一个屏幕完成了选区，保存结果并退出循环
+        if not rect.isNull():
+            self._selected_rect = rect
+        if self._loop and self._loop.isRunning():
+            self._loop.quit()
