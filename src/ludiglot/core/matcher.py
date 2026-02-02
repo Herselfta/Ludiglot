@@ -177,8 +177,9 @@ class TextMatcher:
             if key_len >= 50:
                 contained_keys = self.indexed_searcher.substring_search(key, direction='contains')
                 if contained_keys:
-                    best_contain = min(contained_keys, key=len)
-                    if len(best_contain) <= key_len * 3:
+                    # 应该选择最长的匹配项，以尽量覆盖更多的查询文本
+                    best_contain = max(contained_keys, key=len)
+                    if len(best_contain) >= key_len * 0.4: # 增加一个基本的覆盖率要求
                         result = dict(self.db.get(best_contain, {}))
                         result["_matched_key"] = best_contain
                         self.log(f"[MATCH] 部分截屏匹配成功：query_len={key_len}, matched_len={len(best_contain)}")

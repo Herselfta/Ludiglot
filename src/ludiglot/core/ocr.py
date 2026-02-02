@@ -22,6 +22,13 @@ except ImportError:
     np = None
     HAS_NUMPY = False
 
+try:
+    import cv2
+    HAS_CV2 = True
+except ImportError:
+    cv2 = None
+    HAS_CV2 = False
+
 PaddleOCR = None
 
 
@@ -311,9 +318,6 @@ class OCREngine:
             except ImportError:
                 result_container["error"] = "WinRT模块导入失败"
                 return
-            except Exception as e:
-                result_container["error"] = f"模块导入错误 - {e.__class__.__name__}"
-                return
 
             def _parse_ocr_result(result):
                 lines_list = []
@@ -357,28 +361,6 @@ class OCREngine:
                         prev = word_list[i-1]
                         curr = word_list[i]
                         gap = curr["x"] - (prev["x"] + prev["width"])
-                        # 动态间距阈值：使用单词高度的 2.0 倍作为阈值 (或者固定较大幅度)
-                        # 一般单词间距很小 (10px左右)，独立列间距很大 (>50px)
-                        # 之前 50px 可能对于大字体来说太小了，但对于合并问题，我们需要确保 *不* 分割
-                        # 这里的问题是合并： "Warren" 和 "handles" 之间 gap=10。 10 < 50 => 合并。
-                        # 合并时用 " ".join()。
-                        # 如果出现 "Warrenlhahdles"，那只能是 OCR 识别出了这几个字，或者 join 出错
-                        # 但诊断显示 "Warren" 和 "handles" 确实被识别出来了。
-                        # gap=10.0 => if 10 > 50 False => current_group.append(curr)
-                        # 最后 join: " ".join(...) => "Warren handles"
-                        # 所以逻辑看起来没问题。
-                        # 唯一的可能是，之前的 OCR 识别出的 word 本身就是错的?
-                        # 诊断日志显示: Word: 'Warren', Word: 'håndles' (注意 å in håndles)
-                        # wait, "håndles"?
-                        # The user said: "Warren handles" vs "Warrenlhahdles"
-                        # Diagnostic: "Warren" (gap 10) "håndles".
-                        # Ah! "håndles" has a weird char. And "Royan" etc.
-                        # Wait, why "håndles"?
-                        # Maybe because Language is en-GB and it hallucinates Swedish/Danish chars?
-                        # Or simple noise.
-                        
-                        # Use a large threshold to avoid splitting sentences unnecessarily
-                        # Only split if visual gap is truly huge (e.g. separate UI columns)
                         threshold = max(50, curr["height"] * 2.0)
                         if gap > threshold:
                             groups.append(current_group)
@@ -398,8 +380,13 @@ class OCREngine:
                         lines_list.append({"text": g_text, "conf": 0.92, "box": box})
                 return lines_list
 
-            def _recognize_bytes(bytes_data):
+            def _recognize_pil_image(pil_img):
                 try:
+                    buf = io.BytesIO()
+                    # 总是使用 PNG 内存流，保留最高清晰度
+                    pil_img.save(buf, format='PNG')
+                    bytes_data = buf.getvalue()
+                    
                     stream = InMemoryRandomAccessStream()
                     writer = DataWriter(stream)
                     writer.write_bytes(bytes_data)
@@ -420,74 +407,96 @@ class OCREngine:
                     return []
 
             try:
-                # 1. 尝试原始图片
-                lines1 = _recognize_bytes(image_bytes)
+                # 初始识别以确定缩放比例
+                import io
+                from PIL import ImageOps, ImageEnhance
+                ori_pil = Image.open(io.BytesIO(image_bytes))
+                
+                # 基准识别 (快速初探)
+                init_lines = _recognize_pil_image(ori_pil)
+                
+                # 计算自适应缩放 (目标 40px 字高 - "金发姑娘原则")
+                avg_height = 0
+                word_count = 0
+                for line in init_lines:
+                    box = line.get('box')
+                    if box:
+                        avg_height += (box[2][1] - box[0][1])
+                        word_count += 1
+                
+                if word_count > 0:
+                    avg_height /= word_count
+                else:
+                    avg_height = 20
+                
+                ideal_height = 40.0
+                scale = 1.0
+                if avg_height < ideal_height:
+                    scale = min(ideal_height / avg_height, 3.5)
+                
+                # 准备缩放后的图像
+                w, h = ori_pil.size
+                proc_pil = ori_pil.resize((int(w * scale), int(h * scale)), Image.Resampling.BICUBIC).convert('L')
+                
+                # 锐化处理 (Unsharp Masking 效果)
+                enhancer = ImageEnhance.Sharpness(proc_pil)
+                proc_pil = enhancer.enhance(2.0)
+                
+                # --- 多路识别策略 (Multi-Pass) ---
+                candidates = [] # List of (lines, score, name)
+                
+                # 通道 1: 原始对比度增强
+                pass1_img = ImageOps.autocontrast(proc_pil)
+                lines1 = _recognize_pil_image(pass1_img)
                 score1 = _check_quality(lines1)
-                # print(f"[OCR Debug] Score: {score1:.3f}")
+                candidates.append((lines1, score1, "Normal"))
                 
-                final_lines = lines1
+                # 通道 2: 反色识别 (针对黑底白字游戏的降妖伏魔)
+                pass2_img = ImageOps.invert(pass1_img)
+                lines2 = _recognize_pil_image(pass2_img)
+                score2 = _check_quality(lines2)
+                candidates.append((lines2, score2, "Inverted"))
                 
-                # 2. 如果质量低或字号过小，尝试自适应放大 (Text-Grab 策略)
-                if HAS_PIL and Image is not None:
-                    # 计算平均字高
-                    avg_height = 0
-                    word_count = 0
-                    for line in lines1:
-                         # 这里 line['box'] 是 [[x1,y1], [x2,y1], [x2,y2], [x1,y2]]
-                         # 高度 = y2 - y1
-                         box = line.get('box')
-                         if box:
-                             h_val = box[2][1] - box[0][1]
-                             avg_height += h_val
-                             word_count += 1
-                    
-                    if word_count > 0:
-                        avg_height /= word_count
-                    else:
-                         avg_height = 20 # 默认假设较小
+                # 通道 3: CLAHE (自适应直方图均衡化) - 仅当具备 OpenCV 时
+                if HAS_CV2 and cv2 is not None:
+                    try:
+                        img_np = np.array(pass1_img)
+                        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+                        cl1 = clahe.apply(img_np)
+                        pass3_img = Image.fromarray(cl1)
+                        lines3 = _recognize_pil_image(pass3_img)
+                        score3 = _check_quality(lines3)
+                        candidates.append((lines3, score3, "CLAHE"))
+                    except Exception as e:
+                        print(f"[OCR] CLAHE failed: {e}")
 
-                    # 目标字高 40px (WinRT OCR Sweet Spot)
-                    ideal_height = 40.0
-                    scale = 1.0
-                    if avg_height < ideal_height:
-                        scale = ideal_height / avg_height
-                        # 限制最大放大倍数
-                        scale = min(scale, 3.5)
-                    
-                    # 如果需要放大 (且并非微小差异)，或者之前的质量评分真的很差
-                    if scale > 1.2 or score1 < 0.90:
-                        try:
-                            import io
-                            pil_img = Image.open(io.BytesIO(image_bytes))
-                            
-                            w, h = pil_img.size
-                            new_w, new_h = int(w * scale), int(h * scale)
-                            
-                            if new_w < 4000 and new_h < 4000:
-                                # 使用 BICUBIC 平滑缩放，保留灰度抗锯齿信息 (不使用 LANCZOS/二值化)
-                                pil_img = pil_img.resize((new_w, new_h), Image.Resampling.BICUBIC)
-                                
-                                # 增强对比度但保持灰度
-                                from PIL import ImageOps
-                                if pil_img.mode != 'L':
-                                    pil_img = pil_img.convert('L')
-                                pil_img = ImageOps.autocontrast(pil_img)
-                                
-                                buf = io.BytesIO()
-                                pil_img.save(buf, format='PNG')
-                                new_bytes = buf.getvalue()
-                                
-                                lines2 = _recognize_bytes(new_bytes)
-                                score2 = _check_quality(lines2)
-                                
-                                if score2 >= score1 or (len(lines1) == 0 and len(lines2) > 0):
-                                    print(f"[OCR] 自适应放大 {scale:.2f}x (AvgH={avg_height:.1f}px) 提升质量: {score1:.2f} -> {score2:.2f}")
-                                    final_lines = lines2
-                        except Exception as e:
-                             print(f"[OCR] 自适应预处理失败: {e}")
+                # 结果融合决策 (Result Fusion)
+                # 优先级排序策略：
+                # 1. 优先选择质量评分 (score) 高的
+                # 2. 如果评分相近，选择识别出字符数更多的
+                # 3. 排除全空的结果
                 
-                result_container["lines"] = final_lines
+                def evaluate_candidate(cand):
+                    lines, score, name = cand
+                    # 过滤无意义的极短低质结果
+                    text_content = "".join(l.get("text", "") for l in lines)
+                    total_chars = len(text_content)
+                    if total_chars < 3 and score < 0.95:
+                        return 0
                     
+                    # 综合得分 = 质量分数 (权重 0.7) + 字符覆盖度 (权重 0.3)
+                    # 覆盖度使用 log1p 压缩，避免长文本过度占优
+                    import math
+                    coverage_bonus = math.log1p(total_chars) / 10.0 # 100字符约等于 0.46
+                    return (score * 0.7) + (min(coverage_bonus, 0.5) * 0.3)
+
+                best_cand = max(candidates, key=evaluate_candidate)
+                
+                if best_cand[2] != "Normal":
+                    print(f"[OCR] 优选识别通道: {best_cand[2]} (Score: {best_cand[1]:.2f} vs Normal: {score1:.2f})")
+                
+                result_container["lines"] = best_cand[0]
+
             except Exception as e:
                 result_container["error"] = f"{e.__class__.__name__}: {str(e)[:100]}"
         
