@@ -164,12 +164,12 @@ class TextMatcher:
                 best_k = max(contain_in_ocr, key=len)
                 length_ratio = len(best_k) / len(key)
                 
-                if length_ratio >= 0.85:
+                if length_ratio >= 0.82: # Revert to safer high
                     result = dict(self.db.get(best_k, {}))
                     result["_matched_key"] = best_k
                     self.log(f"[MATCH] 高覆盖子串匹配：ratio={length_ratio:.2f}")
                     return result, 0.95
-                elif length_ratio >= 0.6:
+                elif length_ratio >= 0.6: # Revert to safer medium
                     # 中等覆盖度，记录但继续搜索
                     self.log(f"[MATCH] 中覆盖子串匹配：ratio={length_ratio:.2f}，继续搜索更优匹配")
             
@@ -177,9 +177,8 @@ class TextMatcher:
             if key_len >= 50:
                 contained_keys = self.indexed_searcher.substring_search(key, direction='contains')
                 if contained_keys:
-                    # 应该选择最长的匹配项，以尽量覆盖更多的查询文本
-                    best_contain = max(contained_keys, key=len)
-                    if len(best_contain) >= key_len * 0.4: # 增加一个基本的覆盖率要求
+                    best_contain = min(contained_keys, key=len)
+                    if len(best_contain) <= key_len * 3:
                         result = dict(self.db.get(best_contain, {}))
                         result["_matched_key"] = best_contain
                         self.log(f"[MATCH] 部分截屏匹配成功：query_len={key_len}, matched_len={len(best_contain)}")
@@ -196,7 +195,7 @@ class TextMatcher:
                 return result, score
         
         # 5. 常规模糊搜索（使用索引加速）
-        fuzzy_results = self.indexed_searcher.fuzzy_search(key, top_k=1, score_threshold=0.4)
+        fuzzy_results = self.indexed_searcher.fuzzy_search(key, top_k=3, score_threshold=0.4)
         if fuzzy_results:
             best_item, score = fuzzy_results[0]
             result = dict(self.db.get(best_item, {}))
@@ -236,7 +235,17 @@ class TextMatcher:
             })
 
         if not line_info: return None
-
+        
+        # 0. 尝试全量文本合并匹配 (针对长句被OCR拆分的情况)
+        full_text_key = normalize_en(context_text)
+        if full_text_key and len(full_text_key) > 30:
+             # Try substring first for safety
+             full_res, full_score = self.search_key(full_text_key)
+             # Relaxed threshold for long text blocks
+             if full_score > 0.5: 
+                 self.log(f"[MATCH] 完整文本块匹配成功: score={full_score:.3f}")
+                 return full_res
+        
         # --- Multiline Checks (from original code) ---
         multi_items = []
         for line in line_info:
@@ -375,14 +384,14 @@ class TextMatcher:
                  length_ratio = matched_len / max(key_len, 1)
 
                  if key_len > 25 and matched_len < 20:
-                     weighted_score *= 0.2
+                     weighted_score *= 0.4 # Relaxed from 0.2
                      self.log(f"[MATCH] 长查询匹配短条目惩罚: score={weighted_score:.3f}")
                  elif length_diff > 15 and length_ratio < 0.6:
-                     weighted_score *= 0.4
+                     weighted_score *= 0.6 # Relaxed from 0.4
                  elif key_len > matched_len * 2:
-                     weighted_score *= 0.5
+                     weighted_score *= 0.7 # Relaxed from 0.5
                  elif key_len > matched_len * 1.5 and score < 0.97:
-                     weighted_score *= 0.75
+                     weighted_score *= 0.85 # Relaxed from 0.75
             
              # Audio Bonus - Check if match has audio
              matches = result.get("matches", [])
