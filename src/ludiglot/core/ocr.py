@@ -897,11 +897,20 @@ def group_ocr_lines(box_lines: List[Dict[str, object]], lang: str = "en") -> Lis
             is_title = (word_count <= 3 and char_count <= 30 and not is_likely_sentence) and not is_fragment
             
             # --- 文本清洗 (兜底修复模型幻觉) ---
-            # 针对 en-GB 模型容易出现的 scandinavian 字符幻觉进行替换
             if lang.startswith("en"):
-                # 替换 å -> a, ø -> o, é -> e (在纯英文语境下通常是误识别)
-                # 注意：某些游戏名可能包含法语重音，需谨慎。但 å 极少出现在英文中。
-                replacements = {'å': 'a', 'Å': 'A', 'ø': 'o', 'Ø': 'O', 'æ': 'ae', 'Æ': 'AE'}
+                # 针对 en-GB 模型容易出现的 scandinavian 字符幻觉进行替换
+                # 替换 å -> a, ø -> o, é -> e, ö -> o, ä -> a 等 (在纯英文语境下通常是误识别)
+                # 注意：某些游戏名可能包含法语重音，需谨慎。但 å, ö, ä 极少出现在现代英文普通单词中。
+                replacements = {
+                    'å': 'a', 'Å': 'A', 
+                    'ø': 'o', 'Ø': 'O', 
+                    'æ': 'ae', 'Æ': 'AE',
+                    'ö': 'o', 'Ö': 'O',
+                    'ä': 'a', 'Ä': 'A',
+                    'ë': 'e', 'Ë': 'E',
+                    'ï': 'i', 'Ï': 'I',
+                    'ü': 'u', 'Ü': 'U',
+                }
                 # 仅当单词看起来像英文时替换 (简单启发式)
                 new_text = ""
                 for word in text.split():
