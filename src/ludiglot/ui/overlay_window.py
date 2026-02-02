@@ -47,9 +47,10 @@ from ludiglot.core.text_builder import (
     normalize_en,
     save_text_db,
 )
-from ludiglot.core.voice_map import build_voice_map_from_configdb, _resolve_events_for_text_key
+from ludiglot.core.voice_map import build_voice_map_from_configdb, _resolve_events_for_text_key, collect_all_voice_event_names
 from ludiglot.core.voice_event_index import VoiceEventIndex
 from ludiglot.core.matcher import TextMatcher
+from ludiglot.core.audio_resolver import resolve_external_wem_root
 
 
 class PersistentMenu(QMenu):
@@ -1252,47 +1253,12 @@ class OverlayWindow(QMainWindow):
             except Exception as exc:
                 self.signals.error.emit(f"音频缓存扫描失败: {exc}")
 
-        self._external_wem_root = self._resolve_external_wem_root()
+        self._external_wem_root = resolve_external_wem_root(self.config)
 
         self._init_matcher()
 
         self.signals.status.emit("就绪")
         self.resources_loaded.emit()
-
-    def _resolve_external_wem_root(self) -> Path | None:
-        if not self.config.audio_wem_root:
-            return None
-        try:
-            base = self.config.audio_wem_root.parents[1]  # Media/zh -> WwiseAudio_Generated
-            candidate = base / "WwiseExternalSource"
-            if candidate.exists():
-                return candidate
-            candidate = base / "WwiseExternalSource" / "zh"
-            if candidate.exists():
-                return candidate
-        except Exception:
-            return None
-        return None
-
-    def _collect_voice_event_names(self) -> list[str]:
-        events: list[str] = []
-        if self.config.data_root:
-            try:
-                plot_audio = load_plot_audio_map(self.config.data_root)
-                events.extend([str(v) for v in plot_audio.values() if v])
-            except Exception:
-                pass
-        for items in self.voice_map.values():
-            if isinstance(items, list):
-                events.extend([str(v) for v in items if v])
-        dedup: list[str] = []
-        seen = set()
-        for ev in events:
-            if ev in seen:
-                continue
-            seen.add(ev)
-            dedup.append(ev)
-        return dedup
 
     def _build_voice_event_index(self) -> None:
         if not self.config.audio_bnk_root and not self.config.audio_txtp_cache:
@@ -1300,7 +1266,9 @@ class OverlayWindow(QMainWindow):
         cache_path = None
         if self.config.audio_cache_path:
             cache_path = self.config.audio_cache_path / "voice_event_index.json"
-        extra_names = self._collect_voice_event_names()
+        
+        extra_names = collect_all_voice_event_names(self.config.data_root, self.voice_map)
+        
         index = VoiceEventIndex(
             bnk_root=self.config.audio_bnk_root,
             txtp_root=self.config.audio_txtp_cache,

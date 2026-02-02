@@ -260,3 +260,22 @@ def _resolve_events_for_text_key(text_key: str, cfg: AppConfig | None) -> list[s
 
     candidates.sort(key=cand_priority)
     return candidates
+
+
+def collect_all_voice_event_names(data_root: Path | None, voice_map: Dict[str, list[str]]) -> list[str]:
+    """收集所有已知的音频事件名（用于构建索引）。"""
+    events: list[str] = []
+    if data_root:
+        try:
+             from ludiglot.core.text_builder import load_plot_audio_map
+             plot_audio = load_plot_audio_map(data_root)
+             events.extend([str(v) for v in plot_audio.values() if v])
+        except Exception:
+             pass
+    
+    for items in voice_map.values():
+        if isinstance(items, list):
+             events.extend([str(v) for v in items if v])
+             
+    # Dedup and sort for stability
+    return sorted(list(set(events)))

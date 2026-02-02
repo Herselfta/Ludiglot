@@ -278,4 +278,37 @@ class AudioResolver:
                 except Exception as e:
                     log(f"[ERROR] TXTP 转码失败: {e}")
         
+        
         return None
+
+
+def resolve_external_wem_root(config: AppConfig) -> Path | None:
+    """尝试解析 WwiseExternalSource 目录位置。"""
+    if not config.audio_wem_root:
+        return None
+    try:
+        # e.g. Client/Saved/WwiseAudio/Media/zh -> Client/Saved/WwiseAudio/WwiseExternalSource
+        # config.audio_wem_root usually points to .../Media/zh or similar
+        # parent=Media, parent.parent=WwiseAudio/Platform
+        
+        # Let's handle generic traversal upwards till we find WwiseExternalSource?
+        # Or stick to the specific structure logic from overlay_window.
+        # Original: base = self.config.audio_wem_root.parents[1]
+        
+        base = config.audio_wem_root.parents[1]
+        candidate = base / "WwiseExternalSource"
+        if candidate.exists():
+            return candidate
+        candidate = base / "WwiseExternalSource" / "zh" 
+        if candidate.exists():
+            return candidate
+            
+        # Try parents[2] just in case structure differs slightly
+        if len(config.audio_wem_root.parts) > 3:
+             base2 = config.audio_wem_root.parents[2]
+             candidate = base2 / "WwiseExternalSource"
+             if candidate.exists(): return candidate
+             
+    except Exception:
+        return None
+    return None
