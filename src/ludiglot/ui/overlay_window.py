@@ -1646,12 +1646,12 @@ class OverlayWindow(QMainWindow):
 
         # 3. 文本分组和质量检查
         t_group_start = time.time()
-        lines = group_ocr_lines(box_lines)
+        lines = group_ocr_lines(box_lines, lang=self.engine.lang)
         if self.config.ocr_backend == "auto" and self._needs_tesseract(lines):
             self.signals.log.emit("[OCR] 质量较差，切换 Tesseract")
             tess_path = getattr(self, "_tesseract_image_path", image_path)
             box_lines = self.engine.recognize_with_boxes(tess_path, prefer_tesseract=True)
-            lines = group_ocr_lines(box_lines)
+            lines = group_ocr_lines(box_lines, lang=self.engine.lang)
         t_group_end = time.time()
         self.signals.log.emit(f"[PERF] 文本分组耗时: {(t_group_end - t_group_start):.3f}s")
 
@@ -1768,21 +1768,10 @@ class OverlayWindow(QMainWindow):
             from PIL import Image, ImageOps
             img = Image.open(image_path)
             
-            # 1. 尺寸优化：如果高度较小，进行放大
+            # 1. 尺寸优化：移除强制放大
+            # 这里的放大逻辑已被移动到 OCREngine 内部，采用更智能的 "Text-Grab" 自适应算法
+            # 此处只需保留基本的格式转换
             processed = False
-            # Windows OCR 对大号字体识别效果更好，提高阈值到 600
-            # 统一使用 3.0 倍放大，除非图像特别大
-            if img.height < 600:
-                 scale = 3.0
-                 # 限制最大宽度，避免过大 (4K屏通常不超过 3840)
-                 if img.width * scale > 3500:
-                     scale = 3500 / img.width
-                 
-                 if scale > 1.0:
-                     new_size = (int(img.width * scale), int(img.height * scale))
-                     img = img.resize(new_size, Image.Resampling.LANCZOS)
-                     processed = True
-                     self.signals.log.emit(f"[PRE] 放大图像: {scale:.1f}x ({img.width}x{img.height})")
 
             # 2. 模式转换：转为灰度
             if img.mode != 'L':

@@ -9,13 +9,18 @@ from typing import Any, Dict, List, Tuple, Union, cast
 
 import re
 try:
-    import numpy as np
     from PIL import Image
     HAS_PIL = True
 except ImportError:
     HAS_PIL = False
     Image = None
+
+try:
+    import numpy as np
+    HAS_NUMPY = True
+except ImportError:
     np = None
+    HAS_NUMPY = False
 
 PaddleOCR = None
 
@@ -192,9 +197,20 @@ class OCREngine:
         
         # 尝试创建 OCR 引擎实例
         try:
+            print(f"[OCR Config] Requesting Lang: {self.lang}")
             if self.lang.startswith("en"):
+                # Try specific US English first
                 lang = Language("en-US")
+                if not OcrEngine.is_language_supported(lang):
+                     print("[OCR Config] en-US not supported, checking others...")
+                
                 self._windows_ocr = OcrEngine.try_create_from_language(lang)
+                if self._windows_ocr is None:
+                    # Fallback to en-GB if en-US missing (common in some regions)
+                    print("[OCR] Windows OCR: en-US failed, trying en-GB")
+                    lang_gb = Language("en-GB")
+                    self._windows_ocr = OcrEngine.try_create_from_language(lang_gb)
+
                 if self._windows_ocr is None:
                     print("[OCR] Windows OCR：en-US 语言包未安装")
                     if "en-US" not in available_lang_codes and "en" not in available_lang_codes:
@@ -233,130 +249,14 @@ class OCREngine:
         
         注意：WinRT 异步操作在GUI线程（STA）中可能失败，因此在单独线程中执行。
         """
-        self._init_windows_ocr()
-        if self._windows_ocr is None:
+        # 读取文件内容直接传给字节流处理方法
+        try:
+            data = Path(image_path).read_bytes()
+            return self._windows_ocr_recognize_from_bytes(data)
+        except Exception as e:
+            print(f"[OCR] 读取文件失败：{e}")
             return []
-        
-        # 在独立线程中执行以避免 STA 问题
-        result_container = {"lines": [], "error": None}
-        
-        def _ocr_worker():
-            try:
-                from winrt.windows.storage.streams import InMemoryRandomAccessStream, DataWriter
-                from winrt.windows.graphics.imaging import BitmapDecoder
-            except ImportError:
-                result_container["error"] = "WinRT模块导入失败"
-                return
-            except Exception as e:
-                result_container["error"] = f"模块导入错误 - {e.__class__.__name__}"
-                return
 
-            try:
-                # 读取图片并转换为 WinRT 可用的格式
-                data = Path(image_path).read_bytes()
-                stream = InMemoryRandomAccessStream()
-                writer = DataWriter(stream)
-                writer.write_bytes(data)
-                writer.store_async().get()
-                writer.flush_async().get()
-                writer.detach_stream()
-                stream.seek(0)
-                
-                # 解码图片
-                decoder = BitmapDecoder.create_async(stream).get()
-                bitmap = decoder.get_software_bitmap_async().get()
-                
-                # 执行 OCR
-                result = self._windows_ocr.recognize_async(bitmap).get()
-                
-                if not result or not getattr(result, "lines", None):
-                    return
-                
-                # 解析识别结果
-                for line in result.lines:
-                    text = getattr(line, "text", "") or ""
-                    if not text.strip():
-                        continue
-                    
-                    # Windows OCR的坐标信息在words中
-                    words = getattr(line, "words", None)
-                    if not words or len(list(words)) == 0:
-                        box = [[0, 0], [100, 0], [100, 30], [0, 30]]
-                        result_container["lines"].append({"text": text.strip(), "conf": 0.92, "box": box})
-                        continue
-                    
-                    # 收集单词级别的坐标，检测独立元素
-                    word_list = []
-                    for word in words:
-                        word_text = getattr(word, "text", "").strip()
-                        rect = getattr(word, "bounding_rect", None)
-                        if not word_text or not rect:
-                            continue
-                        word_list.append({
-                            "text": word_text,
-                            "x": rect.x,
-                            "y": rect.y,
-                            "width": rect.width,
-                            "height": rect.height
-                        })
-                    
-                    if not word_list:
-                        box = [[0, 0], [100, 0], [100, 30], [0, 30]]
-                        result_container["lines"].append({"text": text.strip(), "conf": 0.92, "box": box})
-                        continue
-                    
-                    # 检测独立元素（X间距过大）
-                    groups = []
-                    current_group = [word_list[0]]
-                    
-                    for i in range(1, len(word_list)):
-                        prev_word = word_list[i-1]
-                        curr_word = word_list[i]
-                        # 计算间距
-                        gap = curr_word["x"] - (prev_word["x"] + prev_word["width"])
-                        # 如果间距 > 50px，认为是独立元素
-                        if gap > 50:
-                            groups.append(current_group)
-                            current_group = [curr_word]
-                        else:
-                            current_group.append(curr_word)
-                    groups.append(current_group)
-                    
-                    # 每组输出一个条目
-                    for group in groups:
-                        group_text = " ".join([w["text"] for w in group])
-                        min_x = min(w["x"] for w in group)
-                        min_y = min(w["y"] for w in group)
-                        max_x = max(w["x"] + w["width"] for w in group)
-                        max_y = max(w["y"] + w["height"] for w in group)
-                        box = [
-                            [int(min_x), int(min_y)],
-                            [int(max_x), int(min_y)],
-                            [int(max_x), int(max_y)],
-                            [int(min_x), int(max_y)],
-                        ]
-                        result_container["lines"].append({"text": group_text, "conf": 0.92, "box": box})
-                    
-            except Exception as e:
-                result_container["error"] = f"{e.__class__.__name__}: {str(e)[:100]}"
-        
-        # 在新线程中执行OCR
-        thread = threading.Thread(target=_ocr_worker, daemon=True)
-        thread.start()
-        thread.join(timeout=10.0)  # 最多等待10秒
-        
-        if thread.is_alive():
-            print("[OCR] Windows OCR 超时")
-            return []
-        
-        if result_container["error"]:
-            print(f"[OCR] Windows OCR 识别失败：{result_container['error']}")
-            return []
-        
-        lines = result_container["lines"]
-        if lines:
-            print(f"[OCR] Windows OCR 成功识别 {len(lines)} 行文本")
-        return lines
 
     def _windows_ocr_recognize_from_bytes(self, image_bytes: bytes) -> List[Dict[str, object]]:
         """使用 Windows OCR 从内存字节流识别文本（避免硬盘读写）。
@@ -373,6 +273,37 @@ class OCREngine:
         
         result_container = {"lines": [], "error": None}
         
+        # 定义质量检测函数
+        def _check_quality(lines):
+            if not lines: return 0.0
+            total_len = 0
+            valid_chars = 0
+            is_english = self.lang.startswith("en")
+            
+            for line in lines:
+                text = line.get("text", "")
+                total_len += len(text)
+                for ch in text:
+                    is_valid = False
+                    # 总是允许常用标点
+                    if ch in " .,!?'\":;-()[]":
+                        is_valid = True
+                    elif is_english:
+                        # 英文模式下，要求 ASCII 字符
+                        if ch.isascii() and ch.isalnum():
+                            is_valid = True
+                    else:
+                        # 其他语言（如中文），只要是字母数字即可
+                        if ch.isalnum():
+                            is_valid = True
+                    
+                    if is_valid:
+                        valid_chars += 1
+            
+            if total_len == 0: return 0.0
+            return valid_chars / total_len
+
+
         def _ocr_worker():
             try:
                 from winrt.windows.storage.streams import InMemoryRandomAccessStream, DataWriter
@@ -384,30 +315,11 @@ class OCREngine:
                 result_container["error"] = f"模块导入错误 - {e.__class__.__name__}"
                 return
 
-            try:
-                # 直接从内存字节流创建 WinRT 流
-                stream = InMemoryRandomAccessStream()
-                writer = DataWriter(stream)
-                writer.write_bytes(image_bytes)
-                writer.store_async().get()
-                writer.flush_async().get()
-                writer.detach_stream()
-                stream.seek(0)
-                
-                # 解码图片
-                decoder = BitmapDecoder.create_async(stream).get()
-                bitmap = decoder.get_software_bitmap_async().get()
-                
-                # 执行 OCR
-                if not self._windows_ocr:
-                    result_container["error"] = "Windows OCR未初始化"
-                    return
-                result = self._windows_ocr.recognize_async(bitmap).get()
-                
+            def _parse_ocr_result(result):
+                lines_list = []
                 if not result or not getattr(result, "lines", None):
-                    return
+                    return lines_list
                 
-                # 解析识别结果（同样的逻辑）
                 for line in result.lines:
                     text = getattr(line, "text", "") or ""
                     if not text.strip():
@@ -416,31 +328,165 @@ class OCREngine:
                     words = getattr(line, "words", None)
                     if not words or len(list(words)) == 0:
                         box = [[0, 0], [100, 0], [100, 30], [0, 30]]
-                        result_container["lines"].append({"text": text.strip(), "conf": 0.92, "box": box})
+                        lines_list.append({"text": text.strip(), "conf": 0.92, "box": box})
                         continue
                     
-                    # 计算整行的边界框
-                    min_x, min_y = float('inf'), float('inf')
-                    max_x, max_y = 0, 0
+                    word_list = []
                     for word in words:
+                        w_text = getattr(word, "text", "").strip()
                         rect = getattr(word, "bounding_rect", None)
-                        if rect:
-                            min_x = min(min_x, rect.x)
-                            min_y = min(min_y, rect.y)
-                            max_x = max(max_x, rect.x + rect.width)
-                            max_y = max(max_y, rect.y + rect.height)
+                        if not w_text or not rect:
+                            continue
+                        word_list.append({
+                            "text": w_text,
+                            "x": rect.x,
+                            "y": rect.y,
+                            "width": rect.width,
+                            "height": rect.height
+                        })
                     
-                    if min_x != float('inf'):
-                        box = [
-                            [int(min_x), int(min_y)],
-                            [int(max_x), int(min_y)],
-                            [int(max_x), int(max_y)],
-                            [int(min_x), int(max_y)],
-                        ]
-                    else:
+                    if not word_list:
                         box = [[0, 0], [100, 0], [100, 30], [0, 30]]
+                        lines_list.append({"text": text.strip(), "conf": 0.92, "box": box})
+                        continue
+
+                    # 行内分组逻辑
+                    groups = []
+                    current_group = [word_list[0]]
+                    for i in range(1, len(word_list)):
+                        prev = word_list[i-1]
+                        curr = word_list[i]
+                        gap = curr["x"] - (prev["x"] + prev["width"])
+                        # 动态间距阈值：使用单词高度的 2.0 倍作为阈值 (或者固定较大幅度)
+                        # 一般单词间距很小 (10px左右)，独立列间距很大 (>50px)
+                        # 之前 50px 可能对于大字体来说太小了，但对于合并问题，我们需要确保 *不* 分割
+                        # 这里的问题是合并： "Warren" 和 "handles" 之间 gap=10。 10 < 50 => 合并。
+                        # 合并时用 " ".join()。
+                        # 如果出现 "Warrenlhahdles"，那只能是 OCR 识别出了这几个字，或者 join 出错
+                        # 但诊断显示 "Warren" 和 "handles" 确实被识别出来了。
+                        # gap=10.0 => if 10 > 50 False => current_group.append(curr)
+                        # 最后 join: " ".join(...) => "Warren handles"
+                        # 所以逻辑看起来没问题。
+                        # 唯一的可能是，之前的 OCR 识别出的 word 本身就是错的?
+                        # 诊断日志显示: Word: 'Warren', Word: 'håndles' (注意 å in håndles)
+                        # wait, "håndles"?
+                        # The user said: "Warren handles" vs "Warrenlhahdles"
+                        # Diagnostic: "Warren" (gap 10) "håndles".
+                        # Ah! "håndles" has a weird char. And "Royan" etc.
+                        # Wait, why "håndles"?
+                        # Maybe because Language is en-GB and it hallucinates Swedish/Danish chars?
+                        # Or simple noise.
+                        
+                        # Use a large threshold to avoid splitting sentences unnecessarily
+                        # Only split if visual gap is truly huge (e.g. separate UI columns)
+                        threshold = max(50, curr["height"] * 2.0)
+                        if gap > threshold:
+                            groups.append(current_group)
+                            current_group = [curr]
+                        else:
+                            current_group.append(curr)
+                    groups.append(current_group)
                     
-                    result_container["lines"].append({"text": text.strip(), "conf": 0.92, "box": box})
+                    for group in groups:
+                        g_text = " ".join([w["text"] for w in group])
+                        min_x = min(w["x"] for w in group)
+                        min_y = min(w["y"] for w in group)
+                        max_x = max(w["x"] + w["width"] for w in group)
+                        max_y = max(w["y"] + w["height"] for w in group)
+                        box = [[int(min_x), int(min_y)], [int(max_x), int(min_y)], 
+                               [int(max_x), int(max_y)], [int(min_x), int(max_y)]]
+                        lines_list.append({"text": g_text, "conf": 0.92, "box": box})
+                return lines_list
+
+            def _recognize_bytes(bytes_data):
+                try:
+                    stream = InMemoryRandomAccessStream()
+                    writer = DataWriter(stream)
+                    writer.write_bytes(bytes_data)
+                    writer.store_async().get()
+                    writer.flush_async().get()
+                    writer.detach_stream()
+                    stream.seek(0)
+                    
+                    decoder = BitmapDecoder.create_async(stream).get()
+                    bitmap = decoder.get_software_bitmap_async().get()
+                    
+                    if not self._windows_ocr:
+                        return []
+                    result = self._windows_ocr.recognize_async(bitmap).get()
+                    return _parse_ocr_result(result)
+                except Exception as e:
+                    print(f"[OCR] Internal Error: {e}")
+                    return []
+
+            try:
+                # 1. 尝试原始图片
+                lines1 = _recognize_bytes(image_bytes)
+                score1 = _check_quality(lines1)
+                # print(f"[OCR Debug] Score: {score1:.3f}")
+                
+                final_lines = lines1
+                
+                # 2. 如果质量低或字号过小，尝试自适应放大 (Text-Grab 策略)
+                if HAS_PIL and Image is not None:
+                    # 计算平均字高
+                    avg_height = 0
+                    word_count = 0
+                    for line in lines1:
+                         # 这里 line['box'] 是 [[x1,y1], [x2,y1], [x2,y2], [x1,y2]]
+                         # 高度 = y2 - y1
+                         box = line.get('box')
+                         if box:
+                             h_val = box[2][1] - box[0][1]
+                             avg_height += h_val
+                             word_count += 1
+                    
+                    if word_count > 0:
+                        avg_height /= word_count
+                    else:
+                         avg_height = 20 # 默认假设较小
+
+                    # 目标字高 40px (WinRT OCR Sweet Spot)
+                    ideal_height = 40.0
+                    scale = 1.0
+                    if avg_height < ideal_height:
+                        scale = ideal_height / avg_height
+                        # 限制最大放大倍数
+                        scale = min(scale, 3.5)
+                    
+                    # 如果需要放大 (且并非微小差异)，或者之前的质量评分真的很差
+                    if scale > 1.2 or score1 < 0.90:
+                        try:
+                            import io
+                            pil_img = Image.open(io.BytesIO(image_bytes))
+                            
+                            w, h = pil_img.size
+                            new_w, new_h = int(w * scale), int(h * scale)
+                            
+                            if new_w < 4000 and new_h < 4000:
+                                # 使用 BICUBIC 平滑缩放，保留灰度抗锯齿信息 (不使用 LANCZOS/二值化)
+                                pil_img = pil_img.resize((new_w, new_h), Image.Resampling.BICUBIC)
+                                
+                                # 增强对比度但保持灰度
+                                from PIL import ImageOps
+                                if pil_img.mode != 'L':
+                                    pil_img = pil_img.convert('L')
+                                pil_img = ImageOps.autocontrast(pil_img)
+                                
+                                buf = io.BytesIO()
+                                pil_img.save(buf, format='PNG')
+                                new_bytes = buf.getvalue()
+                                
+                                lines2 = _recognize_bytes(new_bytes)
+                                score2 = _check_quality(lines2)
+                                
+                                if score2 >= score1 or (len(lines1) == 0 and len(lines2) > 0):
+                                    print(f"[OCR] 自适应放大 {scale:.2f}x (AvgH={avg_height:.1f}px) 提升质量: {score1:.2f} -> {score2:.2f}")
+                                    final_lines = lines2
+                        except Exception as e:
+                             print(f"[OCR] 自适应预处理失败: {e}")
+                
+                result_container["lines"] = final_lines
                     
             except Exception as e:
                 result_container["error"] = f"{e.__class__.__name__}: {str(e)[:100]}"
@@ -462,6 +508,7 @@ class OCREngine:
         if lines:
             print(f"[OCR] Windows OCR (内存流) 成功识别 {len(lines)} 行文本")
         return lines
+
 
     def recognize_from_image(self, image: Union[Any, Any]) -> List[Dict[str, object]]:
         """从内存图像直接识别（OpenCV/PIL），避免硬盘读写。
@@ -725,7 +772,11 @@ class OCREngine:
         return best_lines
 
 
-def group_ocr_lines(box_lines: List[Dict[str, object]]) -> List[Tuple[str, float]]:
+def group_ocr_lines(box_lines: List[Dict[str, object]], lang: str = "en") -> List[Tuple[str, float]]:
+    """
+    对 OCR 原始结果进行可视化分组和合并。
+    ...
+    """
     """将 OCR 结果按坐标分行，并按从上到下、从左到右拼接为行文本。
     
     智能分组策略：
@@ -844,6 +895,25 @@ def group_ocr_lines(box_lines: List[Dict[str, object]]) -> List[Tuple[str, float
             # 修正：如果内容全是小写或者是个残缺单词，不应视为标题
             is_fragment = word_count == 1 and not text[0].isupper()
             is_title = (word_count <= 3 and char_count <= 30 and not is_likely_sentence) and not is_fragment
+            
+            # --- 文本清洗 (兜底修复模型幻觉) ---
+            # 针对 en-GB 模型容易出现的 scandinavian 字符幻觉进行替换
+            if lang.startswith("en"):
+                # 替换 å -> a, ø -> o, é -> e (在纯英文语境下通常是误识别)
+                # 注意：某些游戏名可能包含法语重音，需谨慎。但 å 极少出现在英文中。
+                replacements = {'å': 'a', 'Å': 'A', 'ø': 'o', 'Ø': 'O', 'æ': 'ae', 'Æ': 'AE'}
+                # 仅当单词看起来像英文时替换 (简单启发式)
+                new_text = ""
+                for word in text.split():
+                    # 检查是否包含乱码字符
+                    if any(c in replacements for c in word):
+                        # 执行替换
+                        clean_word = "".join(replacements.get(c, c) for c in word)
+                        new_text += clean_word + " "
+                    else:
+                        new_text += word + " "
+                text = new_text.strip()
+            # ----------------------------------
             
             initial_output.append((text, avg_conf, is_title, group_y, group_h))
     
