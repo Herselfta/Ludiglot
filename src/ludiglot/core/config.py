@@ -38,6 +38,7 @@ class AppConfig:
     audio_cache_index_path: Path | None = None
     audio_wem_root: Path | None = None
     audio_bnk_root: Path | None = None
+    audio_external_root: Path | None = None
     audio_txtp_cache: Path | None = None
     vgmstream_path: Path | None = None
     wwiser_path: Path | None = None
@@ -155,6 +156,7 @@ def load_config(path: Path) -> AppConfig:
     audio_cache_index_path = resolve_path(raw.get("audio_cache_index_path"))
     audio_wem_root = resolve_path(raw.get("audio_wem_root"))
     audio_bnk_root = resolve_path(raw.get("audio_bnk_root"))
+    audio_external_root = resolve_path(raw.get("audio_external_root"))
     audio_txtp_cache = resolve_path(raw.get("audio_txtp_cache"))
     
     vgmstream_path = resolve_path(raw.get("vgmstream_path"))
@@ -195,6 +197,13 @@ def load_config(path: Path) -> AppConfig:
         candidate = audio_wem_root.parents[1] / "Event" / "zh"
         if candidate.exists():
             audio_bnk_root = candidate
+            
+    if audio_wem_root and audio_external_root is None:
+        # 尝试从 Media 目录向上看是否有 WwiseExternalSource
+        # Media/zh -> parents[1] is WwiseAudio_Generated
+        candidate = audio_wem_root.parents[1] / "WwiseExternalSource"
+        if candidate.exists():
+            audio_external_root = candidate
             
     if wwiser_path is None:
         candidate = project_root / "tools/wwiser.pyz"
@@ -245,6 +254,7 @@ def load_config(path: Path) -> AppConfig:
         audio_cache_index_path=audio_cache_index_path,
         audio_wem_root=audio_wem_root,
         audio_bnk_root=audio_bnk_root,
+        audio_external_root=audio_external_root,
         audio_txtp_cache=audio_txtp_cache,
         vgmstream_path=vgmstream_path,
         wwiser_path=wwiser_path,

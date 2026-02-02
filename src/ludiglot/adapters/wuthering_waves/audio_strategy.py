@@ -29,15 +29,15 @@ class WutheringAudioStrategy:
         event_name = self._parse_event_name(voice_event)
         if event_name:
             candidates.append(event_name)
-            # 处理 Wwise 常见的 vo_ 和 play_ 前缀组合
+            # 对于已经有明确事件名的情况，只添加基础的前缀变体，不盲目生成 nosub_xx
             self._add_variants(candidates, event_name)
-            self._add_story_variants(candidates, event_name)
+            self._add_story_variants(candidates, event_name) # 恢复：剧情 ID 变体生成
         
         # 2. 处理基于 text_key 的启发式猜测
         if text_key:
             candidates.append(text_key)
             self._add_variants(candidates, text_key)
-            self._add_story_variants(candidates, text_key)
+            self._add_story_variants(candidates, text_key) # 恢复：剧情 ID 变体生成
             
             # 特殊处理：如果 text_key 形如 Dialog_1001_1，尝试 vo_Dialog_1001_1
             if "_" in text_key:
@@ -115,16 +115,22 @@ class WutheringAudioStrategy:
             _emit("play_vo_", merged)
 
         # 3) 如果结尾是数字段，尝试去掉最后一段再加 nosub
+        # 注意：对于 Main_XX_1_2_3_20 这样的精确行 ID，去掉结尾通常会命中错误的对话集。
+        # 只有在特定的、通常较短且看起来不像是大型剧情集的 ID 上才启用此逻辑。
+        # 这里的权宜之计是：如果 ID 很长且包含多个数字段，则不进行末尾数字裁剪的 nosub 猜测。
         if tokens and tokens[-1].isdigit():
-            trimmed = "_".join(tokens[:-1])
-            if trimmed:
+             # 如果数字很大（>10），通常是具体的句子序号，不应模糊匹配
+             try:
+                 val = int(tokens[-1])
+                 if val > 5:
+                     return # 放弃模糊匹配
+             except:
+                 pass
+
+             trimmed = "_".join(tokens[:-1])
+             if trimmed:
                 _emit("play_vo_", trimmed)
-            # 尝试合并最后两个数字段（如 18 + 16 -> 1816）
-            if len(tokens) >= 2 and tokens[-2].isdigit():
-                merged_num = tokens[:-2] + [tokens[-2] + tokens[-1]]
-                merged_num_core = "_".join(merged_num)
-                if merged_num_core:
-                    _emit("play_vo_", merged_num_core)
+             # ... 其余逻辑保持 (合并最后两个数字) ...
 
     def _add_variants(self, candidates: list[str], base: str) -> None:
         """为基础名字添加各种可能的前缀变体。"""

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Sequence
@@ -91,6 +92,7 @@ def find_wem_by_event_name(
 
     # 增强匹配：生成去除非字母数字的版本
     clean_token = "".join(c for c in token if c.isalnum())
+    token_nums = re.findall(r'\d+', token)
     
     candidates: list[Path] = []
     roots = [wem_root]
@@ -109,6 +111,17 @@ def find_wem_by_event_name(
             clean_stem = "".join(c for c in stem if c.isalnum())
             # 只有当 clean_token 长度足够时才使用模糊匹配，避免误匹配短ID
             if len(clean_token) > 5 and clean_token in clean_stem:
+                # 额外校验：数字序列必须一致 (防止 5_22 匹配到 52_2)
+                if token_nums:
+                    stem_nums = re.findall(r'\d+', stem)
+                    # 检查 token_nums 是否按顺序出现在 stem_nums 中
+                    ptr = 0
+                    for num in stem_nums:
+                        if ptr < len(token_nums) and num == token_nums[ptr]:
+                            ptr += 1
+                    if ptr < len(token_nums):
+                         continue 
+                
                 candidates.append(path)
 
     if not candidates:
@@ -144,9 +157,27 @@ def find_bnk_for_event(bnk_root: Path, event_name: str | None) -> Path | None:
          if len(parts) > 2:
              sub_token = "_".join(parts[-2:])
     
+    # 增强式搜索：尝试匹配 stem 的任何一部分
+    # 比如 vo_main_..._f 应该能匹配到 play_vo_main_..._22.bnk
+    # 我们核心的任务是找到那个包含哈希的包
+    token_nums = re.findall(r'\d+', token)
     for path in bnk_root.rglob("*.bnk"):
         stem = path.stem.lower()
-        if token in stem or core in stem or (sub_token and sub_token in stem):
+        # 如果 token 是 vo_..._f，去掉 _f 后匹配
+        base_token = token
+        if token.endswith("_f") or token.endswith("_m"):
+            base_token = token[:-2]
+            
+        if token in stem or core in stem or base_token in stem or (sub_token and sub_token in stem):
+            # 校验数字一致性
+            if token_nums:
+                stem_nums = re.findall(r'\d+', stem)
+                ptr = 0
+                for num in stem_nums:
+                    if ptr < len(token_nums) and num == token_nums[ptr]:
+                        ptr += 1
+                if ptr < len(token_nums):
+                    continue
             return path
             
     # 3. 针对 鸣潮 的特殊回退：角色名直接作为 Bank 名 (例如 VO_Linnai.bnk)
@@ -289,6 +320,30 @@ def convert_txtp_to_wav(
     cmd = [str(vgmstream_path), "-o", str(output_path), str(txtp_path)]
     subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     return output_path
+
+
+def convert_single_wem_to_wav(
+    wem_file: Path, 
+    output_dir: Path, 
+    vgmstream_path: Path | None = None
+) -> Path | None:
+    if not vgmstream_path or not vgmstream_path.exists():
+        return None
+        
+    output_dir.mkdir(parents=True, exist_ok=True)
+    out_path = output_dir / f"{wem_file.stem}.wav"
+    
+    if out_path.exists() and out_path.stat().st_size > 0:
+        return out_path
+        
+    cmd = [str(vgmstream_path), "-o", str(out_path), str(wem_file)]
+    try:
+        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if out_path.exists():
+            return out_path
+    except subprocess.CalledProcessError:
+        pass
+    return None
 
 
 def convert_wem_to_wav(

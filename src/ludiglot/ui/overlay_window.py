@@ -49,6 +49,7 @@ from ludiglot.core.text_builder import (
 )
 from ludiglot.core.voice_map import build_voice_map_from_configdb, _resolve_events_for_text_key
 from ludiglot.core.voice_event_index import VoiceEventIndex
+from ludiglot.core.matcher import TextMatcher
 
 
 class PersistentMenu(QMenu):
@@ -74,6 +75,7 @@ class OverlayWindow(QMainWindow):
     """无边框、置顶覆盖层窗口（MVP）。"""
 
     capture_requested = pyqtSignal(bool)
+    resources_loaded = pyqtSignal()
 
     def __init__(self, config: AppConfig, config_path: Path) -> None:
         super().__init__()
@@ -82,7 +84,9 @@ class OverlayWindow(QMainWindow):
         self.signals = UiSignals()
         self.log_path = Path(__file__).resolve().parents[3] / "log" / "gui.log"
         self._install_terminal_logger()
-        self.searcher = FuzzySearcher()
+        # self.searcher = FuzzySearcher() # TextMatcher now handles this
+        self.matcher: TextMatcher | None = None
+        self.audio_resolver: AudioResolver | None = None
         self.engine = OCREngine(
             lang=config.ocr_lang,
             use_gpu=config.ocr_gpu,
@@ -93,10 +97,10 @@ class OverlayWindow(QMainWindow):
         self.voice_event_index: VoiceEventIndex | None = None
         self.audio_index: AudioCacheIndex | None = None
         self.last_match: Dict[str, Any] | None = None
+        self.last_text_key: str | None = None
         self.last_hash: int | None = None
         self.last_event_name: str | None = None
         self.player = AudioPlayer()
-        self._external_wem_root: Path | None = None
         self._hotkey_listener = None
         self._win_hotkey_filter = None
         self._win_hotkey_ids: list[int] = []
@@ -148,6 +152,10 @@ class OverlayWindow(QMainWindow):
         self._sync_config_timer = QTimer(self)
         self._sync_config_timer.timeout.connect(self._persist_window_position)
         self._sync_config_timer.start(5000)  # 每 5 秒同步一次
+
+    def closeEvent(self, event) -> None:
+        print("[DEBUG] OverlayWindow closeEvent", flush=True)
+        super().closeEvent(event)
 
     def _install_terminal_logger(self) -> None:
         """将 stdout/stderr/Qt警告 同步写入日志文件。"""
@@ -1246,7 +1254,10 @@ class OverlayWindow(QMainWindow):
 
         self._external_wem_root = self._resolve_external_wem_root()
 
+        self._init_matcher()
+
         self.signals.status.emit("就绪")
+        self.resources_loaded.emit()
 
     def _resolve_external_wem_root(self) -> Path | None:
         if not self.config.audio_wem_root:
@@ -1300,6 +1311,18 @@ class OverlayWindow(QMainWindow):
         self.voice_event_index = index
         if index.names:
             self.signals.log.emit(f"[VOICE] 事件索引: {len(index.names)} 项")
+
+    def _init_matcher(self) -> None:
+        if self.db:
+            from ludiglot.core.matcher import TextMatcher
+            from ludiglot.core.audio_resolver import AudioResolver
+
+            self.matcher = TextMatcher(self.db, self.voice_map, self.voice_event_index)
+            self.matcher.set_logger(self.signals.log.emit)
+            self.signals.log.emit("[MATCHER] 匹配服务已初始化")
+
+            self.audio_resolver = AudioResolver(self.config, self.voice_event_index)
+            self.signals.log.emit("[AUDIO] 解析服务已初始化")
 
     def _should_rebuild_db(self) -> bool:
         if not self.config.auto_rebuild_db:
@@ -1503,12 +1526,14 @@ class OverlayWindow(QMainWindow):
 
     def _translate_title(self, title: str) -> str:
         """尝试将标题（如角色名、招式名）翻译为中文。"""
+        if not self.matcher:
+            return ""
         try:
-            cleaned = self._clean_ocr_line(title)
+            cleaned = "".join(ch if ch.isalnum() or ch.isspace() else " " for ch in title).strip()
             key = normalize_en(cleaned)
             if not key:
                 return ""
-            result, score = self._search_db(key)
+            result, score = self.matcher.search_key(key)
             if isinstance(result, dict):
                 # 1. 尝试直接获取
                 cn = result.get("official_cn") or result.get("cn")
@@ -1540,11 +1565,16 @@ class OverlayWindow(QMainWindow):
         self.capture_requested.emit(True)
 
     def _capture_and_process_async(self, force_select: bool = False) -> None:
+        import time
+        t_start = time.time()
         selected_region: CaptureRegion | None = None
         self.signals.log.emit("[HOTKEY] 触发捕获")
         if force_select or self.config.capture_mode == "select":
             self.signals.status.emit("请选择 OCR 区域…")
+            t_select_start = time.time()
             selected_region = self._select_region()
+            t_select_end = time.time()
+            self.signals.log.emit(f"[PERF] 区域选择耗时: {(t_select_end - t_select_start):.3f}s")
             if selected_region is None:
                 self.signals.status.emit("已取消")
                 return
@@ -1553,14 +1583,23 @@ class OverlayWindow(QMainWindow):
             args=(selected_region,),
             daemon=True,
         ).start()
+        self.signals.log.emit(f"[PERF] 异步调用总耗时: {(time.time() - t_start):.3f}s")
 
     def _capture_and_process(self, selected_region: CaptureRegion | None) -> None:
+        import time
+        t_total_start = time.time()
+        
         self.signals.status.emit("捕获中…")
+        
+        # 1. 截图
+        t_capture_start = time.time()
         try:
             self._capture_image(selected_region)
         except Exception as exc:
             self.signals.error.emit(f"截图失败: {exc}")
             return
+        t_capture_end = time.time()
+        self.signals.log.emit(f"[PERF] 截图耗时: {(t_capture_end - t_capture_start):.3f}s")
 
         # 过小截图会触发 OCR 底层异常，直接跳过并提示
         try:
@@ -1576,6 +1615,8 @@ class OverlayWindow(QMainWindow):
         except Exception:
             pass
 
+        # 2. OCR识别
+        t_ocr_start = time.time()
         try:
             image_path = self._preprocess_image(self.config.image_path)
             if self.config.ocr_backend == "windows":
@@ -1592,6 +1633,8 @@ class OverlayWindow(QMainWindow):
                 "paddle": "PaddleOCR",
             }.get(backend, backend)
             self.signals.log.emit(f"[OCR] 后端: {backend_label}")
+            t_ocr_end = time.time()
+            self.signals.log.emit(f"[PERF] OCR识别耗时: {(t_ocr_end - t_ocr_start):.3f}s")
         except Exception as exc:
             self.signals.error.emit(f"OCR 失败: {exc}")
             return
@@ -1601,24 +1644,58 @@ class OverlayWindow(QMainWindow):
             self.signals.log.emit("[OCR] 未识别到文本")
             return
 
-        lines = group_ocr_lines(box_lines)
+        # 3. 文本分组和质量检查
+        t_group_start = time.time()
+        lines = group_ocr_lines(box_lines, lang=self.engine.lang)
         if self.config.ocr_backend == "auto" and self._needs_tesseract(lines):
             self.signals.log.emit("[OCR] 质量较差，切换 Tesseract")
             tess_path = getattr(self, "_tesseract_image_path", image_path)
             box_lines = self.engine.recognize_with_boxes(tess_path, prefer_tesseract=True)
-            lines = group_ocr_lines(box_lines)
+            lines = group_ocr_lines(box_lines, lang=self.engine.lang)
+        t_group_end = time.time()
+        self.signals.log.emit(f"[PERF] 文本分组耗时: {(t_group_end - t_group_start):.3f}s")
 
         self.signals.log.emit("[OCR] 识别结果:")
         for text, conf in lines:
             self.signals.log.emit(f"  - {text} (conf={conf:.3f})")
 
-        result = self._lookup_best(lines)
+        if not self.matcher:
+             self.signals.error.emit("匹配服务未就绪")
+             return
+
+        # 4. 文本匹配
+        t_match_start = time.time()
+        result = self.matcher.match(lines)
+        t_match_end = time.time()
+        self.signals.log.emit(f"[PERF] 文本匹配耗时: {(t_match_end - t_match_start):.3f}s")
+        
         if result is None:
             self.signals.status.emit("未提取到可用文本")
             self.signals.log.emit("[OCR] 归一化后为空，跳过")
             return
-        self.signals.result.emit(result)
+        
+        print(f"[DEBUG] _capture_and_process: Got result. Keys: {list(result.keys())}", flush=True)
+        
+        # 5. 结果传递
+        t_emit_start = time.time()
+        # Deepcopy to ensure thread safety and detach from DB
+        try:
+             import copy
+             safe_result = copy.deepcopy(result)
+             print("[DEBUG] _capture_and_process: Emitting safe_result...", flush=True)
+             self.signals.result.emit(safe_result)
+             print("[DEBUG] _capture_and_process: Result emitted.", flush=True)
+        except Exception as e:
+             print(f"[ERROR] CRITICAL: Failed to emit result signal: {e}", flush=True)
+             self.signals.error.emit(f"Internal Error: Signal Emission Failed: {e}")
+             return
+        t_emit_end = time.time()
+        self.signals.log.emit(f"[PERF] 结果传递耗时: {(t_emit_end - t_emit_start):.3f}s")
+
+        t_total_end = time.time()
+        self.signals.log.emit(f"[PERF] ===== 总耗时: {(t_total_end - t_total_start):.3f}s =====")
         self.signals.status.emit("就绪")
+        print("[DEBUG] _capture_and_process: Status emitted. Done.", flush=True)
 
 
     def _capture_image(self, selected_region: CaptureRegion | None) -> None:
@@ -1687,7 +1764,39 @@ class OverlayWindow(QMainWindow):
         return CaptureRegion(left=int(left), top=int(top), width=int(width), height=int(height))
 
     def _preprocess_image(self, image_path: Path) -> Path:
-        return image_path
+        try:
+            from PIL import Image, ImageOps
+            img = Image.open(image_path)
+            
+            # 1. 尺寸优化：移除强制放大
+            # 这里的放大逻辑已被移动到 OCREngine 内部，采用更智能的 "Text-Grab" 自适应算法
+            # 此处只需保留基本的格式转换
+            processed = False
+
+            # 2. 模式转换：转为灰度
+            if img.mode != 'L':
+                img = img.convert('L')
+                processed = True
+                
+            # 3. 对比度增强
+            img = ImageOps.autocontrast(img)
+            processed = True
+            
+            # Save Debug Image
+            try:
+                debug_p = image_path.parent / "last_ocr_input.png"
+                img.save(debug_p)
+            except Exception: pass
+            
+            if processed:
+                processed_path = image_path.parent / f"{image_path.stem}_proc{image_path.suffix}"
+                img.save(processed_path)
+                return processed_path
+                
+            return image_path
+        except Exception as e:
+            self.signals.log.emit(f"[PRE] 预处理失败: {e}")
+            return image_path
 
     def _validate_capture(self, image_path: Path) -> None:
         try:
@@ -2426,11 +2535,20 @@ class OverlayWindow(QMainWindow):
         return not text_key.startswith(prefixes)
 
     def _show_result(self, result: Dict[str, Any]) -> None:
+        import time
+        t_show_start = time.time()
+        print("[DEBUG] _show_result called", flush=True)
+        self.signals.log.emit(f"[PERF] _show_result 开始")
+        
         try:
+            t1 = time.time()
             self.last_match = result
             self.last_hash = None
             self.last_event_name = None
+            self.signals.log.emit(f"[PERF] 初始化变量: {(time.time()-t1)*1000:.1f}ms")
+            
             if result.get("_multi"):
+                t2 = time.time()
                 items = result.get("items", [])
                 left = []
                 right = []
@@ -2448,7 +2566,9 @@ class OverlayWindow(QMainWindow):
                 # 使用换行分隔多个条目，检测是否包含HTML标签
                 en_joined = "\n".join(left)
                 cn_joined = "\n".join(right) if right else "（未找到中文匹配）"
+                self.signals.log.emit(f"[PERF] 多条目处理: {(time.time()-t2)*1000:.1f}ms")
                 
+                t3 = time.time()
                 self.signals.log.emit("[WINDOW] 设置文本内容")
                 # 检测英文文本是否包含HTML标签
                 if '<' in en_joined and '>' in en_joined or '【' in en_joined:
@@ -2459,7 +2579,9 @@ class OverlayWindow(QMainWindow):
                     self.source_label.setPlainText(en_joined)
                     self._last_en_is_html = False
                 self._last_en_raw = en_joined
+                self.signals.log.emit(f"[PERF] 设置英文: {(time.time()-t3)*1000:.1f}ms")
                 
+                t4 = time.time()
                 # 检测中文文本是否包含HTML标签
                 if '<' in cn_joined and '>' in cn_joined or '【' in cn_joined:
                     html_cn = self._convert_game_html(cn_joined, lang="cn")
@@ -2469,6 +2591,7 @@ class OverlayWindow(QMainWindow):
                     self.cn_label.setPlainText(cn_joined)
                     self._last_cn_is_html = False
                 self._last_cn_raw = cn_joined
+                self.signals.log.emit(f"[PERF] 设置中文: {(time.time()-t4)*1000:.1f}ms")
                 
                 # 显示官方原文而非OCR文本
                 official_en = result.get('_official_en') or result.get('_ocr_text') or ''
@@ -2481,12 +2604,16 @@ class OverlayWindow(QMainWindow):
                 self.play_pause_btn.setEnabled(False)
                 self.audio_slider.setEnabled(False)
                 self.signals.log.emit("[WINDOW] 准备显示多条目结果")
+                
+                t5 = time.time()
                 self.show()
                 self.signals.log.emit("[WINDOW] 已调用show()")
                 self.raise_()
                 self.signals.log.emit("[WINDOW] 已调用raise_()")
                 self.activateWindow()
                 self.signals.log.emit("[WINDOW] 窗口激活完成")
+                self.signals.log.emit(f"[PERF] 显示窗口: {(time.time()-t5)*1000:.1f}ms")
+                self.signals.log.emit(f"[PERF] _show_result 总耗时: {(time.time()-t_show_start)*1000:.1f}ms")
                 return
         except Exception as e:
             self.signals.error.emit(f"显示结果失败: {e}")
@@ -2498,6 +2625,7 @@ class OverlayWindow(QMainWindow):
         matches = result.get("matches") or []
         
         # 提取显示内容（英文原文 + 中文翻译）
+        t6 = time.time()
         en_text = ""
         cn_text = ""
         text_key = None
@@ -2517,36 +2645,39 @@ class OverlayWindow(QMainWindow):
             
             # 如果有标题，添加到显示开头（不加【】）
             if first_line:
+                t_title = time.time()
                 title_cn = self._translate_title(first_line)
+                self.signals.log.emit(f"[PERF] 标题翻译: {(time.time()-t_title)*1000:.1f}ms")
                 display_title = title_cn or first_line
                 # 标题样式：加粗、暗金色（和游戏原生一致）
                 en_text = f"<span style='color: #d4af37; font-weight: bold;'>{first_line}</span>\n{en_text}"
                 cn_text = f"<span style='color: #d4af37; font-weight: bold;'>{display_title}</span>\n{cn_text}"
                 self.signals.log.emit(f"[DISPLAY] 标题: {first_line} -> {display_title}, 内容: {text_key}")
+        self.signals.log.emit(f"[PERF] 提取文本内容: {(time.time()-t6)*1000:.1f}ms")
 
-        # 音频识别逻辑优化：统一使用性别重排后的候选
-        if text_key:
-            events = _resolve_events_for_text_key(text_key, self.config)
-            if audio_event and audio_event not in events:
-                events.insert(0, audio_event)
-            
-            self.last_event_name = events[0] if events else audio_event
-            
-            # 优先通过事件列表解析哈希（会自动处理性别重排）
-            if self.last_hash is None and self._is_voice_eligible(text_key):
-                self.last_hash = self._resolve_audio_hash(text_key, events=events)
-            
-            # 如果解析失败，才尝试使用数据库中记录的原始哈希
-            if self.last_hash is None and audio_hash:
-                try: self.last_hash = int(audio_hash)
-                except: pass
-            
-            if self.last_hash:
-                self.signals.log.emit(f"[MATCH] text_key={text_key} hash={self.last_hash}")
+        # 音频识别逻辑：委托给 AudioResolver
+        t7 = time.time()
+        self.last_text_key = text_key
+        if text_key and self.audio_resolver:
+            res = self.audio_resolver.resolve(text_key, db_event=audio_event, db_hash=audio_hash)
+            if res:
+                self.last_hash = res.hash_value
+                self.last_event_name = res.event_name
+                self.signals.log.emit(f"[MATCH] text_key={text_key} hash={self.last_hash} ({res.source_type})")
             else:
                 self.signals.log.emit(f"[MATCH] text_key={text_key} 未找到对应音频")
+        elif text_key:
+             # 回退到数据库原始哈希
+             if audio_hash:
+                 try: self.last_hash = int(audio_hash)
+                 except: pass
+             self.last_event_name = audio_event
+             if self.last_hash:
+                 self.signals.log.emit(f"[MATCH] text_key={text_key} 使用数据库哈希={self.last_hash}")
+        self.signals.log.emit(f"[PERF] 音频解析: {(time.time()-t7)*1000:.1f}ms")
         
         # 显示数据库英文原文（保留HTML标记）
+        t8 = time.time()
         if en_text:
             # 检测是否包含HTML标记
             if '<' in en_text and '>' in en_text or '【' in en_text:
@@ -2566,8 +2697,10 @@ class OverlayWindow(QMainWindow):
             self.source_label.setPlainText(f"{ocr_original}{score_info}")
             self._last_en_raw = f"{ocr_original}{score_info}"
             self._last_en_is_html = False
+        self.signals.log.emit(f"[PERF] 设置英文显示: {(time.time()-t8)*1000:.1f}ms")
         
         # 渲染中文文本（支持HTML标记）
+        t9 = time.time()
         if cn_text:
             # 检测是否包含HTML标记
             if '<' in cn_text and '>' in cn_text or '【' in cn_text:
@@ -2584,20 +2717,31 @@ class OverlayWindow(QMainWindow):
             self.cn_label.setPlainText("（未找到中文匹配）")
             self._last_cn_raw = "（未找到中文匹配）"
             self._last_cn_is_html = False
+        self.signals.log.emit(f"[PERF] 设置中文显示: {(time.time()-t9)*1000:.1f}ms")
         
         # 设置音频控件状态
+        t10 = time.time()
         has_audio = self.last_hash is not None
         self.play_pause_btn.setEnabled(has_audio)
         self.audio_slider.setEnabled(has_audio)
         
         self.signals.log.emit(f"[QUERY] {result.get('_ocr_text')} -> {query_key}")
+        self.signals.log.emit(f"[PERF] 设置音频控件: {(time.time()-t10)*1000:.1f}ms")
+        
+        self.signals.log.emit(f"[PERF] _show_result 单条目总耗时: {(time.time()-t_show_start)*1000:.1f}ms")
         
         # 确保窗口显示并置顶
+        self.signals.log.emit("[DEBUG] Calling show_and_activate...")
+        t11 = time.time()
         self.show_and_activate()
+        self.signals.log.emit(f"[PERF] show_and_activate: {(time.time()-t11)*1000:.1f}ms")
+        self.signals.log.emit("[DEBUG] show_and_activate returned.")
         
         # 自动播放逻辑
         if self.config.play_audio and has_audio:
+            self.signals.log.emit("[DEBUG] Calling play_audio...")
             self.play_audio()
+            self.signals.log.emit("[DEBUG] play_audio returned.")
     
     def _convert_game_html(self, text: str, lang: str = "cn") -> str:
         """将游戏的自定义HTML标记转换为标准HTML格式，并包装为完整HTML文档。
@@ -2700,78 +2844,6 @@ class OverlayWindow(QMainWindow):
 '''
         return html
 
-    def _resolve_audio_hash(self, text_key: str, events: list[str] | None = None) -> int | None:
-        if not self.config.audio_cache_path:
-            return None
-        if self.audio_index is None:
-            self.audio_index = AudioCacheIndex(
-                self.config.audio_cache_path,
-                index_path=self.config.audio_cache_index_path,
-                max_mb=self.config.audio_cache_max_mb,
-            )
-            self.audio_index.load()
-            self.audio_index.scan()
-        strategy = WutheringAudioStrategy()
-        
-        # 确定候选事件源
-        voice_list = events if events is not None else (self.voice_map.get(text_key, []) or [None])
-        
-        total_names = []
-        seen = set()
-
-        # 1. 从事件生成基础候选
-        for voice in voice_list:
-            if voice:
-                for name in strategy.build_names(text_key, voice):
-                    if name not in seen:
-                        total_names.append(name)
-                        seen.add(name)
-
-        # 2. 从 VoiceIndex 补充候选
-        if self.voice_event_index:
-            seed_event = voice_list[0] if voice_list else None
-            for name in self.voice_event_index.find_candidates(text_key, seed_event, limit=8):
-                if name not in seen:
-                    total_names.append(name)
-                    seen.add(name)
-        
-        # 3. 如果没找到事件，尝试兜底猜测
-        if not total_names:
-            for name in strategy.build_names(text_key, None):
-                if name not in seen:
-                    total_names.append(name)
-                    seen.add(name)
-
-        # --- 全局重排优先：确保所有含女/男标记的候选名遵循偏好 ---
-        pref = (self.config.gender_preference or "female").lower()
-        f_pats = ["_f_", "nvzhu", "roverf", "_female"]
-        m_pats = ["_m_", "nanzhu", "roverm", "_male"]
-        target_pats = f_pats if pref == "female" else m_pats
-        other_pats = m_pats if pref == "female" else f_pats
-
-        def cand_priority(n):
-            nl = n.lower()
-            if any(w in nl for w in target_pats): return 0
-            if any(w in nl for w in other_pats): return 2
-            return 1
-
-        total_names.sort(key=cand_priority)
-
-        # 寻找存在的物理文件
-        for name in total_names:
-            h = strategy.hash_name(name)
-            if self.audio_index.find(h) or self.player.find_audio(h):
-                return h
-            if find_wem_by_hash(self.config.audio_wem_root, h):
-                return h
-            if find_bnk_for_event(self.config.audio_bnk_root, name):
-                return h
-
-        if total_names:
-            self.last_event_name = total_names[0]
-            return strategy.hash_name(total_names[0])
-            
-        return None
 
     def _show_error(self, message: str) -> None:
         self.status_label.setText(message)
@@ -2831,142 +2903,61 @@ class OverlayWindow(QMainWindow):
             self.audio_index.load()
             self.audio_index.scan()
         
-        path = self.audio_index.find(self.last_hash)
-        if path is None and self.config.audio_wem_root and self.config.vgmstream_path:
-            wem_path = find_wem_by_hash(self.config.audio_wem_root, self.last_hash)
-            if wem_path is not None:
-                try:
-                    path = convert_single_wem_to_wav(
-                        wem_path,
-                        self.config.vgmstream_path,
-                        self.config.audio_cache_path,
-                    )
-                    self.audio_index.add_file(path)
-                except Exception as exc:
-                    self.signals.error.emit(f"转码失败: {exc}")
-                    return
-        if path is None:
-            path = self._ensure_audio_from_event()
-        
-        if path is None:
-            self.signals.status.emit("未找到对应音频文件")
-            return
-
-        self.signals.status.emit(f"正在播放: {path.name}")
-        self.player.play(str(path), block=False)
-        
-        # 启用音频控制UI
-        self.play_pause_btn.setEnabled(True)
-        if self._icon_pause:
-            self.play_pause_btn.setIcon(self._icon_pause)
-        self.audio_slider.setEnabled(True)
-        self.audio_slider.setValue(0)
-        self.audio_timer.start()
-
-    def _ensure_audio_from_event(self) -> Path | None:
-        if self.last_hash is None:
-            return None
-        if not self.config.audio_cache_path:
-            return None
-        if not self.config.audio_wem_root or not self.config.audio_bnk_root:
-            return None
-        if not self.config.vgmstream_path:
-            return None
-        txtp_cache = self.config.audio_txtp_cache
-        if not txtp_cache:
-            return None
-        wwiser_path = self.config.wwiser_path or default_wwiser_path()
-        text_key = None
-        if self.last_match and isinstance(self.last_match, dict):
-            matches = self.last_match.get("matches") or []
-            if matches:
-                text_key = matches[0].get("text_key")
-
-        event_candidates: list[str] = []
-        if self.last_event_name:
-            event_candidates.append(self.last_event_name)
-        if text_key:
-            strategy = WutheringAudioStrategy()
-            event_candidates.extend(strategy.build_names(text_key, self.last_event_name))
-        if text_key and self.voice_event_index:
-            event_candidates.extend(self.voice_event_index.find_candidates(text_key, self.last_event_name, limit=8))
-        if text_key:
-            for ev in self.voice_map.get(text_key, []):
-                if isinstance(ev, str) and ev.strip():
-                    event_candidates.append(ev.strip())
-
-        # 去重并限制数量，避免过多尝试
-        seen = set()
-        unique: list[str] = []
-        for ev in event_candidates:
-            if ev in seen:
-                continue
-            seen.add(ev)
-            unique.append(ev)
-        event_candidates = unique[:6]
-
-        for event_name in event_candidates:
-            # 0. 尝试直接从 ExternalSource/WEM 命中（剧情常见）
-            direct_wem = None
-            if self.config.audio_wem_root:
-                direct_wem = find_wem_by_event_name(
-                    self.config.audio_wem_root,
-                    event_name,
-                    external_root=self._external_wem_root,
-                )
-            if direct_wem is not None:
-                try:
-                    path = convert_single_wem_to_wav(
-                        direct_wem,
-                        self.config.vgmstream_path,
-                        self.config.audio_cache_path,
-                    )
-                    # 若有 hash，额外生成 hash 命名副本，方便缓存索引命中
-                    if self.last_hash is not None:
-                        target = self.config.audio_cache_path / f"{self.last_hash}.wav"
-                        if path != target and not target.exists():
-                            try:
-                                shutil.copyfile(path, target)
-                                path = target
-                            except Exception:
-                                pass
-                    if self.audio_index:
-                        self.audio_index.add_file(path)
-                    return path
-                except Exception as exc:
-                    self.signals.log.emit(f"[VOICE] WEM 转码失败: {exc}")
+        path = None
+        try:
+            print("[DEBUG] play_audio started", flush=True)
+            if self.audio_resolver:
+                # 重新尝试定位物理文件 (处理可能的延迟加载)
+                res = self.audio_resolver.resolve(self.last_text_key, db_event=self.last_event_name, db_hash=self.last_hash)
+                if res:
+                    self.last_hash = res.hash_value
+                    self.last_event_name = res.event_name
+                    print(f"[DEBUG] play_audio resolved: {res.source_type}", flush=True)
+                    
+                    # 如果是 cache，直接获取路径
+                    if res.source_type == 'cache':
+                        path = self.audio_resolver.audio_index.find(res.hash_value)
+                    elif res.source_type == 'wem' or res.source_type == 'bnk':
+                        # 需要触发提取逻辑
+                        print("[DEBUG] Triggering ensure_playable_audio (1)...", flush=True)
+                        path = self.audio_resolver.ensure_playable_audio(
+                            self.last_hash, self.last_text_key, self.last_event_name, log_callback=self.signals.log.emit
+                        )
             
-            bnk_path = find_bnk_for_event(self.config.audio_bnk_root, event_name)
-            if bnk_path is None:
-                self.signals.log.emit(f"[VOICE] 未找到 BNK: {event_name}")
-                continue
-            try:
-                txtp_files = generate_txtp_for_bnk(
-                    bnk_path,
-                    self.config.audio_wem_root,
-                    txtp_cache,
-                    wwiser_path,
-                    log_callback=self.signals.log.emit,
-                )
-            except Exception as exc:
-                self.signals.log.emit(f"[VOICE] TXTP 生成失败: {exc}")
-                continue
-            if not txtp_files:
-                self.signals.log.emit(f"[VOICE] TXTP 为空: {bnk_path.name}")
-                continue
-            txtp_dir = txtp_cache / bnk_path.stem
-            # 传入 hash 以便在没有命名的 TXTP 中寻找 (例如 3157737296.txtp)
-            txtp_path = find_txtp_for_event(txtp_dir, event_name, self.last_hash) or txtp_files[0]
-            output_path = self.config.audio_cache_path / f"{self.last_hash}.wav"
-            try:
-                path = convert_txtp_to_wav(txtp_path, self.config.vgmstream_path, output_path)
+            # 兜底：如果 resolver 没搞定，尝试原始 index
+            if path is None and self.last_hash:
                 if self.audio_index:
-                    self.audio_index.add_file(path)
-                return path
-            except Exception as exc:
-                self.signals.log.emit(f"[VOICE] TXTP 转码失败: {exc}")
-                continue
-        return None
+                    path = self.audio_index.find(self.last_hash)
+            
+            if path is None and self.audio_resolver:
+                print("[DEBUG] Triggering ensure_playable_audio (fallback)...", flush=True)
+                path = self.audio_resolver.ensure_playable_audio(
+                    self.last_hash, self.last_text_key, self.last_event_name, log_callback=self.signals.log.emit
+                )
+            
+            if path is None:
+                self.signals.status.emit("未找到对应音频文件")
+                print("[DEBUG] play_audio: path not found", flush=True)
+                return
+
+            self.signals.status.emit(f"正在播放: {path.name}")
+            print(f"[DEBUG] Invoking self.player.play: {path}", flush=True)
+            self.player.play(str(path), block=False)
+            
+            # 启用音频控制UI
+            self.play_pause_btn.setEnabled(True)
+            if self._icon_pause:
+                self.play_pause_btn.setIcon(self._icon_pause)
+            self.audio_slider.setEnabled(True)
+            self.audio_slider.setValue(0)
+            self.audio_timer.start()
+        except Exception as e:
+            print(f"[ERROR] play_audio crashed: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
+            self.signals.error.emit(f"播放失败: {e}")
+
+
 
     def closeEvent(self, event) -> None:
         """关闭前保存所有状态"""
@@ -3306,33 +3297,74 @@ class OverlayWindow(QMainWindow):
         self._win_hotkey_ids = []
 
     def _select_region(self) -> CaptureRegion | None:
-        """选择屏幕区域并转换为物理像素坐标。"""
+        """选择屏幕区域并转换为物理像素坐标（适配多屏不同DPI）。"""
         selector = ScreenSelector()
         rect = selector.get_region()
         
         if rect is None or rect.width() <= 0 or rect.height() <= 0:
             return None
+            
+        print(f"[框选] 逻辑坐标: {rect}")
+
+        # 1. 找到选区中心所在的屏幕
+        center = rect.center()
+        target_screen = QGuiApplication.primaryScreen()
+        target_index = 0
+        screens = QGuiApplication.screens()
         
-        # ScreenSelector 返回的是逻辑坐标
-        # 对于截图操作（mss等库），需要物理像素坐标
-        screen = QGuiApplication.primaryScreen()
-        dpr = screen.devicePixelRatio() if screen else 1.0
+        for idx, screen in enumerate(screens):
+            if screen.geometry().contains(center):
+                target_screen = screen
+                target_index = idx
+                break
         
-        # 转换为物理坐标
-        physical_left = int(rect.x() * dpr)
-        physical_top = int(rect.y() * dpr)
-        physical_width = int(rect.width() * dpr)
-        physical_height = int(rect.height() * dpr)
+        dpr = target_screen.devicePixelRatio()
+        print(f"[框选] 命中屏幕: {target_screen.name()} (Index {target_index}), DPR: {dpr}")
+
+        # 2. 计算相对于该屏幕左上角的**逻辑偏移**
+        screen_geo = target_screen.geometry()
+        rel_x = rect.x() - screen_geo.x()
+        rel_y = rect.y() - screen_geo.y()
         
-        print(f"[框选] 逻辑坐标: ({rect.x()}, {rect.y()}, {rect.width()}, {rect.height()})")
-        print(f"[框选] 物理坐标: ({physical_left}, {physical_top}, {physical_width}, {physical_height})")
-        print(f"[框选] DPI缩放比: {dpr}")
+        # 3. 转换为**物理偏移**
+        phy_x_local = int(rel_x * dpr)
+        phy_y_local = int(rel_y * dpr)
+        phy_w = int(rect.width() * dpr)
+        phy_h = int(rect.height() * dpr)
+        
+        # 4. 映射到 MSS 的全局物理体系
+        # mss.monitors[0] 是组合桌面，[1] 是第一块屏，以此类推
+        # 假设 Qt screens 顺序与 mss monitors 顺序一致 (通常是 true)
+        import mss
+        final_x, final_y = 0, 0
+        
+        try:
+            with mss.mss() as sct:
+                # 能够匹配的数量
+                count = len(sct.monitors) - 1 
+                if target_index < count:
+                    mss_mon = sct.monitors[target_index + 1] # +1 跳过 All
+                    final_x = mss_mon['left'] + phy_x_local
+                    final_y = mss_mon['top'] + phy_y_local
+                    
+                    print(f"[框选] MSS Monitor[{target_index+1}]: {mss_mon}")
+                else:
+                    # 兜底：如果索引对不上，尝试使用主屏逻辑或简单逻辑
+                    print("[框选] 警告：MSS 屏幕数量不匹配，回退到主屏估算")
+                    final_x = phy_x_local
+                    final_y = phy_y_local
+        except Exception as e:
+            print(f"[框选] MSS 坐标映射失败: {e}")
+            final_x = int(rect.x() * dpr)
+            final_y = int(rect.y() * dpr)
+
+        print(f"[框选] 最终物理坐标: ({final_x}, {final_y}, {phy_w}, {phy_h})")
         
         return CaptureRegion(
-            left=physical_left,
-            top=physical_top,
-            width=physical_width,
-            height=physical_height,
+            left=final_x,
+            top=final_y,
+            width=phy_w,
+            height=phy_h,
         )
 
 
@@ -3388,119 +3420,42 @@ def run_gui(config_path: Path) -> None:
     tray.activated.connect(lambda reason: window.capture_requested.emit(True) if reason == QSystemTrayIcon.ActivationReason.DoubleClick else None)
     tray.show()
 
-    app.exec()
+    print("[DEBUG] Entering app.exec()", flush=True)
+    try:
+        ret = app.exec()
+        print(f"[DEBUG] app.exec() returned with {ret}", flush=True)
+    except Exception as e:
+        print(f"[ERROR] Exception in app.exec(): {e}", flush=True)
+    finally:
+        print("[DEBUG] Application exiting.", flush=True)
 
 
-class ScreenSelector(QWidget):
-    """全屏选区控件，返回用户选定的区域（全局坐标）。
-    
-    修复高DPI屏幕下的坐标偏移问题：
-    - 考虑设备像素比（devicePixelRatio）
-    - 使用物理像素进行截图和显示
-    - 在返回坐标时转换回逻辑坐标
-    """
-
+class ScreenOverlay(QWidget):
+    """单屏幕覆盖窗口"""
     region_selected = pyqtSignal(QRect)
 
-    def __init__(self) -> None:
-        super().__init__()
-        screen = QGuiApplication.primaryScreen()
+    def __init__(self, screen, parent=None):
+        super().__init__(parent)
         self._screen = screen
+        self.setGeometry(screen.geometry()) # 逻辑坐标
         
-        # 获取设备像素比（High DPI 缩放比例）
-        self._device_pixel_ratio = screen.devicePixelRatio() if screen else 1.0
-        
-        # 使用虚拟几何作为逻辑坐标系
-        self._virtual_rect = screen.virtualGeometry() if screen else QRect(0, 0, 1920, 1080)
-        
-        # 设置窗口几何（逻辑坐标）
-        self.setGeometry(self._virtual_rect)
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
             | Qt.WindowType.Tool
         )
-        self.setWindowState(Qt.WindowState.WindowFullScreen)
+        # 每个窗口只负责自己所在的屏幕，避免跨屏DPI问题
+        self.setScreen(screen)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
         
         self.rubber_band: QRubberBand | None = None
         self.origin: QPoint | None = None
-        self._selected_rect: QRect | None = None
-        self._background = self._capture_background()
-        
-        # 调试信息
-        print(f"[ScreenSelector] 设备像素比: {self._device_pixel_ratio}")
-        print(f"[ScreenSelector] 虚拟几何(逻辑): {self._virtual_rect}")
-        print(f"[ScreenSelector] 物理分辨率: {screen.geometry() if screen else 'N/A'}")
-
-    def get_region(self) -> QRect | None:
-        try:
-            loop = QEventLoop()
-            self.region_selected.connect(loop.quit)
-            self.show()
-            self.raise_()
-            self.activateWindow()
-            loop.exec()
-            self.hide()
-            return self._selected_rect
-        except Exception as e:
-            print(f"[ScreenSelector ERROR] {e}")
-            import traceback
-            traceback.print_exc()
-            self.hide()
-            return None
-
-    def _capture_background(self) -> QPixmap:
-        """捕获屏幕背景，考虑高DPI缩放。"""
-        # 创建逻辑尺寸的背景pixmap
-        background = QPixmap(self._virtual_rect.size())
-        if background.isNull():
-            # 如果pixmap创建失败，返回最小有效pixmap
-            background = QPixmap(1920, 1080)
-        background.fill(Qt.GlobalColor.black)
-        
-        painter = QPainter(background)
-        if not painter.isActive():
-            return background
-        
-        # 遍历所有屏幕并捕获
-        for screen in QGuiApplication.screens():
-            # grabWindow(0) 返回整个屏幕的截图
-            # 返回的pixmap已经包含了正确的devicePixelRatio信息
-            pix = screen.grabWindow(0)
-            
-            # 获取屏幕的逻辑几何（Qt自动处理DPI）
-            screen_geom = screen.geometry()
-            
-            # 计算屏幕在虚拟桌面中的偏移量（逻辑坐标）
-            offset = screen_geom.topLeft() - self._virtual_rect.topLeft()
-            
-            # Qt的drawPixmap会自动处理DPI缩放
-            # 如果pix有devicePixelRatio，会按逻辑尺寸绘制
-            painter.drawPixmap(offset, pix)
-        
-        painter.end()
-        
-        # 调试信息
-        print(f"[ScreenSelector] 背景Pixmap尺寸: {background.size()}, DPR: {background.devicePixelRatio()}")
-        return background
 
     def paintEvent(self, event) -> None:
-        """绘制背景和半透明遮罩。"""
-        if self._background is None or self._background.isNull():
-            return
-        
         painter = QPainter(self)
-        if not painter.isActive():
-            return
-        
-        # 绘制背景截图，Qt会自动处理DPI缩放
-        painter.drawPixmap(self.rect(), self._background, self._background.rect())
-        
-        # 添加半透明深色遮罩以便看清框选区域
-        painter.fillRect(self.rect(), QColor(0, 0, 0, 80))
-        
+        if not painter.isActive(): return
+        painter.fillRect(self.rect(), QColor(0, 0, 0, 80)) # 半透明遮罩
         painter.end()
 
     def mousePressEvent(self, event) -> None:
@@ -3516,31 +3471,68 @@ class ScreenSelector(QWidget):
             self.rubber_band.setGeometry(QRect(self.origin, event.pos()).normalized())
 
     def mouseReleaseEvent(self, event) -> None:
-        """鼠标释放时，转换坐标到全局物理像素坐标。"""
-        if self.rubber_band is None or not self.origin:
-            self._selected_rect = None
-        else:
-            # 获取选区的窗口本地坐标（逻辑坐标）
+        if self.rubber_band and self.origin:
             rect = self.rubber_band.geometry().normalized()
-            
-            # 转换到全局坐标（逻辑坐标系）
-            # 窗口本地坐标 + 窗口全局位置
+            # 转换为全局逻辑坐标
             global_top_left = self.mapToGlobal(rect.topLeft())
-            
-            # 创建全局坐标的矩形（逻辑坐标）
-            self._selected_rect = QRect(global_top_left, rect.size())
-            
-            # 调试输出
-            print(f"[ScreenSelector] 选中区域(逻辑): x={global_top_left.x()}, y={global_top_left.y()}, w={rect.width()}, h={rect.height()}")
-            print(f"[ScreenSelector] 物理坐标预估: x={int(global_top_left.x()*self._device_pixel_ratio)}, y={int(global_top_left.y()*self._device_pixel_ratio)}, w={int(rect.width()*self._device_pixel_ratio)}, h={int(rect.height()*self._device_pixel_ratio)}")
-        
-        self.region_selected.emit(self._selected_rect or QRect())
-        self.close()
+            global_rect = QRect(global_top_left, rect.size())
+            self.region_selected.emit(global_rect)
+        else:
+            self.region_selected.emit(QRect())
 
     def keyPressEvent(self, event) -> None:
         if event.key() == Qt.Key.Key_Escape:
-            self._selected_rect = None
             self.region_selected.emit(QRect())
-            self.close()
-            return
-        super().keyPressEvent(event)
+        else:
+            super().keyPressEvent(event)
+
+
+class ScreenSelector(QObject):
+    """全屏选区控制器，管理多屏覆盖窗口。"""
+    region_selected_signal = pyqtSignal(QRect)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._overlays: list[ScreenOverlay] = []
+        self._selected_rect: QRect | None = None
+        self._loop: QEventLoop | None = None
+
+        # 为每个屏幕创建一个覆盖窗口
+        screens = QGuiApplication.screens()
+        for screen in screens:
+            overlay = ScreenOverlay(screen)
+            overlay.region_selected.connect(self._on_region_selected)
+            self._overlays.append(overlay)
+            
+        print(f"[ScreenSelector] 已初始化 {len(self._overlays)} 个屏幕覆盖层")
+
+    def get_region(self) -> QRect | None:
+        try:
+            self._loop = QEventLoop()
+            
+            for overlay in self._overlays:
+                overlay.showFullScreen() 
+                overlay.raise_()
+                overlay.activateWindow()
+            
+            self._loop.exec()
+            
+            # 清理
+            for overlay in self._overlays:
+                overlay.close()
+                
+            return self._selected_rect
+        except Exception as e:
+            print(f"[ScreenSelector ERROR] {e}")
+            import traceback
+            traceback.print_exc()
+            for overlay in self._overlays:
+                overlay.close()
+            return None
+
+    def _on_region_selected(self, rect: QRect) -> None:
+        # 当任意一个屏幕完成了选区，保存结果并退出循环
+        if not rect.isNull():
+            self._selected_rect = rect
+        if self._loop and self._loop.isRunning():
+            self._loop.quit()

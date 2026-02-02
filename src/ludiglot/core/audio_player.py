@@ -35,6 +35,7 @@ class AudioPlayer:
                 return self._play_fallback(path)
 
         if self._player is None:
+            print("[DEBUG] AudioPlayer init QMediaPlayer", flush=True)
             self._player = QMediaPlayer()
             self._audio = QAudioOutput()
             self._player.setAudioOutput(self._audio)
@@ -42,6 +43,7 @@ class AudioPlayer:
         self._player.stop()
         self._player.setSource(QUrl.fromLocalFile(path))
         self._is_playing = True
+        print(f"[DEBUG] AudioPlayer source set: {path}", flush=True)
 
         if block:
             self._loop = QEventLoop()
@@ -60,7 +62,9 @@ class AudioPlayer:
             self._loop.exec()
             self._loop = None
         else:
+            print("[DEBUG] AudioPlayer playing (async)...", flush=True)
             self._player.play()
+            print("[DEBUG] AudioPlayer play() called.", flush=True)
 
     def stop(self) -> None:
         """停止播放。"""
