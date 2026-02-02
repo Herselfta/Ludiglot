@@ -178,11 +178,16 @@ class TextMatcher:
                 contained_keys = self.indexed_searcher.substring_search(key, direction='contains')
                 if contained_keys:
                     best_contain = min(contained_keys, key=len)
-                    if len(best_contain) <= key_len * 3:
-                        result = dict(self.db.get(best_contain, {}))
-                        result["_matched_key"] = best_contain
-                        self.log(f"[MATCH] 部分截屏匹配成功：query_len={key_len}, matched_len={len(best_contain)}")
-                        return result, 0.98
+                    
+                    # BUG FIX: Ensure the matched key is substantial enough to represent the query
+                    # If direction='contains' means "DB Key is in Query" (which seems to be the case based on logs),
+                    # we must ensure we aren't matching a tiny generic word inside a long sentence.
+                    if len(best_contain) > key_len * 0.7 or (len(best_contain) >= 20 and len(best_contain) > key_len * 0.4):
+                         if len(best_contain) <= key_len * 3: # Keep original safety check
+                            result = dict(self.db.get(best_contain, {}))
+                            result["_matched_key"] = best_contain
+                            self.log(f"[MATCH] 部分截屏匹配成功：query_len={key_len}, matched_len={len(best_contain)}")
+                            return result, 0.98
         
         # 4. 短查询精确匹配（严格相似度）
         if key_len < 20:

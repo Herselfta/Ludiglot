@@ -491,15 +491,19 @@ class OCREngine:
                     else:
                          avg_height = 20 # 默认假设较小
 
-                    # 目标字高 40px (WinRT OCR Sweet Spot)
-                    ideal_height = 40.0
+                    # 目标字高 55px (Target ~2.0x for typical 28px text to ensure clear character features)
+                    ideal_height = 55.0
                     scale = 1.0
                     if avg_height < ideal_height:
                         scale = ideal_height / avg_height
+                        # Snap to nearest 0.5 increment (e.g. 1.91 -> 2.0, 1.4 -> 1.5) to avoid fractional scaling artifacts
+                        scale = round(scale * 2) / 2.0
+                        
                         # 限制最大放大倍数
                         scale = min(scale, 3.5)
+                        scale = max(scale, 1.0)
                     
-                    # print(f"[OCR Debug] Quality Check: AvgHeight={avg_height:.1f}px, ScaleNeeded={scale:.2f}, Score={score1:.2f}")
+                    print(f"[OCR Debug] Quality Check: AvgHeight={avg_height:.1f}px, ScaleNeeded={scale:.2f}, Score={score1:.2f}")
 
                     # 如果需要放大 (且并非微小差异)，或者之前的质量评分真的很差
                     if scale > 1.2 or score1 < 0.90:
@@ -511,21 +515,24 @@ class OCREngine:
                             new_w, new_h = int(w * scale), int(h * scale)
                             
                             if new_w < 4000 and new_h < 4000:
-                                # 使用 BICUBIC 平滑缩放，保留灰度抗锯齿信息 (不使用 LANCZOS/二值化)
+                                # 使用 BICUBIC 平滑缩放 (Bicubic generally better for text shape than Bilinear if handled correctly)
                                 pil_img = pil_img.resize((new_w, new_h), Image.Resampling.BICUBIC)
                                 
-                                # 增强对比度并锐化
-                                from PIL import ImageOps, ImageFilter
+                                # Convert to grayscale
                                 if pil_img.mode != 'L':
                                     pil_img = pil_img.convert('L')
                                 
-                                # 使用直方图均衡化可能更有助于低对比度文本，但有时会增加噪声
-                                # 文档建议：CLAHE (OpenCV) 最好，但在纯 PIL 环境下，
-                                # Autocontrast with cutoff + Sharpness is a good approximation.
-                                pil_img = ImageOps.autocontrast(pil_img, cutoff=2)
-                                pil_img = pil_img.filter(ImageFilter.SHARPEN)
-                                # 再次稍微增强一点对比度，确保锐化后清晰
-                                pil_img = ImageOps.autocontrast(pil_img, cutoff=1)
+                                # Gamma Correction to thin white text and reduce blooming/halos
+                                # Target: Darken midtones to separate characters (fix "NewSolar" -> "New Solar")
+                                try:
+                                    if HAS_NUMPY and np is not None:
+                                        arr = np.array(pil_img)
+                                        # Gamma 1.5 (Darkens midtones: 0.5^1.5 = 0.35)
+                                        # This thins white text on dark background by pushing gray edges to black
+                                        arr_gamma = ((arr / 255.0) ** 1.5) * 255.0
+                                        pil_img = Image.fromarray(arr_gamma.astype(np.uint8))
+                                except Exception as e:
+                                    print(f"[OCR] Gamma correction failed: {e}")
                                 
                                 buf = io.BytesIO()
                                 pil_img.save(buf, format='PNG')
@@ -539,11 +546,12 @@ class OCREngine:
                                 len1 = _get_len(lines1)
                                 len2 = _get_len(lines2)
 
-                                # print(f"[OCR Debug] Scaled Result: Score={score2:.2f}, Len={len2} (Original Len={len1})")
+                                print(f"[OCR Debug] Scaled Result: Score={score2:.2f}, Len={len2} (Original Len={len1})")
                                 
                                 # Accept if score improves OR if significantly more text is found (1.15x)
-                                # This handles cases where original had high score but missed a lot of text
-                                if score2 >= score1 or len2 > len1 * 1.15 or (len1 < 10 and len2 > 10):
+                                # Also accept if we scaled significantly and the result is still 'good' (score > 0.85),
+                                # because small text often gives high-confidence garbage (e.g. 'I' becomes 'l').
+                                if score2 >= score1 * 0.9 or len2 > len1 * 1.1 or (len1 < 10 and len2 > 10) or (scale > 1.3 and score2 > 0.85):
                                     print(f"[OCR] 自适应放大 {scale:.2f}x (AvgH={avg_height:.1f}px) 提升质量: {score1:.2f} -> {score2:.2f} (Len: {len1}->{len2})")
                                     final_lines = lines2
                         except Exception as e:
