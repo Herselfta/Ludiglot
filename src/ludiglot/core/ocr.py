@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Tuple, Union
 
 import re
+import inspect
 try:
     from PIL import Image, ImageOps, ImageFilter
     HAS_PIL = True
@@ -68,7 +69,79 @@ class OCREngine:
         self.ready = False
         self._ocr = None
 
-    def initialize(self) -> None:
+    def _detect_paddle_cls_support(self, ocr_obj) -> bool:
+        try:
+            predict = getattr(ocr_obj, "predict", None)
+            if predict is not None:
+                sig = inspect.signature(predict)
+                return "cls" in sig.parameters
+        except Exception:
+            return False
+
+        try:
+            ocr_fn = getattr(ocr_obj, "ocr", None)
+            if ocr_fn is None:
+                return False
+            sig = inspect.signature(ocr_fn)
+            return "cls" in sig.parameters
+        except Exception:
+            return False
+
+    def _paddle_extract_lines(self, result) -> List[Dict[str, object]]:
+        lines: List[Dict[str, object]] = []
+        if not result:
+            return lines
+
+        if isinstance(result, list) and result and isinstance(result[0], dict):
+            for page in result:
+                texts = page.get("rec_texts")
+                if texts is None:
+                    texts = []
+                scores = page.get("rec_scores")
+                if scores is None:
+                    scores = []
+                polys = page.get("rec_polys")
+                if polys is None:
+                    polys = page.get("dt_polys")
+                if polys is None:
+                    polys = []
+                rec_boxes = page.get("rec_boxes")
+                if rec_boxes is None:
+                    rec_boxes = []
+
+                for i, text in enumerate(texts):
+                    conf = float(scores[i]) if i < len(scores) else 0.0
+                    box = None
+                    if i < len(polys):
+                        try:
+                            poly = polys[i]
+                            box = [[int(p[0]), int(p[1])] for p in poly]
+                        except Exception:
+                            box = None
+                    if box is None and i < len(rec_boxes):
+                        try:
+                            rb = rec_boxes[i]
+                            if len(rb) >= 4 and isinstance(rb[0], (list, tuple)):
+                                box = [[int(p[0]), int(p[1])] for p in rb]
+                            elif len(rb) >= 4:
+                                x1, y1, x2, y2 = map(int, rb[:4])
+                                box = [[x1, y1], [x2, y1], [x2, y2], [x1, y2]]
+                        except Exception:
+                            box = None
+                    if box is None:
+                        box = [[0, 0], [0, 0], [0, 0], [0, 0]]
+                    lines.append({"text": str(text), "conf": conf, "box": box})
+            return lines
+
+        for block in result:
+            for item in block:
+                box = item[0]
+                text = item[1][0]
+                conf = float(item[1][1])
+                lines.append({"text": text, "conf": conf, "box": box})
+        return lines
+
+    def initialize(self, force_paddle: bool = False) -> None:
         """初始化 OCR 引擎。
 
         策略：
@@ -80,15 +153,15 @@ class OCREngine:
 
         # 2. 检查是否需要加载 PaddleOCR
         # 如果是 winrt 模式，或 auto 模式下 Windows OCR 可用，则无需加载 Paddle
-        if self.mode == "winrt":
+        if (not force_paddle) and self.mode == "winrt":
              print("[OCR] 模式=winrt，无需加载 PaddleOCR")
              return
 
-        if self.mode == "auto" and self._windows_ocr is not None:
+        if (not force_paddle) and self.mode == "auto" and self._windows_ocr is not None:
              print("[OCR] 模式=auto 且 Windows OCR 可用，无需加载 PaddleOCR")
              return
 
-        if self.mode == "tesseract":
+        if (not force_paddle) and self.mode == "tesseract":
              print("[OCR] 使用 Tesseract，无需加载 PaddleOCR")
              return
 
@@ -163,7 +236,7 @@ class OCREngine:
             for extra in extra_candidates:
                 try:
                     self._ocr = PaddleOCR(**base_kwargs, **extra)
-                    self._supports_cls = "cls" in extra
+                    self._supports_cls = self._detect_paddle_cls_support(self._ocr)
                     self.active_gpu = bool(base_kwargs.get("use_gpu"))
                     last_error = None
                     break
@@ -1226,7 +1299,9 @@ class OCREngine:
         return [text for text, _ in lines]
 
     def recognize_with_confidence(self, image_path: str | Path) -> List[Tuple[str, float]]:
-        if not self.ready:
+        if backend_key == "paddle" and self._ocr is None:
+            self.initialize(force_paddle=True)
+        elif not self.ready:
             self.initialize()
         
         if self._ocr is None:
@@ -1240,15 +1315,10 @@ class OCREngine:
                 result = self._ocr.ocr(str(image_path))
         except NotImplementedError:
             return self._pytesseract_recognize(image_path)
-        texts: List[Tuple[str, float]] = []
         if not result:
-            return texts
-        for block in result:
-            for item in block:
-                text = item[1][0]
-                conf = float(item[1][1])
-                texts.append((text, conf))
-        return texts
+            return []
+        lines = self._paddle_extract_lines(result)
+        return [(str(x.get("text", "")).strip(), float(x.get("conf", 0.0))) for x in lines if str(x.get("text", "")).strip()]
 
     def recognize_with_boxes(
         self,
@@ -1309,7 +1379,9 @@ class OCREngine:
             image_input = Image.frombytes("RGBA", (int(r_w), int(r_h)), r_bytes, "raw", "BGRA")
         
         # 策略4: 尝试 PaddleOCR
-        if not self.ready:
+        if backend_key == "paddle" and self._ocr is None:
+            self.initialize(force_paddle=True)
+        elif not self.ready:
             self.initialize()
             
         if self._ocr is not None:
@@ -1342,13 +1414,7 @@ class OCREngine:
             self.last_backend = "tesseract"
             return self._pytesseract_recognize_boxes(image_input)
         
-        lines: List[Dict[str, object]] = []
-        for block in result:
-            for item in block:
-                box = item[0]
-                text = item[1][0]
-                conf = float(item[1][1])
-                lines.append({"text": text, "conf": conf, "box": box})
+        lines = self._paddle_extract_lines(result)
         
         # 策略5: 质量检查 - 如果 PaddleOCR 结果质量差，尝试 Tesseract 兜底
         if lines:

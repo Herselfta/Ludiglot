@@ -3361,6 +3361,10 @@ class OverlayWindow(QMainWindow):
                 "font_cn": self.current_font_cn
             }
             
+            # 持久化 OCR 选择（避免 UI 与配置脱节）
+            raw["ocr_backend"] = getattr(self.config, "ocr_backend", "auto")
+            raw["ocr_mode"] = getattr(self.config, "ocr_mode", "auto")
+            
             # 同时也更新顶层字段以保持兼容性
             raw["font_en"] = self.current_font_en
             raw["font_cn"] = self.current_font_cn
