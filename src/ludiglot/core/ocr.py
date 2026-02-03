@@ -565,6 +565,92 @@ class OCREngine:
                     print(f"[OCR] Internal Error in _recognize_bytes: {e}")
                     return []
 
+            def _text_score(text: str) -> float:
+                text = (text or "").strip()
+                if not text:
+                    return -1e9
+                valid = sum(1 for ch in text if ch.isascii() and (ch.isalnum() or ch in " -'"))
+                ratio = valid / max(len(text), 1)
+                vowels = set("aeiouyAEIOUY")
+                max_cluster = 0
+                cluster = 0
+                for ch in text:
+                    if ch.isalpha() and ch not in vowels:
+                        cluster += 1
+                        if cluster > max_cluster:
+                            max_cluster = cluster
+                    else:
+                        cluster = 0
+                penalty = max(0, max_cluster - 2) * 0.1
+                length_penalty = 0.01 * max(0, len(text) - 12)
+                return ratio - penalty - length_penalty
+
+            def _refine_short_lines(img_bytes: bytes, lines: List[Dict[str, object]]) -> List[Dict[str, object]]:
+                if not lines:
+                    return lines
+                try:
+                    base_img = Image.open(io.BytesIO(img_bytes))
+                except Exception:
+                    return lines
+
+                refined: List[Dict[str, object]] = []
+                for line in lines:
+                    text = str(line.get("text", "")).strip()
+                    tokens = text.split()
+                    if len(tokens) != 1 or len(text) > 12:
+                        refined.append(line)
+                        continue
+                    box = line.get("box")
+                    if not box:
+                        refined.append(line)
+                        continue
+                    try:
+                        x1 = min(int(p[0]) for p in box)
+                        y1 = min(int(p[1]) for p in box)
+                        x2 = max(int(p[0]) for p in box)
+                        y2 = max(int(p[1]) for p in box)
+                    except Exception:
+                        refined.append(line)
+                        continue
+
+                    pad = max(2, int((y2 - y1) * 0.2))
+                    x1 = max(0, x1 - pad)
+                    y1 = max(0, y1 - pad)
+                    x2 = min(base_img.width, x2 + pad)
+                    y2 = min(base_img.height, y2 + pad)
+                    if x2 <= x1 or y2 <= y1:
+                        refined.append(line)
+                        continue
+
+                    crop = base_img.crop((x1, y1, x2, y2))
+                    if crop.mode != "L":
+                        crop = crop.convert("L")
+                    crop = ImageOps.autocontrast(crop, cutoff=10)
+                    cw, ch = crop.size
+                    if cw > 0 and ch > 0:
+                        crop = crop.resize((int(cw * 2.0), int(ch * 2.0)), Image.Resampling.BICUBIC)
+
+                    buf = io.BytesIO()
+                    crop.save(buf, format="PNG")
+                    alt_lines = _recognize_bytes(buf.getvalue(), try_invert=False)
+                    alt_text = None
+                    alt_score = -1e9
+                    for alt in alt_lines:
+                        cand = str(alt.get("text", "")).strip()
+                        if not cand:
+                            continue
+                        score = _text_score(cand)
+                        if score > alt_score + 0.01 or (abs(score - alt_score) <= 0.01 and len(cand) > len(alt_text or "")):
+                            alt_score = score
+                            alt_text = cand
+
+                    if alt_text:
+                        orig_score = _text_score(text)
+                        if alt_score > orig_score + 0.05:
+                            line = {**line, "text": alt_text}
+                    refined.append(line)
+                return refined
+
             try:
                 # 1. 尝试原始图片
                 lines1 = _recognize_bytes(image_bytes)
@@ -677,6 +763,12 @@ class OCREngine:
                                     final_lines = lines2
                         except Exception as e:
                              print(f"[OCR] 自适应预处理失败: {e}")
+
+                if HAS_PIL and Image is not None and isinstance(image_bytes, (bytes, bytearray)):
+                    try:
+                        final_lines = _refine_short_lines(image_bytes, final_lines)
+                    except Exception as e:
+                        print(f"[OCR] 短行精修失败: {e}")
                 
                 result_container["lines"] = final_lines
                     
