@@ -449,10 +449,9 @@ class OverlayWindow(QMainWindow):
 
         self.ocr_backend_group = QActionGroup(self)
         self.ocr_backend_group.setExclusive(True)
-        for backend in ["auto", "winai", "paddle", "tesseract"]:
+        for backend in ["auto", "paddle", "tesseract"]:
             display_name = {
                 "auto": "Auto (Prefer WinOCR)",
-                "winai": "Windows AI (App SDK)",
                 "paddle": "Paddle",
                 "tesseract": "Tesseract"
             }.get(backend, backend)
@@ -1650,7 +1649,6 @@ class OverlayWindow(QMainWindow):
             backend = getattr(self.engine, "last_backend", None) or "paddle"
             backend_label = {
                 "windows": "WindowsOCR",
-                "winai": "Windows AI (App SDK)",
                 "tesseract": "Tesseract",
                 "paddle": "PaddleOCR",
             }.get(backend, backend)
@@ -1826,7 +1824,7 @@ class OverlayWindow(QMainWindow):
             win_input = str(getattr(self.config, "ocr_windows_input", "auto")).lower()
             use_raw = (
                 bool(getattr(self.config, "ocr_raw_capture", False))
-                and self.config.ocr_backend in {"windows", "winai", "auto"}
+                and self.config.ocr_backend in {"windows", "auto"}
                 and win_input != "png"
             )
             backend = str(getattr(self.config, "capture_backend", "mss")).lower()
@@ -1906,7 +1904,7 @@ class OverlayWindow(QMainWindow):
             if backend == "winrt":
                 img = capture_fullscreen_to_image_native()
                 return _to_raw(img) if use_raw else img
-            return capture_fullscreen_to_raw() if (bool(getattr(self.config, "ocr_raw_capture", False)) and self.config.ocr_backend in {"windows", "winai", "auto"}) else capture_fullscreen_to_image()
+            return capture_fullscreen_to_raw() if (bool(getattr(self.config, "ocr_raw_capture", False)) and self.config.ocr_backend in {"windows", "auto"}) else capture_fullscreen_to_image()
         except Exception as e:
             raise e
 

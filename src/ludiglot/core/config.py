@@ -33,7 +33,7 @@ class AppConfig:
     ocr_lang: str = "en"
     ocr_mode: str = "auto"  # auto | gpu | cpu
     ocr_gpu: bool = False  # legacy field
-    ocr_backend: str = "auto"  # auto | winai | paddle | tesseract
+    ocr_backend: str = "auto"  # auto | paddle | tesseract
     ocr_debug_dump_input: bool = False
     ocr_raw_capture: bool = False
     ocr_windows_input: str = "auto"  # auto | raw | png

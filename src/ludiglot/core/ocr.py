@@ -5,7 +5,7 @@ import shutil
 import threading
 import io
 from pathlib import Path
-from typing import Any, Dict, List, Tuple, Union, cast
+from typing import Any, Dict, List, Tuple, Union
 
 import re
 try:
@@ -25,7 +25,6 @@ except ImportError:
     HAS_NUMPY = False
 
 PaddleOCR = None
-_WINAI_BOOTSTRAP_CONTEXT = None
 
 
 class OCREngine:
@@ -53,8 +52,6 @@ class OCREngine:
         self.active_gpu = False
         self._windows_ocr = None
         self._windows_ready = False
-        self._windows_ai_ocr = None
-        self._windows_ai_ready = False
         self.last_backend: str | None = None
         # Windows OCR tuning toggles (used for benchmarking / ablation)
         self.win_ocr_adaptive = True
@@ -258,80 +255,6 @@ class OCREngine:
         
         self._windows_ready = True
 
-    def _init_windows_ai_ocr(self) -> None:
-        """初始化 Windows App SDK AI Text Recognition（可选）。"""
-        if self._windows_ai_ready:
-            return
-
-        try:
-            from winui3.microsoft.windows.applicationmodel.dynamicdependency import bootstrap as win_bootstrap
-            from winui3.microsoft.windows.ai import AIFeatureReadyState, AIFeatureReadyResultState
-            from winui3.microsoft.windows.ai.imaging import TextRecognizer, TextRecognizerOptions
-        except ImportError as e:
-            print(f"[OCR] Windows AI OCR 不可用：WinUI3 依赖缺失 ({e.__class__.__name__})")
-            print("[OCR] 提示：安装 winui3-Microsoft.Windows.AI、winui3-Microsoft.Windows.AI.Imaging、winui3-Microsoft.Graphics.Imaging")
-            self._windows_ai_ready = True
-            self._windows_ai_ocr = None
-            return
-        except Exception as e:
-            print(f"[OCR] Windows AI OCR 导入失败：{e.__class__.__name__}: {e}")
-            self._windows_ai_ready = True
-            self._windows_ai_ocr = None
-            return
-
-        global _WINAI_BOOTSTRAP_CONTEXT
-        try:
-            if _WINAI_BOOTSTRAP_CONTEXT is None:
-                init_opts = getattr(win_bootstrap, "InitializeOptions", None)
-                if init_opts is not None and hasattr(init_opts, "ON_NO_MATCH_SHOW_UI"):
-                    _WINAI_BOOTSTRAP_CONTEXT = win_bootstrap.initialize(options=init_opts.ON_NO_MATCH_SHOW_UI)
-                else:
-                    _WINAI_BOOTSTRAP_CONTEXT = win_bootstrap.initialize()
-        except Exception as e:
-            print(f"[OCR] Windows AI OCR 初始化失败：App SDK Runtime 不可用 ({e.__class__.__name__})")
-            self._windows_ai_ready = True
-            self._windows_ai_ocr = None
-            return
-
-        try:
-            ready_state = TextRecognizer.get_ready_state()
-            not_ready = getattr(AIFeatureReadyState, "NOT_READY", None) or getattr(AIFeatureReadyState, "NotReady", None)
-            not_supported = getattr(AIFeatureReadyState, "NOT_SUPPORTED", None) or getattr(AIFeatureReadyState, "NotSupported", None)
-            if not_supported is not None and ready_state == not_supported:
-                print("[OCR] Windows AI OCR 不可用：设备不支持 (需要 NPU)")
-                self._windows_ai_ready = True
-                self._windows_ai_ocr = None
-                return
-
-            if not_ready is not None and ready_state == not_ready:
-                print("[OCR] Windows AI OCR 模型未就绪，尝试准备模型...")
-                ready_result = TextRecognizer.ensure_ready_async().get()
-                status = getattr(ready_result, "status", None)
-                success = getattr(AIFeatureReadyResultState, "SUCCESS", None) or getattr(AIFeatureReadyResultState, "Success", None)
-                if success is not None and status != success:
-                    print(f"[OCR] Windows AI OCR 模型准备失败: {status}")
-                    self._windows_ai_ready = True
-                    self._windows_ai_ocr = None
-                    return
-
-            options = TextRecognizerOptions()
-            if hasattr(options, "enable_word_level_confidence"):
-                options.enable_word_level_confidence = True
-            try:
-                self._windows_ai_ocr = TextRecognizer.create_async(options).get()
-            except Exception:
-                self._windows_ai_ocr = TextRecognizer.create_async().get()
-
-            if self._windows_ai_ocr is None:
-                print("[OCR] Windows AI OCR 初始化失败：创建识别器失败")
-            else:
-                print("[OCR] Windows AI OCR 初始化成功")
-        except Exception as e:
-            print(f"[OCR] Windows AI OCR 初始化失败：{e.__class__.__name__}: {e}")
-            self._windows_ai_ocr = None
-        finally:
-            self._windows_ai_ready = True
-
     def _windows_ocr_recognize_boxes(self, image_path: str | Path) -> List[Dict[str, object]]:
         """使用 Windows 原生 OCR 识别图片中的文本。
         
@@ -474,74 +397,6 @@ class OCREngine:
                        [int(max_x), int(max_y)], [int(min_x), int(max_y)]]
                 lines_list.append({"text": g_text, "conf": 0.92, "box": box})
         
-        return lines_list
-
-    def _parse_winai_result(self, result) -> List[Dict[str, object]]:
-        lines_list: List[Dict[str, object]] = []
-        if not result or not getattr(result, "lines", None):
-            return lines_list
-
-        for line in result.lines:
-            text = getattr(line, "text", "") or ""
-            words_iter = getattr(line, "words", None)
-            words = list(words_iter) if words_iter else []
-
-            if not words:
-                if text.strip():
-                    box = [[0, 0], [100, 0], [100, 30], [0, 30]]
-                    lines_list.append({"text": text.strip(), "conf": 0.9, "box": box})
-                continue
-
-            word_list = []
-            for word in words:
-                w_text = getattr(word, "text", "").strip()
-                rect = getattr(word, "bounding_box", None) or getattr(word, "bounding_rect", None)
-                if not w_text or not rect:
-                    continue
-                conf = getattr(word, "match_confidence", None)
-                try:
-                    conf_val = float(conf) if conf is not None else 0.9
-                except Exception:
-                    conf_val = 0.9
-                word_list.append({
-                    "text": w_text,
-                    "x": rect.x,
-                    "y": rect.y,
-                    "width": rect.width,
-                    "height": rect.height,
-                    "conf": conf_val,
-                })
-
-            if not word_list:
-                continue
-
-            # 行内分组逻辑（与 WinOCR 一致）
-            groups = []
-            current_group = [word_list[0]]
-            for i in range(1, len(word_list)):
-                prev = word_list[i - 1]
-                curr = word_list[i]
-                gap = curr["x"] - (prev["x"] + prev["width"])
-                threshold = max(50, curr["height"] * 2.5)
-                if gap > threshold:
-                    groups.append(current_group)
-                    current_group = [curr]
-                else:
-                    current_group.append(curr)
-            groups.append(current_group)
-
-            for group in groups:
-                g_text = " ".join([w["text"] for w in group])
-                min_x = min(w["x"] for w in group)
-                min_y = min(w["y"] for w in group)
-                max_x = max(w["x"] + w["width"] for w in group)
-                max_y = max(w["y"] + w["height"] for w in group)
-                confs = [float(w.get("conf", 0.9)) for w in group]
-                avg_conf = sum(confs) / max(len(confs), 1)
-                box = [[int(min_x), int(min_y)], [int(max_x), int(min_y)],
-                       [int(max_x), int(max_y)], [int(min_x), int(max_y)]]
-                lines_list.append({"text": g_text, "conf": avg_conf, "box": box})
-
         return lines_list
 
 
@@ -1331,137 +1186,6 @@ class OCREngine:
             print(f"[OCR] Windows OCR (内存流) 成功识别 {len(lines)} 行文本")
         return lines
 
-    def _windows_ai_recognize_from_bytes(self, image_bytes: bytes | tuple) -> List[Dict[str, object]]:
-        """使用 Windows App SDK AI Text Recognition 从内存字节流识别文本。"""
-        self._init_windows_ai_ocr()
-        if self._windows_ai_ocr is None:
-            return []
-
-        result_container: Dict[str, object] = {"lines": [], "error": None}
-
-        def _ocr_worker():
-            try:
-                from winrt.windows.storage.streams import InMemoryRandomAccessStream, DataWriter
-                from winrt.windows.graphics.imaging import BitmapDecoder, SoftwareBitmap, BitmapPixelFormat, BitmapAlphaMode
-                from winui3.microsoft.graphics.imaging import ImageBuffer
-            except ImportError as e:
-                result_container["error"] = f"WinRT/WinUI3模块导入失败: {e.__class__.__name__}"
-                return
-            except Exception as e:
-                result_container["error"] = f"模块导入错误 - {e.__class__.__name__}"
-                return
-
-            def _ensure_bgra8(bmp):
-                try:
-                    target_format = BitmapPixelFormat.BGRA8
-                    if bmp.bitmap_pixel_format != target_format:
-                        return SoftwareBitmap.convert(bmp, target_format)
-                except Exception as e:
-                    print(f"[OCR] WinAI _ensure_bgra8 warning: {e}")
-                return bmp
-
-            def _decode_to_bitmap(data_input):
-                bitmap = None
-                if isinstance(data_input, tuple) and len(data_input) == 3:
-                    raw_bytes, w, h = data_input
-                    try:
-                        writer = DataWriter()
-                        writer.write_bytes(raw_bytes)
-                        buf = writer.detach_buffer()
-                        try:
-                            bitmap = SoftwareBitmap.create_copy_from_buffer(
-                                buf, BitmapPixelFormat.BGRA8, w, h, BitmapAlphaMode.PREMULTIPLIED
-                            )
-                        except Exception:
-                            try:
-                                bitmap = SoftwareBitmap.create_copy_from_buffer(
-                                    buf, BitmapPixelFormat.BGRA8, w, h
-                                )
-                            except Exception:
-                                try:
-                                    bitmap = SoftwareBitmap.create_copy_from_buffer(
-                                        buf, BitmapPixelFormat.BGRA8, w, h, BitmapAlphaMode.IGNORE
-                                    )
-                                except Exception:
-                                    bitmap = None
-                    except Exception as e:
-                        print(f"[OCR] WinAI RAW Bitmap creation failed: {e}")
-                        bitmap = None
-                    if bitmap is None and HAS_PIL and Image is not None:
-                        try:
-                            pil_img = Image.frombytes("RGBA", (w, h), raw_bytes, "raw", "BGRA")
-                            buf = io.BytesIO()
-                            pil_img.save(buf, format="PNG")
-                            data_input = buf.getvalue()
-                        except Exception as e:
-                            print(f"[OCR] WinAI RAW->PNG fallback failed: {e}")
-                            return None
-
-                if bitmap is None:
-                    if isinstance(data_input, tuple):
-                        return None
-                    stream = InMemoryRandomAccessStream()
-                    writer = DataWriter(stream)
-                    writer.write_bytes(data_input)
-                    writer.store_async().get()
-                    writer.flush_async().get()
-                    writer.detach_stream()
-                    stream.seek(0)
-                    decoder = BitmapDecoder.create_async(stream).get()
-                    bitmap = decoder.get_software_bitmap_async().get()
-                    bitmap = _ensure_bgra8(bitmap)
-                return bitmap
-
-            def _create_image_buffer(bitmap):
-                for name in (
-                    "create_buffer_attached_to_bitmap",
-                    "create_for_software_bitmap",
-                    "create_from_software_bitmap",
-                ):
-                    if hasattr(ImageBuffer, name):
-                        try:
-                            return getattr(ImageBuffer, name)(bitmap)
-                        except Exception:
-                            continue
-                return None
-
-            try:
-                bitmap = _decode_to_bitmap(image_bytes)
-                if bitmap is None:
-                    result_container["error"] = "无法构建 SoftwareBitmap"
-                    return
-                image_buffer = _create_image_buffer(bitmap)
-                if image_buffer is None:
-                    result_container["error"] = "无法创建 ImageBuffer"
-                    return
-
-                try:
-                    result = self._windows_ai_ocr.recognize_text_from_image(image_buffer)
-                except Exception:
-                    result = self._windows_ai_ocr.recognize_text_from_image_async(image_buffer).get()
-
-                result_container["lines"] = self._parse_winai_result(result)
-            except Exception as e:
-                result_container["error"] = f"{e.__class__.__name__}: {str(e)[:120]}"
-
-        thread = threading.Thread(target=_ocr_worker, daemon=True)
-        thread.start()
-        thread.join(timeout=12.0)
-
-        if thread.is_alive():
-            print("[OCR] Windows AI OCR 超时")
-            return []
-
-        if result_container["error"]:
-            print(f"[OCR] Windows AI OCR 识别失败：{result_container['error']}")
-            return []
-
-        lines = cast(List[Dict[str, object]], result_container["lines"])
-        if lines:
-            print(f"[OCR] Windows AI OCR (内存流) 成功识别 {len(lines)} 行文本")
-        return lines
-
-
     def recognize_from_image(self, image: Union[Any, Any]) -> List[Dict[str, object]]:
         """从内存图像直接识别（OpenCV/PIL），避免硬盘读写。
         
@@ -1537,12 +1261,10 @@ class OCREngine:
         Args:
             image_input: 文件路径 (str/Path) 或 PIL Image 对象
             prefer_tesseract: 是否强制使用 Tesseract
-            backend: 指定后端（auto/windows/winai/paddle/tesseract）
+            backend: 指定后端（auto/windows/paddle/tesseract）
         """
         backend_key = str(backend or "auto").strip().lower().replace("-", "_")
-        if backend_key in {"winai", "windows_ai", "windowsappsdk", "windows_app_sdk", "app_sdk"}:
-            backend_key = "winai"
-        if backend_key not in {"auto", "windows", "winai", "paddle", "tesseract"}:
+        if backend_key not in {"auto", "windows", "paddle", "tesseract"}:
             backend_key = "auto"
         raw_tuple = None
         if isinstance(image_input, tuple) and len(image_input) == 3:
@@ -1559,28 +1281,8 @@ class OCREngine:
                 image_input = Image.frombytes("RGBA", (int(r_w), int(r_h)), r_bytes, "raw", "BGRA")
             return self._pytesseract_recognize_boxes(image_input)
         
-        # 策略2: Windows App SDK AI OCR（仅在显式请求时）
-        if backend_key == "winai":
-            print("[OCR] 尝试后端: Windows AI OCR (App SDK)")
-            winai_lines: List[Dict[str, object]] = []
-            if raw_tuple is not None:
-                winai_lines = self._windows_ai_recognize_from_bytes(raw_tuple)
-            elif isinstance(image_input, (str, Path)):
-                try:
-                    winai_lines = self._windows_ai_recognize_from_bytes(Path(image_input).read_bytes())
-                except Exception as e:
-                    print(f"[OCR] Windows AI OCR 读取文件失败：{e}")
-            elif HAS_PIL and Image is not None and isinstance(image_input, Image.Image):
-                buf = io.BytesIO()
-                image_input.save(buf, format="PNG")
-                winai_lines = self._windows_ai_recognize_from_bytes(buf.getvalue())
-            if winai_lines:
-                self.last_backend = "winai"
-                return winai_lines
-            print("[OCR] Windows AI OCR 不可用或未识别，回退至 Windows OCR")
-
-        # 策略3: 尝试 Windows 原生 OCR（默认优先）
-        if backend_key in {"auto", "windows", "winai"}:
+        # 策略2: 尝试 Windows 原生 OCR（默认优先）
+        if backend_key in {"auto", "windows"}:
             print("[OCR] 尝试后端: Windows OCR (优先)")
             windows_lines = []
             if self.win_ocr_preprocess:
