@@ -33,7 +33,15 @@ class AppConfig:
     ocr_lang: str = "en"
     ocr_mode: str = "auto"  # auto | gpu | cpu
     ocr_gpu: bool = False  # legacy field
-    ocr_backend: str = "auto"  # auto | paddle | tesseract
+    ocr_backend: str = "auto"  # auto | winai | paddle | tesseract
+    ocr_debug_dump_input: bool = False
+    ocr_raw_capture: bool = False
+    ocr_windows_input: str = "auto"  # auto | raw | png
+    ocr_line_refine: bool = False
+    ocr_preprocess: bool = False
+    ocr_word_segment: bool = False
+    ocr_multiscale: bool = False
+    ocr_adaptive: bool = True
     audio_cache_path: Path | None = None
     audio_cache_index_path: Path | None = None
     audio_wem_root: Path | None = None
@@ -48,6 +56,7 @@ class AppConfig:
     play_audio: bool = True
     gender_preference: str = "female"  # "male" or "female"
     capture_mode: str = "select"  # "window", "region", "fullscreen", "select"
+    capture_backend: str = "mss"  # "mss" | "winrt"
     window_title: str | None = None
     capture_region: dict | None = None
     hotkey_capture: str = "ctrl+shift+o"
@@ -55,6 +64,7 @@ class AppConfig:
     window_pos: tuple[int, int] | None = None
     font_en: str = "Source Han Serif SC, 思源宋体, serif"
     font_cn: str = "Source Han Serif SC, 思源宋体, serif"
+    capture_force_dpr: float | None = None
 
 
 def load_config(path: Path) -> AppConfig:
@@ -151,6 +161,14 @@ def load_config(path: Path) -> AppConfig:
     ocr_mode = raw.get("ocr_mode")
     if not ocr_mode:
         ocr_mode = "gpu" if raw.get("ocr_gpu") else "auto"
+    ocr_windows_input = str(raw.get("ocr_windows_input", "auto")).lower()
+    if ocr_windows_input not in {"auto", "raw", "png"}:
+        ocr_windows_input = "auto"
+    capture_force_dpr = raw.get("capture_force_dpr")
+    try:
+        capture_force_dpr = float(capture_force_dpr) if capture_force_dpr is not None else None
+    except Exception:
+        capture_force_dpr = None
         
     audio_cache_path = resolve_path(raw.get("audio_cache_path")) or project_root / "cache" / "audio"
     audio_cache_index_path = resolve_path(raw.get("audio_cache_index_path"))
@@ -225,6 +243,10 @@ def load_config(path: Path) -> AppConfig:
     if isinstance(unrealpak_extra_args := raw.get("unrealpak_extra_args"), str):
         unrealpak_extra_args = [item.strip() for item in unrealpak_extra_args.split(" ") if item.strip()]
     
+    capture_backend = str(raw.get("capture_backend", "mss")).lower()
+    if capture_backend not in {"mss", "winrt"}:
+        capture_backend = "mss"
+
     return AppConfig(
         data_root=data_root,
         en_json=en_json_path,
@@ -250,6 +272,14 @@ def load_config(path: Path) -> AppConfig:
         ocr_mode=str(ocr_mode).lower(),
         ocr_gpu=bool(raw.get("ocr_gpu", False)),
         ocr_backend=str(raw.get("ocr_backend", "auto")).lower(),
+        ocr_debug_dump_input=bool(raw.get("ocr_debug_dump_input", False)),
+        ocr_raw_capture=bool(raw.get("ocr_raw_capture", False)),
+        ocr_windows_input=ocr_windows_input,
+        ocr_line_refine=bool(raw.get("ocr_line_refine", False)),
+        ocr_preprocess=bool(raw.get("ocr_preprocess", False)),
+        ocr_word_segment=bool(raw.get("ocr_word_segment", False)),
+        ocr_multiscale=bool(raw.get("ocr_multiscale", False)),
+        ocr_adaptive=bool(raw.get("ocr_adaptive", True)),
         audio_cache_path=audio_cache_path,
         audio_cache_index_path=audio_cache_index_path,
         audio_wem_root=audio_wem_root,
@@ -263,6 +293,7 @@ def load_config(path: Path) -> AppConfig:
         scan_audio_on_start=bool(raw.get("scan_audio_on_start", True)),
         play_audio=bool(raw.get("play_audio", False)),
         capture_mode=raw.get("capture_mode", "image"),
+        capture_backend=capture_backend,
         window_title=raw.get("window_title"),
         capture_region=raw.get("capture_region"),
         hotkey_capture=raw.get("hotkey_capture", "ctrl+shift+o"),
@@ -270,6 +301,7 @@ def load_config(path: Path) -> AppConfig:
         window_pos=_load_window_pos(raw.get("window_pos")),
         font_en=font_en,
         font_cn=font_cn,
+        capture_force_dpr=capture_force_dpr,
     )
 
 

@@ -25,6 +25,7 @@ except ImportError:
     HAS_NUMPY = False
 
 PaddleOCR = None
+_WINAI_BOOTSTRAP_CONTEXT = None
 
 
 class OCREngine:
@@ -52,7 +53,18 @@ class OCREngine:
         self.active_gpu = False
         self._windows_ocr = None
         self._windows_ready = False
+        self._windows_ai_ocr = None
+        self._windows_ai_ready = False
         self.last_backend: str | None = None
+        # Windows OCR tuning toggles (used for benchmarking / ablation)
+        self.win_ocr_adaptive = True
+        self.win_ocr_refine = True
+        self.win_ocr_line_refine = False
+        self.win_ocr_preprocess = False
+        self.win_ocr_segment = False
+        self.win_ocr_multiscale = False
+        self._words_segmenter = None
+        self._words_segmenter_ready = False
 
     def set_mode(self, mode: str) -> None:
         self.mode = mode.lower()
@@ -246,6 +258,80 @@ class OCREngine:
         
         self._windows_ready = True
 
+    def _init_windows_ai_ocr(self) -> None:
+        """初始化 Windows App SDK AI Text Recognition（可选）。"""
+        if self._windows_ai_ready:
+            return
+
+        try:
+            from winui3.microsoft.windows.applicationmodel.dynamicdependency import bootstrap as win_bootstrap
+            from winui3.microsoft.windows.ai import AIFeatureReadyState, AIFeatureReadyResultState
+            from winui3.microsoft.windows.ai.imaging import TextRecognizer, TextRecognizerOptions
+        except ImportError as e:
+            print(f"[OCR] Windows AI OCR 不可用：WinUI3 依赖缺失 ({e.__class__.__name__})")
+            print("[OCR] 提示：安装 winui3-Microsoft.Windows.AI、winui3-Microsoft.Windows.AI.Imaging、winui3-Microsoft.Graphics.Imaging")
+            self._windows_ai_ready = True
+            self._windows_ai_ocr = None
+            return
+        except Exception as e:
+            print(f"[OCR] Windows AI OCR 导入失败：{e.__class__.__name__}: {e}")
+            self._windows_ai_ready = True
+            self._windows_ai_ocr = None
+            return
+
+        global _WINAI_BOOTSTRAP_CONTEXT
+        try:
+            if _WINAI_BOOTSTRAP_CONTEXT is None:
+                init_opts = getattr(win_bootstrap, "InitializeOptions", None)
+                if init_opts is not None and hasattr(init_opts, "ON_NO_MATCH_SHOW_UI"):
+                    _WINAI_BOOTSTRAP_CONTEXT = win_bootstrap.initialize(options=init_opts.ON_NO_MATCH_SHOW_UI)
+                else:
+                    _WINAI_BOOTSTRAP_CONTEXT = win_bootstrap.initialize()
+        except Exception as e:
+            print(f"[OCR] Windows AI OCR 初始化失败：App SDK Runtime 不可用 ({e.__class__.__name__})")
+            self._windows_ai_ready = True
+            self._windows_ai_ocr = None
+            return
+
+        try:
+            ready_state = TextRecognizer.get_ready_state()
+            not_ready = getattr(AIFeatureReadyState, "NOT_READY", None) or getattr(AIFeatureReadyState, "NotReady", None)
+            not_supported = getattr(AIFeatureReadyState, "NOT_SUPPORTED", None) or getattr(AIFeatureReadyState, "NotSupported", None)
+            if not_supported is not None and ready_state == not_supported:
+                print("[OCR] Windows AI OCR 不可用：设备不支持 (需要 NPU)")
+                self._windows_ai_ready = True
+                self._windows_ai_ocr = None
+                return
+
+            if not_ready is not None and ready_state == not_ready:
+                print("[OCR] Windows AI OCR 模型未就绪，尝试准备模型...")
+                ready_result = TextRecognizer.ensure_ready_async().get()
+                status = getattr(ready_result, "status", None)
+                success = getattr(AIFeatureReadyResultState, "SUCCESS", None) or getattr(AIFeatureReadyResultState, "Success", None)
+                if success is not None and status != success:
+                    print(f"[OCR] Windows AI OCR 模型准备失败: {status}")
+                    self._windows_ai_ready = True
+                    self._windows_ai_ocr = None
+                    return
+
+            options = TextRecognizerOptions()
+            if hasattr(options, "enable_word_level_confidence"):
+                options.enable_word_level_confidence = True
+            try:
+                self._windows_ai_ocr = TextRecognizer.create_async(options).get()
+            except Exception:
+                self._windows_ai_ocr = TextRecognizer.create_async().get()
+
+            if self._windows_ai_ocr is None:
+                print("[OCR] Windows AI OCR 初始化失败：创建识别器失败")
+            else:
+                print("[OCR] Windows AI OCR 初始化成功")
+        except Exception as e:
+            print(f"[OCR] Windows AI OCR 初始化失败：{e.__class__.__name__}: {e}")
+            self._windows_ai_ocr = None
+        finally:
+            self._windows_ai_ready = True
+
     def _windows_ocr_recognize_boxes(self, image_path: str | Path) -> List[Dict[str, object]]:
         """使用 Windows 原生 OCR 识别图片中的文本。
         
@@ -258,6 +344,73 @@ class OCREngine:
         except Exception as e:
             print(f"[OCR] 读取文件失败：{e}")
             return []
+
+    def _preprocess_windows_input(self, image_input: Union[str, Path, Any, tuple]) -> bytes | None:
+        """轻量预处理：灰度 + autocontrast，输出 PNG bytes."""
+        if not HAS_PIL or Image is None:
+            return None
+        try:
+            pil_img = None
+            if isinstance(image_input, (str, Path)):
+                pil_img = Image.open(str(image_input))
+            elif isinstance(image_input, tuple) and len(image_input) == 3:
+                r_bytes, r_w, r_h = image_input
+                pil_img = Image.frombytes("RGBA", (int(r_w), int(r_h)), r_bytes, "raw", "BGRA")
+            elif isinstance(image_input, Image.Image):
+                pil_img = image_input
+            else:
+                return None
+
+            if pil_img.mode != "L":
+                pil_img = pil_img.convert("L")
+            try:
+                from PIL import ImageOps
+                pil_img = ImageOps.autocontrast(pil_img)
+            except Exception:
+                pass
+            buf = io.BytesIO()
+            pil_img.save(buf, format="PNG")
+            return buf.getvalue()
+        except Exception:
+            return None
+
+    def _get_words_segmenter(self):
+        if self._words_segmenter_ready:
+            return self._words_segmenter
+        self._words_segmenter_ready = True
+        try:
+            from winrt.windows.data.text import WordsSegmenter
+            lang = "en-US" if str(self.lang).startswith("en") else str(self.lang)
+            self._words_segmenter = WordsSegmenter(lang)
+        except Exception as e:
+            print(f"[OCR] WordsSegmenter unavailable: {e.__class__.__name__}: {e}")
+            self._words_segmenter = None
+        return self._words_segmenter
+
+    def _segment_with_words_segmenter(self, text: str) -> str:
+        segmenter = self._get_words_segmenter()
+        if not segmenter:
+            return text
+        try:
+            tokens = list(segmenter.get_tokens(text))
+        except Exception:
+            return text
+        if not tokens:
+            return text
+        parts: list[str] = []
+        for tok in tokens:
+            t = getattr(tok, "text", "") or ""
+            if not t:
+                continue
+            if not parts:
+                parts.append(t)
+                continue
+            prev = parts[-1]
+            if prev and prev[-1].isalnum() and t[0].isalnum():
+                parts.append(" " + t)
+            else:
+                parts.append(t)
+        return "".join(parts).strip()
 
 
     def _parse_winrt_result(self, result) -> List[Dict[str, object]]:
@@ -321,6 +474,74 @@ class OCREngine:
                        [int(max_x), int(max_y)], [int(min_x), int(max_y)]]
                 lines_list.append({"text": g_text, "conf": 0.92, "box": box})
         
+        return lines_list
+
+    def _parse_winai_result(self, result) -> List[Dict[str, object]]:
+        lines_list: List[Dict[str, object]] = []
+        if not result or not getattr(result, "lines", None):
+            return lines_list
+
+        for line in result.lines:
+            text = getattr(line, "text", "") or ""
+            words_iter = getattr(line, "words", None)
+            words = list(words_iter) if words_iter else []
+
+            if not words:
+                if text.strip():
+                    box = [[0, 0], [100, 0], [100, 30], [0, 30]]
+                    lines_list.append({"text": text.strip(), "conf": 0.9, "box": box})
+                continue
+
+            word_list = []
+            for word in words:
+                w_text = getattr(word, "text", "").strip()
+                rect = getattr(word, "bounding_box", None) or getattr(word, "bounding_rect", None)
+                if not w_text or not rect:
+                    continue
+                conf = getattr(word, "match_confidence", None)
+                try:
+                    conf_val = float(conf) if conf is not None else 0.9
+                except Exception:
+                    conf_val = 0.9
+                word_list.append({
+                    "text": w_text,
+                    "x": rect.x,
+                    "y": rect.y,
+                    "width": rect.width,
+                    "height": rect.height,
+                    "conf": conf_val,
+                })
+
+            if not word_list:
+                continue
+
+            # 行内分组逻辑（与 WinOCR 一致）
+            groups = []
+            current_group = [word_list[0]]
+            for i in range(1, len(word_list)):
+                prev = word_list[i - 1]
+                curr = word_list[i]
+                gap = curr["x"] - (prev["x"] + prev["width"])
+                threshold = max(50, curr["height"] * 2.5)
+                if gap > threshold:
+                    groups.append(current_group)
+                    current_group = [curr]
+                else:
+                    current_group.append(curr)
+            groups.append(current_group)
+
+            for group in groups:
+                g_text = " ".join([w["text"] for w in group])
+                min_x = min(w["x"] for w in group)
+                min_y = min(w["y"] for w in group)
+                max_x = max(w["x"] + w["width"] for w in group)
+                max_y = max(w["y"] + w["height"] for w in group)
+                confs = [float(w.get("conf", 0.9)) for w in group]
+                avg_conf = sum(confs) / max(len(confs), 1)
+                box = [[int(min_x), int(min_y)], [int(max_x), int(min_y)],
+                       [int(max_x), int(max_y)], [int(min_x), int(max_y)]]
+                lines_list.append({"text": g_text, "conf": avg_conf, "box": box})
+
         return lines_list
 
 
@@ -413,10 +634,37 @@ class OCREngine:
                              writer = DataWriter()
                              writer.write_bytes(raw_bytes)
                              buf = writer.detach_buffer()
-                             bitmap = SoftwareBitmap.create_copy_from_buffer(buf, BitmapPixelFormat.BGRA8, w, h, BitmapAlphaMode.PREMULTIPLIED)
+                             bitmap = None
+                             # Some WinRT versions expose different overloads; try a few safe variants.
+                             try:
+                                 bitmap = SoftwareBitmap.create_copy_from_buffer(
+                                     buf, BitmapPixelFormat.BGRA8, w, h, BitmapAlphaMode.PREMULTIPLIED
+                                 )
+                             except Exception:
+                                 try:
+                                     bitmap = SoftwareBitmap.create_copy_from_buffer(
+                                         buf, BitmapPixelFormat.BGRA8, w, h
+                                     )
+                                 except Exception:
+                                     try:
+                                         bitmap = SoftwareBitmap.create_copy_from_buffer(
+                                             buf, BitmapPixelFormat.BGRA8, w, h, BitmapAlphaMode.IGNORE
+                                         )
+                                     except Exception:
+                                         bitmap = None
                          except Exception as e:
                              print(f"[OCR] RAW Bitmap creation failed: {e}")
-                             return []
+                             bitmap = None
+                         if bitmap is None and HAS_PIL and Image is not None:
+                             # Fallback: convert raw BGRA to PNG bytes, then decode as encoded image
+                             try:
+                                 pil_img = Image.frombytes("RGBA", (w, h), raw_bytes, "raw", "BGRA")
+                                 buf = io.BytesIO()
+                                 pil_img.save(buf, format="PNG")
+                                 data_input = buf.getvalue()
+                             except Exception as e:
+                                 print(f"[OCR] RAW->PNG fallback failed: {e}")
+                                 return []
                     else:
                         # Fallback to PNG/Encoded bytes
                         stream = InMemoryRandomAccessStream()
@@ -456,9 +704,8 @@ class OCREngine:
                             pil_img = None
                             if isinstance(data_input, tuple):
                                 r_bytes, r_w, r_h = data_input
-                                pil_img = Image.frombytes("RGB", (r_w, r_h), r_bytes, "raw", "BGRA")
+                                pil_img = Image.frombytes("RGBA", (r_w, r_h), r_bytes, "raw", "BGRA")
                             else:
-                                import io
                                 pil_img = Image.open(io.BytesIO(bytes_data))
                                 
                             if pil_img.mode == 'RGBA':
@@ -585,6 +832,107 @@ class OCREngine:
                 length_penalty = 0.01 * max(0, len(text) - 12)
                 return ratio - penalty - length_penalty
 
+            def _line_score(text: str) -> float:
+                text = (text or "").strip()
+                if not text:
+                    return -1e9
+                valid = 0
+                weird = 0
+                space_count = text.count(" ")
+                for ch in text:
+                    if ch.isascii() and (ch.isalnum() or ch in " -'.,!?;:"):
+                        valid += 1
+                    elif ch in "*#@$":
+                        weird += 1
+                ratio = valid / max(len(text), 1)
+                penalty = 0.0
+                if text and text[0] in "*•·":
+                    penalty += 0.2
+                if re.search(r"[A-Za-z]{2,}[:;][A-Za-z]", text):
+                    penalty += 0.15
+                if re.search(r"[A-Za-z]{2,}[,.][A-Za-z]", text):
+                    penalty += 0.1
+                if len(text) >= 25:
+                    expected_spaces = max(1, len(text) // 8)
+                    if space_count < expected_spaces:
+                        penalty += 0.1
+                penalty += weird * 0.05
+                return ratio - penalty
+
+            def _score_lines(lines: List[Dict[str, object]]) -> float:
+                if not lines:
+                    return -1e9
+                texts = [str(x.get("text", "")).strip() for x in lines if str(x.get("text", "")).strip()]
+                if not texts:
+                    return -1e9
+                joined = " ".join(texts)
+                scores = [_line_score(t) for t in texts]
+                avg_line = sum(scores) / max(len(scores), 1)
+                valid = sum(1 for ch in joined if ch.isascii() and (ch.isalnum() or ch in " -'.,!?;:"))
+                ratio = valid / max(len(joined), 1)
+                words = [w for w in joined.split() if w]
+                word_bonus = min(len(words) / 12.0, 1.0) * 0.2
+                space_ratio = joined.count(" ") / max(len(joined), 1)
+                penalty = 0.0
+                if len(joined) > 40 and space_ratio < 0.05:
+                    penalty += 0.2
+                return avg_line + ratio * 0.5 + word_bonus - penalty
+
+            def _scale_back_boxes(lines: List[Dict[str, object]], scale: float) -> None:
+                if not lines or scale == 1.0:
+                    return
+                for line in lines:
+                    box = line.get("box")
+                    if not box:
+                        continue
+                    orig_box = []
+                    for pt in box:
+                        orig_box.append([int(pt[0] / scale), int(pt[1] / scale)])
+                    line["box"] = orig_box
+
+            def _needs_segment(text: str) -> bool:
+                text = (text or "").strip()
+                if len(text) < 20:
+                    return False
+                space_ratio = text.count(" ") / max(len(text), 1)
+                if space_ratio < 0.05:
+                    return True
+                if re.search(r"[A-Za-z]{2,}[A-Z][a-z]", text):
+                    return True
+                if re.search(r"[A-Za-z]{2,}[,.!?;:][A-Za-z]", text):
+                    return True
+                return False
+
+            def _segment_line(text: str) -> str:
+                if not self.win_ocr_segment:
+                    return text
+                if not _needs_segment(text):
+                    return text
+                seg = self._segment_with_words_segmenter(text)
+                if not seg or seg == text:
+                    return text
+                if _line_score(seg) >= _line_score(text) + 0.02:
+                    return seg
+                return text
+
+            def _is_suspicious_line(text: str) -> bool:
+                text = (text or "").strip()
+                if not text:
+                    return False
+                if text[0] in "*•·" and len(text) > 6:
+                    return True
+                if re.search(r"[A-Za-z]{2,}[:;][A-Za-z]", text):
+                    return True
+                if re.search(r"[A-Za-z]{2,}[,.][A-Za-z]", text):
+                    return True
+                return False
+
+            def _strip_leading_symbol(text: str) -> str:
+                text = (text or "").strip()
+                if len(text) >= 2 and text[0] in "*•·" and text[1].isalpha() and text[1].isupper():
+                    return text[1:].lstrip()
+                return text
+
             def _refine_short_lines(img_bytes: bytes, lines: List[Dict[str, object]]) -> List[Dict[str, object]]:
                 if not lines:
                     return lines
@@ -651,6 +999,134 @@ class OCREngine:
                     refined.append(line)
                 return refined
 
+            def _refine_suspicious_lines(img_bytes: bytes, lines: List[Dict[str, object]]) -> List[Dict[str, object]]:
+                if not lines:
+                    return lines
+                try:
+                    base_img = Image.open(io.BytesIO(img_bytes))
+                except Exception:
+                    return lines
+
+                refined: List[Dict[str, object]] = []
+                for line in lines:
+                    text = str(line.get("text", "")).strip()
+                    if not _is_suspicious_line(text):
+                        refined.append(line)
+                        continue
+
+                    cleaned = _strip_leading_symbol(text)
+                    if cleaned != text and _line_score(cleaned) > _line_score(text) + 0.05:
+                        line = {**line, "text": cleaned}
+                        text = cleaned
+
+                    box = line.get("box")
+                    if not box:
+                        refined.append(line)
+                        continue
+                    try:
+                        x1 = min(int(p[0]) for p in box)
+                        y1 = min(int(p[1]) for p in box)
+                        x2 = max(int(p[0]) for p in box)
+                        y2 = max(int(p[1]) for p in box)
+                    except Exception:
+                        refined.append(line)
+                        continue
+
+                    pad = max(4, int((y2 - y1) * 0.25))
+                    x1 = max(0, x1 - pad)
+                    y1 = max(0, y1 - pad)
+                    x2 = min(base_img.width, x2 + pad)
+                    y2 = min(base_img.height, y2 + pad)
+                    if x2 <= x1 or y2 <= y1:
+                        refined.append(line)
+                        continue
+
+                    crop = base_img.crop((x1, y1, x2, y2))
+                    if crop.mode != "L":
+                        crop = crop.convert("L")
+                    crop = ImageOps.autocontrast(crop, cutoff=8)
+                    try:
+                        crop = crop.filter(ImageFilter.UnsharpMask(radius=1, percent=150, threshold=3))
+                    except Exception:
+                        pass
+                    cw, ch = crop.size
+                    if cw > 0 and ch > 0 and ch < 80:
+                        crop = crop.resize((int(cw * 2.0), int(ch * 2.0)), Image.Resampling.BICUBIC)
+
+                    buf = io.BytesIO()
+                    crop.save(buf, format="PNG")
+                    alt_lines = _recognize_bytes(buf.getvalue(), try_invert=True)
+                    if alt_lines:
+                        alt_lines = sorted(alt_lines, key=lambda b: (b["box"][0][1], b["box"][0][0]))
+                        cand = " ".join([str(b.get("text", "")).strip() for b in alt_lines if str(b.get("text", "")).strip()])
+                    else:
+                        cand = ""
+
+                    if cand:
+                        if _line_score(cand) > _line_score(text) + 0.05:
+                            line = {**line, "text": cand}
+                    refined.append(line)
+                return refined
+
+            def _refine_line_crops(img_bytes: bytes, lines: List[Dict[str, object]]) -> List[Dict[str, object]]:
+                if not lines:
+                    return lines
+                try:
+                    base_img = Image.open(io.BytesIO(img_bytes))
+                except Exception:
+                    return lines
+
+                refined: List[Dict[str, object]] = []
+                for line in lines:
+                    text = str(line.get("text", "")).strip()
+                    box = line.get("box")
+                    if not text or not box:
+                        refined.append(line)
+                        continue
+                    try:
+                        x1 = min(int(p[0]) for p in box)
+                        y1 = min(int(p[1]) for p in box)
+                        x2 = max(int(p[0]) for p in box)
+                        y2 = max(int(p[1]) for p in box)
+                    except Exception:
+                        refined.append(line)
+                        continue
+
+                    pad = max(4, int((y2 - y1) * 0.2))
+                    x1 = max(0, x1 - pad)
+                    y1 = max(0, y1 - pad)
+                    x2 = min(base_img.width, x2 + pad)
+                    y2 = min(base_img.height, y2 + pad)
+                    if x2 <= x1 or y2 <= y1:
+                        refined.append(line)
+                        continue
+
+                    crop = base_img.crop((x1, y1, x2, y2))
+                    if crop.mode != "L":
+                        crop = crop.convert("L")
+                    crop = ImageOps.autocontrast(crop, cutoff=6)
+                    try:
+                        crop = crop.filter(ImageFilter.UnsharpMask(radius=1, percent=140, threshold=2))
+                    except Exception:
+                        pass
+                    cw, ch = crop.size
+                    if cw > 0 and ch > 0 and ch < 90:
+                        crop = crop.resize((int(cw * 2.0), int(ch * 2.0)), Image.Resampling.BICUBIC)
+
+                    buf = io.BytesIO()
+                    crop.save(buf, format="PNG")
+                    alt_lines = _recognize_bytes(buf.getvalue(), try_invert=True)
+                    if alt_lines:
+                        alt_lines = sorted(alt_lines, key=lambda b: (b["box"][0][1], b["box"][0][0]))
+                        cand = " ".join([str(b.get("text", "")).strip() for b in alt_lines if str(b.get("text", "")).strip()])
+                    else:
+                        cand = ""
+
+                    if cand and _line_score(cand) > _line_score(text) + 0.03:
+                        line = {**line, "text": cand}
+                    refined.append(line)
+                return refined
+
             try:
                 # 1. 尝试原始图片
                 lines1 = _recognize_bytes(image_bytes)
@@ -659,7 +1135,7 @@ class OCREngine:
                 final_lines = lines1
                 
                 # 2. 如果质量低或字号过小，尝试自适应放大 (Text-Grab 策略)
-                if HAS_PIL and Image is not None:
+                if self.win_ocr_adaptive and HAS_PIL and Image is not None:
                     # 计算平均字高
                     avg_height = 0
                     word_count = 0
@@ -695,13 +1171,12 @@ class OCREngine:
                     # 如果需要放大 (且并非微小差异)，或者之前的质量评分真的很差
                     if scale > 1.2 or score1 < 0.90:
                         try:
-                            import io
                             pil_img = None
                             
                             # Handle Raw Tuple or Bytes
                             if isinstance(image_bytes, tuple):
                                 r_bytes, r_w, r_h = image_bytes
-                                pil_img = Image.frombytes("RGB", (r_w, r_h), r_bytes, "raw", "BGRA")
+                                pil_img = Image.frombytes("RGBA", (r_w, r_h), r_bytes, "raw", "BGRA")
                             else:
                                 pil_img = Image.open(io.BytesIO(image_bytes))
                             
@@ -764,11 +1239,74 @@ class OCREngine:
                         except Exception as e:
                              print(f"[OCR] 自适应预处理失败: {e}")
 
-                if HAS_PIL and Image is not None and isinstance(image_bytes, (bytes, bytearray)):
+                # 2.5 多尺度识别：在不同缩放下识别，选取评分更好的结果
+                if self.win_ocr_multiscale and HAS_PIL and Image is not None:
+                    try:
+                        # Build base image
+                        base_img = None
+                        if isinstance(image_bytes, tuple):
+                            r_bytes, r_w, r_h = image_bytes
+                            base_img = Image.frombytes("RGBA", (int(r_w), int(r_h)), r_bytes, "raw", "BGRA")
+                        else:
+                            base_img = Image.open(io.BytesIO(image_bytes))
+
+                        if base_img is not None:
+                            base_w, base_h = base_img.size
+                            candidates: list[tuple[float, List[Dict[str, object]]]] = []
+                            base_score = _score_lines(final_lines)
+                            candidates.append((base_score, final_lines))
+
+                            for scale in (1.25, 1.5, 2.0):
+                                new_w, new_h = int(base_w * scale), int(base_h * scale)
+                                if new_w < 200 or new_h < 80:
+                                    continue
+                                if new_w > 4200 or new_h > 4200:
+                                    continue
+                                try:
+                                    resized = base_img.resize((new_w, new_h), Image.Resampling.BICUBIC)
+                                    buf = io.BytesIO()
+                                    resized.save(buf, format="PNG")
+                                    new_bytes = buf.getvalue()
+                                    lines_s = _recognize_bytes(new_bytes)
+                                    if not lines_s:
+                                        continue
+                                    _scale_back_boxes(lines_s, scale)
+                                    score_s = _score_lines(lines_s)
+                                    candidates.append((score_s, lines_s))
+                                except Exception:
+                                    continue
+
+                            if candidates:
+                                best_score, best_lines = max(candidates, key=lambda x: x[0])
+                                if best_score > base_score + 0.02:
+                                    final_lines = best_lines
+                    except Exception as e:
+                        print(f"[OCR] 多尺度识别失败: {e}")
+
+                if self.win_ocr_refine and HAS_PIL and Image is not None and isinstance(image_bytes, (bytes, bytearray)):
                     try:
                         final_lines = _refine_short_lines(image_bytes, final_lines)
                     except Exception as e:
                         print(f"[OCR] 短行精修失败: {e}")
+
+                    try:
+                        final_lines = _refine_suspicious_lines(image_bytes, final_lines)
+                    except Exception as e:
+                        print(f"[OCR] 行精修失败: {e}")
+
+                if self.win_ocr_line_refine and HAS_PIL and Image is not None and isinstance(image_bytes, (bytes, bytearray)):
+                    try:
+                        final_lines = _refine_line_crops(image_bytes, final_lines)
+                    except Exception as e:
+                        print(f"[OCR] 行裁剪精修失败: {e}")
+
+                if self.win_ocr_segment:
+                    try:
+                        for line in final_lines:
+                            if "text" in line:
+                                line["text"] = _segment_line(str(line.get("text", "")))
+                    except Exception as e:
+                        print(f"[OCR] 分词纠错失败: {e}")
                 
                 result_container["lines"] = final_lines
                     
@@ -791,6 +1329,136 @@ class OCREngine:
         lines = result_container["lines"]
         if lines:
             print(f"[OCR] Windows OCR (内存流) 成功识别 {len(lines)} 行文本")
+        return lines
+
+    def _windows_ai_recognize_from_bytes(self, image_bytes: bytes | tuple) -> List[Dict[str, object]]:
+        """使用 Windows App SDK AI Text Recognition 从内存字节流识别文本。"""
+        self._init_windows_ai_ocr()
+        if self._windows_ai_ocr is None:
+            return []
+
+        result_container: Dict[str, object] = {"lines": [], "error": None}
+
+        def _ocr_worker():
+            try:
+                from winrt.windows.storage.streams import InMemoryRandomAccessStream, DataWriter
+                from winrt.windows.graphics.imaging import BitmapDecoder, SoftwareBitmap, BitmapPixelFormat, BitmapAlphaMode
+                from winui3.microsoft.graphics.imaging import ImageBuffer
+            except ImportError as e:
+                result_container["error"] = f"WinRT/WinUI3模块导入失败: {e.__class__.__name__}"
+                return
+            except Exception as e:
+                result_container["error"] = f"模块导入错误 - {e.__class__.__name__}"
+                return
+
+            def _ensure_bgra8(bmp):
+                try:
+                    target_format = BitmapPixelFormat.BGRA8
+                    if bmp.bitmap_pixel_format != target_format:
+                        return SoftwareBitmap.convert(bmp, target_format)
+                except Exception as e:
+                    print(f"[OCR] WinAI _ensure_bgra8 warning: {e}")
+                return bmp
+
+            def _decode_to_bitmap(data_input):
+                bitmap = None
+                if isinstance(data_input, tuple) and len(data_input) == 3:
+                    raw_bytes, w, h = data_input
+                    try:
+                        writer = DataWriter()
+                        writer.write_bytes(raw_bytes)
+                        buf = writer.detach_buffer()
+                        try:
+                            bitmap = SoftwareBitmap.create_copy_from_buffer(
+                                buf, BitmapPixelFormat.BGRA8, w, h, BitmapAlphaMode.PREMULTIPLIED
+                            )
+                        except Exception:
+                            try:
+                                bitmap = SoftwareBitmap.create_copy_from_buffer(
+                                    buf, BitmapPixelFormat.BGRA8, w, h
+                                )
+                            except Exception:
+                                try:
+                                    bitmap = SoftwareBitmap.create_copy_from_buffer(
+                                        buf, BitmapPixelFormat.BGRA8, w, h, BitmapAlphaMode.IGNORE
+                                    )
+                                except Exception:
+                                    bitmap = None
+                    except Exception as e:
+                        print(f"[OCR] WinAI RAW Bitmap creation failed: {e}")
+                        bitmap = None
+                    if bitmap is None and HAS_PIL and Image is not None:
+                        try:
+                            pil_img = Image.frombytes("RGBA", (w, h), raw_bytes, "raw", "BGRA")
+                            buf = io.BytesIO()
+                            pil_img.save(buf, format="PNG")
+                            data_input = buf.getvalue()
+                        except Exception as e:
+                            print(f"[OCR] WinAI RAW->PNG fallback failed: {e}")
+                            return None
+
+                if bitmap is None:
+                    if isinstance(data_input, tuple):
+                        return None
+                    stream = InMemoryRandomAccessStream()
+                    writer = DataWriter(stream)
+                    writer.write_bytes(data_input)
+                    writer.store_async().get()
+                    writer.flush_async().get()
+                    writer.detach_stream()
+                    stream.seek(0)
+                    decoder = BitmapDecoder.create_async(stream).get()
+                    bitmap = decoder.get_software_bitmap_async().get()
+                    bitmap = _ensure_bgra8(bitmap)
+                return bitmap
+
+            def _create_image_buffer(bitmap):
+                for name in (
+                    "create_buffer_attached_to_bitmap",
+                    "create_for_software_bitmap",
+                    "create_from_software_bitmap",
+                ):
+                    if hasattr(ImageBuffer, name):
+                        try:
+                            return getattr(ImageBuffer, name)(bitmap)
+                        except Exception:
+                            continue
+                return None
+
+            try:
+                bitmap = _decode_to_bitmap(image_bytes)
+                if bitmap is None:
+                    result_container["error"] = "无法构建 SoftwareBitmap"
+                    return
+                image_buffer = _create_image_buffer(bitmap)
+                if image_buffer is None:
+                    result_container["error"] = "无法创建 ImageBuffer"
+                    return
+
+                try:
+                    result = self._windows_ai_ocr.recognize_text_from_image(image_buffer)
+                except Exception:
+                    result = self._windows_ai_ocr.recognize_text_from_image_async(image_buffer).get()
+
+                result_container["lines"] = self._parse_winai_result(result)
+            except Exception as e:
+                result_container["error"] = f"{e.__class__.__name__}: {str(e)[:120]}"
+
+        thread = threading.Thread(target=_ocr_worker, daemon=True)
+        thread.start()
+        thread.join(timeout=12.0)
+
+        if thread.is_alive():
+            print("[OCR] Windows AI OCR 超时")
+            return []
+
+        if result_container["error"]:
+            print(f"[OCR] Windows AI OCR 识别失败：{result_container['error']}")
+            return []
+
+        lines = cast(List[Dict[str, object]], result_container["lines"])
+        if lines:
+            print(f"[OCR] Windows AI OCR (内存流) 成功识别 {len(lines)} 行文本")
         return lines
 
 
@@ -859,34 +1527,86 @@ class OCREngine:
         return texts
 
     def recognize_with_boxes(
-        self, image_input: Union[str, Path, Any], prefer_tesseract: bool = False
+        self,
+        image_input: Union[str, Path, Any],
+        prefer_tesseract: bool = False,
+        backend: str | None = None,
     ) -> List[Dict[str, object]]:
         """使用多后端策略识别图片中的文本框和内容。
         
         Args:
             image_input: 文件路径 (str/Path) 或 PIL Image 对象
             prefer_tesseract: 是否强制使用 Tesseract
+            backend: 指定后端（auto/windows/winai/paddle/tesseract）
         """
+        backend_key = str(backend or "auto").strip().lower().replace("-", "_")
+        if backend_key in {"winai", "windows_ai", "windowsappsdk", "windows_app_sdk", "app_sdk"}:
+            backend_key = "winai"
+        if backend_key not in {"auto", "windows", "winai", "paddle", "tesseract"}:
+            backend_key = "auto"
+        raw_tuple = None
+        if isinstance(image_input, tuple) and len(image_input) == 3:
+            raw_tuple = image_input
+            # Keep a lazy fallback for non-Windows backends
+            image_input = image_input  # preserve for now
+
         # 策略1: 如果明确要求 Tesseract，直接使用
-        if prefer_tesseract:
+        if prefer_tesseract or backend_key == "tesseract":
             print("[OCR] 使用后端: Tesseract (明确指定)")
             self.last_backend = "tesseract"
+            if raw_tuple and HAS_PIL and Image is not None:
+                r_bytes, r_w, r_h = raw_tuple
+                image_input = Image.frombytes("RGBA", (int(r_w), int(r_h)), r_bytes, "raw", "BGRA")
             return self._pytesseract_recognize_boxes(image_input)
         
-        # 策略2: 优先尝试 Windows 原生 OCR (最快且准确)
-        print("[OCR] 尝试后端: Windows OCR (优先)")
-        if isinstance(image_input, (str, Path)):
-             # File Path
-             windows_lines = self._windows_ocr_recognize_boxes(image_input)
-        else:
-             # PIL Image or Object
-             windows_lines = self.recognize_from_image(image_input)
-             
-        if windows_lines:
-            self.last_backend = "windows"
-            return windows_lines
+        # 策略2: Windows App SDK AI OCR（仅在显式请求时）
+        if backend_key == "winai":
+            print("[OCR] 尝试后端: Windows AI OCR (App SDK)")
+            winai_lines: List[Dict[str, object]] = []
+            if raw_tuple is not None:
+                winai_lines = self._windows_ai_recognize_from_bytes(raw_tuple)
+            elif isinstance(image_input, (str, Path)):
+                try:
+                    winai_lines = self._windows_ai_recognize_from_bytes(Path(image_input).read_bytes())
+                except Exception as e:
+                    print(f"[OCR] Windows AI OCR 读取文件失败：{e}")
+            elif HAS_PIL and Image is not None and isinstance(image_input, Image.Image):
+                buf = io.BytesIO()
+                image_input.save(buf, format="PNG")
+                winai_lines = self._windows_ai_recognize_from_bytes(buf.getvalue())
+            if winai_lines:
+                self.last_backend = "winai"
+                return winai_lines
+            print("[OCR] Windows AI OCR 不可用或未识别，回退至 Windows OCR")
+
+        # 策略3: 尝试 Windows 原生 OCR（默认优先）
+        if backend_key in {"auto", "windows", "winai"}:
+            print("[OCR] 尝试后端: Windows OCR (优先)")
+            windows_lines = []
+            if self.win_ocr_preprocess:
+                pre_bytes = self._preprocess_windows_input(raw_tuple if raw_tuple is not None else image_input)
+                if pre_bytes:
+                    windows_lines = self._windows_ocr_recognize_from_bytes(pre_bytes)
+            if not windows_lines:
+                if isinstance(image_input, (str, Path)):
+                     # File Path
+                     windows_lines = self._windows_ocr_recognize_boxes(image_input)
+                elif raw_tuple is not None:
+                     windows_lines = self._windows_ocr_recognize_from_bytes(raw_tuple)
+                else:
+                     # PIL Image or Object
+                     windows_lines = self.recognize_from_image(image_input)
+                 
+            if windows_lines:
+                self.last_backend = "windows"
+                return windows_lines
+
+        # Prepare fallback input for non-Windows backends
+        if raw_tuple is not None and HAS_PIL and Image is not None:
+            r_bytes, r_w, r_h = raw_tuple
+            image_input = Image.frombytes("RGBA", (int(r_w), int(r_h)), r_bytes, "raw", "BGRA")
         
-        # 策略3: 尝试 PaddleOCR
+        # 策略4: 尝试 PaddleOCR
         if not self.ready:
             self.initialize()
             
@@ -914,7 +1634,7 @@ class OCREngine:
             print("[OCR] 跳过 PaddleOCR (未安装或未初始化)")
             result = None
         
-        # 策略4: 最后的兜底 Tesseract
+        # 策略5: 最后的兜底 Tesseract
         if not result:
             print("[OCR] 使用后端: Tesseract (最后兜底)")
             self.last_backend = "tesseract"
@@ -928,7 +1648,7 @@ class OCREngine:
                 conf = float(item[1][1])
                 lines.append({"text": text, "conf": conf, "box": box})
         
-        # 策略4: 质量检查 - 如果 PaddleOCR 结果质量差，尝试 Tesseract 兜底
+        # 策略5: 质量检查 - 如果 PaddleOCR 结果质量差，尝试 Tesseract 兜底
         if lines:
             avg_conf = sum(float(x.get("conf", 0.0)) for x in lines) / max(len(lines), 1)
             print(f"[OCR] PaddleOCR 完成，识别 {len(lines)} 行，平均置信度 {avg_conf:.3f}")
@@ -1027,6 +1747,13 @@ class OCREngine:
             from pytesseract import Output
         except Exception:
             return []
+
+        if isinstance(image_input, tuple) and len(image_input) == 3:
+            try:
+                r_bytes, r_w, r_h = image_input
+                image_input = Image.frombytes("RGBA", (int(r_w), int(r_h)), r_bytes, "raw", "BGRA")
+            except Exception:
+                return []
 
         lang = "eng" if self.lang.startswith("en") else self.lang
         configs = [

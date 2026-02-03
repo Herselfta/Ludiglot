@@ -31,6 +31,8 @@ Ludiglot 使用以下后端优先级策略（`ocr_backend: "auto"` 模式）：
 3. Tesseract (兜底)   → 开源方案，最大兼容性
 ```
 
+> 💡 若要尝试 Windows App SDK 的 AI Text Recognition，请将 `ocr_backend` 设为 `winai`（需 Windows App Runtime + NPU 支持）。
+
 ### 自动回退机制
 
 - 如果 Windows OCR 不可用（依赖缺失或无语言包）→ 自动使用 PaddleOCR
@@ -56,6 +58,14 @@ pip install winrt-Windows.Foundation.Collections
 pip install -e .
 ```
 
+### Windows App SDK AI Text Recognition（可选）
+
+```bash
+pip install winui3-Microsoft.Windows.AI winui3-Microsoft.Windows.AI.Imaging winui3-Microsoft.Graphics.Imaging winui3-Microsoft.Windows.ApplicationModel.DynamicDependency
+```
+
+> 说明：需要 Windows App Runtime（推荐使用 Microsoft 官方安装器）并且设备具备 NPU 支持，否则初始化会失败并自动回退。
+
 ### 系统要求
 
 - **操作系统**：Windows 10 (1809+) 或 Windows 11
@@ -79,13 +89,14 @@ pip install -e .
 {
   "ocr_lang": "en",           // OCR 语言（en/zh/ja等）
   "ocr_mode": "auto",         // OCR 模式：auto/gpu/cpu
-  "ocr_backend": "auto"       // 后端选择：auto/paddle/tesseract
+  "ocr_backend": "auto"       // 后端选择：auto/winai/paddle/tesseract
 }
 ```
 
 ### OCR Backend 选项
 
 - `"auto"` (推荐)：Windows OCR → PaddleOCR → Tesseract
+- `"winai"`：Windows App SDK AI Text Recognition（需 NPU / Windows App Runtime）
 - `"paddle"`：仅使用 PaddleOCR（需要 GPU 或 CPU 推理）
 - `"tesseract"`：仅使用 Tesseract（开源方案）
 

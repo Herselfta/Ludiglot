@@ -35,9 +35,15 @@ from ludiglot.core.capture import (
     capture_fullscreen,
     capture_region,
     capture_window,
+    capture_fullscreen_to_raw,
     capture_region_to_image,
+    capture_region_to_raw,
     capture_fullscreen_to_image,
+    capture_fullscreen_to_image_native,
+    capture_window_to_raw,
     capture_window_to_image,
+    capture_window_to_image_native,
+    capture_region_to_image_native,
 )
 from ludiglot.core.config import AppConfig, load_config
 from ludiglot.core.ocr import OCREngine, group_ocr_lines
@@ -96,6 +102,26 @@ class OverlayWindow(QMainWindow):
             use_gpu=config.ocr_gpu,
             mode=config.ocr_mode,
         )
+        try:
+            self.engine.win_ocr_line_refine = bool(getattr(config, "ocr_line_refine", False))
+        except Exception:
+            pass
+        try:
+            self.engine.win_ocr_preprocess = bool(getattr(config, "ocr_preprocess", False))
+        except Exception:
+            pass
+        try:
+            self.engine.win_ocr_segment = bool(getattr(config, "ocr_word_segment", False))
+        except Exception:
+            pass
+        try:
+            self.engine.win_ocr_multiscale = bool(getattr(config, "ocr_multiscale", False))
+        except Exception:
+            pass
+        try:
+            self.engine.win_ocr_adaptive = bool(getattr(config, "ocr_adaptive", True))
+        except Exception:
+            pass
         self.db: Dict[str, Any] = {}
         self.voice_map: Dict[str, list[str]] = {}
         self.voice_event_index: VoiceEventIndex | None = None
@@ -423,9 +449,10 @@ class OverlayWindow(QMainWindow):
 
         self.ocr_backend_group = QActionGroup(self)
         self.ocr_backend_group.setExclusive(True)
-        for backend in ["auto", "paddle", "tesseract"]:
+        for backend in ["auto", "winai", "paddle", "tesseract"]:
             display_name = {
                 "auto": "Auto (Prefer WinOCR)",
+                "winai": "Windows AI (App SDK)",
                 "paddle": "Paddle",
                 "tesseract": "Tesseract"
             }.get(backend, backend)
@@ -1575,9 +1602,14 @@ class OverlayWindow(QMainWindow):
 
         # 过小截图检查
         if img_obj:
-            if img_obj.width < 8 or img_obj.height < 8:
+            if isinstance(img_obj, tuple) and len(img_obj) == 3:
+                _, img_w, img_h = img_obj
+            else:
+                img_w = img_obj.width
+                img_h = img_obj.height
+            if img_w < 8 or img_h < 8:
                 self.signals.log.emit(
-                    f"[CAPTURE] 选区过小({img_obj.width}x{img_obj.height})，已跳过"
+                    f"[CAPTURE] 选区过小({img_w}x{img_h})，已跳过"
                 )
                 self.signals.status.emit("选区过小，已取消")
                 return
@@ -1587,19 +1619,38 @@ class OverlayWindow(QMainWindow):
         try:
             # Skip disk-based preprocessing
             # image_path = self._preprocess_image(self.config.image_path)
+
+            if getattr(self.config, "ocr_debug_dump_input", False):
+                try:
+                    debug_dir = self.config.image_path.parent if getattr(self.config, "image_path", None) else Path.cwd()
+                    debug_dir.mkdir(parents=True, exist_ok=True)
+                    debug_path = debug_dir / "last_ocr_input.png"
+                    if isinstance(img_obj, tuple) and len(img_obj) == 3:
+                        raw_bytes, w, h = img_obj
+                        from PIL import Image
+                        img = Image.frombytes("RGBA", (int(w), int(h)), raw_bytes, "raw", "BGRA")
+                        img.save(debug_path)
+                    else:
+                        img_obj.save(debug_path)
+                    self.signals.log.emit(f"[OCR] 输入已保存: {debug_path}")
+                except Exception as exc:
+                    self.signals.log.emit(f"[OCR] 保存输入失败: {exc}")
             
             # Pass PIL Image directly
-            if self.config.ocr_backend == "windows":
-                box_lines = self.engine.recognize_with_boxes(img_obj)
-            elif self.config.ocr_backend == "tesseract":
+            if self.config.ocr_backend == "tesseract":
                 # Tesseract usually prefers path, but our updated engine handles object
-                box_lines = self.engine.recognize_with_boxes(img_obj, prefer_tesseract=True)
+                box_lines = self.engine.recognize_with_boxes(
+                    img_obj, prefer_tesseract=True, backend=self.config.ocr_backend
+                )
             else:
-                box_lines = self.engine.recognize_with_boxes(img_obj)
+                box_lines = self.engine.recognize_with_boxes(
+                    img_obj, backend=self.config.ocr_backend
+                )
                 
             backend = getattr(self.engine, "last_backend", None) or "paddle"
             backend_label = {
                 "windows": "WindowsOCR",
+                "winai": "Windows AI (App SDK)",
                 "tesseract": "Tesseract",
                 "paddle": "PaddleOCR",
             }.get(backend, backend)
@@ -1772,13 +1823,40 @@ class OverlayWindow(QMainWindow):
 
     def _capture_image_to_memory(self, selected_region: CaptureRegion | None) -> Any:
         try:
+            win_input = str(getattr(self.config, "ocr_windows_input", "auto")).lower()
+            use_raw = (
+                bool(getattr(self.config, "ocr_raw_capture", False))
+                and self.config.ocr_backend in {"windows", "winai", "auto"}
+                and win_input != "png"
+            )
+            backend = str(getattr(self.config, "capture_backend", "mss")).lower()
+
+            def _to_raw(img_obj):
+                try:
+                    from PIL import Image
+                    if isinstance(img_obj, tuple) and len(img_obj) == 3:
+                        return img_obj
+                    if isinstance(img_obj, Image.Image):
+                        if img_obj.mode != "RGBA":
+                            img_obj = img_obj.convert("RGBA")
+                        raw = img_obj.tobytes("raw", "BGRA")
+                        return (raw, img_obj.width, img_obj.height)
+                except Exception:
+                    return img_obj
+                return img_obj
             if selected_region is not None:
-                return capture_region_to_image(selected_region)
+                if backend == "winrt":
+                    img = capture_region_to_image_native(selected_region)
+                    return _to_raw(img) if use_raw else img
+                return capture_region_to_raw(selected_region) if use_raw else capture_region_to_image(selected_region)
                 
             if self.config.capture_mode == "window":
                 if not self.config.window_title:
                      raise RuntimeError("capture_mode=window 需要 window_title")
-                return capture_window_to_image(self.config.window_title)
+                if backend == "winrt":
+                    img = capture_window_to_image_native(self.config.window_title)
+                    return _to_raw(img) if use_raw else img
+                return capture_window_to_raw(self.config.window_title) if use_raw else capture_window_to_image(self.config.window_title)
                 
             if self.config.capture_mode == "region":
                 if not self.config.capture_region:
@@ -1789,25 +1867,46 @@ class OverlayWindow(QMainWindow):
                     width=int(self.config.capture_region["width"]),
                     height=int(self.config.capture_region["height"]),
                 )
-                return capture_region_to_image(region)
+                if backend == "winrt":
+                    img = capture_region_to_image_native(region)
+                    return _to_raw(img) if use_raw else img
+                return capture_region_to_raw(region) if use_raw else capture_region_to_image(region)
                 
             if self.config.capture_mode == "image":
                 # For replay mode, read from disk
                 if self.config.image_path.exists():
                     from PIL import Image
-                    return Image.open(self.config.image_path)
+                    img = Image.open(self.config.image_path)
+                    if use_raw:
+                        try:
+                            if img.mode != "RGBA":
+                                img = img.convert("RGBA")
+                            raw = img.tobytes("raw", "BGRA")
+                            return (raw, img.width, img.height)
+                        except Exception:
+                            return img
+                    return img
                 # Fallback if file missing
-                return capture_fullscreen_to_image()
+                if backend == "winrt":
+                    img = capture_fullscreen_to_image_native()
+                    return _to_raw(img) if use_raw else img
+                return capture_fullscreen_to_raw() if use_raw else capture_fullscreen_to_image()
                 
             if self.config.capture_mode == "select":
                 region = self._select_region()
                 if region is None:
                     raise RuntimeError("未选择区域")
-                return capture_region_to_image(region)
+                if backend == "winrt":
+                    img = capture_region_to_image_native(region)
+                    return _to_raw(img) if use_raw else img
+                return capture_region_to_raw(region) if use_raw else capture_region_to_image(region)
                 
             raise RuntimeError(f"未知 capture_mode: {self.config.capture_mode}")
         except CaptureError:
-            return capture_fullscreen_to_image()
+            if backend == "winrt":
+                img = capture_fullscreen_to_image_native()
+                return _to_raw(img) if use_raw else img
+            return capture_fullscreen_to_raw() if (bool(getattr(self.config, "ocr_raw_capture", False)) and self.config.ocr_backend in {"windows", "winai", "auto"}) else capture_fullscreen_to_image()
         except Exception as e:
             raise e
 
@@ -3322,7 +3421,15 @@ class OverlayWindow(QMainWindow):
                 break
         
         dpr = target_screen.devicePixelRatio()
-        print(f"[框选] 命中屏幕: {target_screen.name()} (Index {target_index}), DPR: {dpr}")
+        dpr_override = getattr(self.config, "capture_force_dpr", None)
+        if dpr_override is not None:
+            try:
+                dpr = float(dpr_override)
+            except Exception:
+                pass
+            print(f"[框选] 命中屏幕: {target_screen.name()} (Index {target_index}), DPR: {dpr} (override)")
+        else:
+            print(f"[框选] 命中屏幕: {target_screen.name()} (Index {target_index}), DPR: {dpr}")
 
         # 2. 计算相对于该屏幕左上角的**逻辑偏移**
         screen_geo = target_screen.geometry()

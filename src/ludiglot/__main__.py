@@ -828,6 +828,14 @@ def cmd_run(args: argparse.Namespace) -> None:
 
     db = _load_db(cfg.db_path)
     engine = OCREngine(lang=cfg.ocr_lang, use_gpu=cfg.ocr_gpu, mode=cfg.ocr_mode)
+    try:
+        engine.win_ocr_adaptive = bool(getattr(cfg, "ocr_adaptive", True))
+        engine.win_ocr_preprocess = bool(getattr(cfg, "ocr_preprocess", False))
+        engine.win_ocr_line_refine = bool(getattr(cfg, "ocr_line_refine", False))
+        engine.win_ocr_segment = bool(getattr(cfg, "ocr_word_segment", False))
+        engine.win_ocr_multiscale = bool(getattr(cfg, "ocr_multiscale", False))
+    except Exception:
+        pass
     cache_index = None
     if cfg.audio_cache_path and cfg.scan_audio_on_start:
         cache_index = AudioCacheIndex(
