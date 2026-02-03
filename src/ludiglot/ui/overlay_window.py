@@ -35,6 +35,9 @@ from ludiglot.core.capture import (
     capture_fullscreen,
     capture_region,
     capture_window,
+    capture_region_to_image,
+    capture_fullscreen_to_image,
+    capture_window_to_image,
 )
 from ludiglot.core.config import AppConfig, load_config
 from ludiglot.core.ocr import OCREngine, group_ocr_lines
@@ -1559,41 +1562,41 @@ class OverlayWindow(QMainWindow):
         
         self.signals.status.emit("捕获中…")
         
-        # 1. 截图
+        # 1. 截图 (In-Memory)
         t_capture_start = time.time()
+        img_obj = None
         try:
-            self._capture_image(selected_region)
+            img_obj = self._capture_image_to_memory(selected_region)
         except Exception as exc:
             self.signals.error.emit(f"截图失败: {exc}")
             return
         t_capture_end = time.time()
         self.signals.log.emit(f"[PERF] 截图耗时: {(t_capture_end - t_capture_start):.3f}s")
 
-        # 过小截图会触发 OCR 底层异常，直接跳过并提示
-        try:
-            from PIL import Image
-
-            img = Image.open(self.config.image_path)
-            if img.width < 8 or img.height < 8:
+        # 过小截图检查
+        if img_obj:
+            if img_obj.width < 8 or img_obj.height < 8:
                 self.signals.log.emit(
-                    f"[CAPTURE] 选区过小({img.width}x{img.height})，已跳过"
+                    f"[CAPTURE] 选区过小({img_obj.width}x{img_obj.height})，已跳过"
                 )
                 self.signals.status.emit("选区过小，已取消")
                 return
-        except Exception:
-            pass
 
-        # 2. OCR识别
+        # 2. OCR识别 (In-Memory Pipeline)
         t_ocr_start = time.time()
         try:
-            image_path = self._preprocess_image(self.config.image_path)
+            # Skip disk-based preprocessing
+            # image_path = self._preprocess_image(self.config.image_path)
+            
+            # Pass PIL Image directly
             if self.config.ocr_backend == "windows":
-                box_lines = self.engine.recognize_with_boxes(image_path)
+                box_lines = self.engine.recognize_with_boxes(img_obj)
             elif self.config.ocr_backend == "tesseract":
-                tess_path = getattr(self, "_tesseract_image_path", image_path)
-                box_lines = self.engine.recognize_with_boxes(tess_path, prefer_tesseract=True)
+                # Tesseract usually prefers path, but our updated engine handles object
+                box_lines = self.engine.recognize_with_boxes(img_obj, prefer_tesseract=True)
             else:
-                box_lines = self.engine.recognize_with_boxes(image_path)
+                box_lines = self.engine.recognize_with_boxes(img_obj)
+                
             backend = getattr(self.engine, "last_backend", None) or "paddle"
             backend_label = {
                 "windows": "WindowsOCR",
@@ -1605,6 +1608,8 @@ class OverlayWindow(QMainWindow):
             self.signals.log.emit(f"[PERF] OCR识别耗时: {(t_ocr_end - t_ocr_start):.3f}s")
         except Exception as exc:
             self.signals.error.emit(f"OCR 失败: {exc}")
+            import traceback
+            traceback.print_exc()
             return
 
         if not box_lines:
@@ -1617,8 +1622,7 @@ class OverlayWindow(QMainWindow):
         lines = group_ocr_lines(box_lines, lang=self.engine.lang)
         if self.config.ocr_backend == "auto" and self._needs_tesseract(lines):
             self.signals.log.emit("[OCR] 质量较差，切换 Tesseract")
-            tess_path = getattr(self, "_tesseract_image_path", image_path)
-            box_lines = self.engine.recognize_with_boxes(tess_path, prefer_tesseract=True)
+            box_lines = self.engine.recognize_with_boxes(img_obj, prefer_tesseract=True)
             lines = group_ocr_lines(box_lines, lang=self.engine.lang)
         t_group_end = time.time()
         self.signals.log.emit(f"[PERF] 文本分组耗时: {(t_group_end - t_group_start):.3f}s")
@@ -1766,23 +1770,54 @@ class OverlayWindow(QMainWindow):
             self.signals.log.emit(f"[PRE] 预处理失败: {e}")
             return image_path
 
+    def _capture_image_to_memory(self, selected_region: CaptureRegion | None) -> Any:
+        try:
+            if selected_region is not None:
+                return capture_region_to_image(selected_region)
+                
+            if self.config.capture_mode == "window":
+                if not self.config.window_title:
+                     raise RuntimeError("capture_mode=window 需要 window_title")
+                return capture_window_to_image(self.config.window_title)
+                
+            if self.config.capture_mode == "region":
+                if not self.config.capture_region:
+                    raise RuntimeError("capture_mode=region 需要 capture_region")
+                region = CaptureRegion(
+                    left=int(self.config.capture_region["left"]),
+                    top=int(self.config.capture_region["top"]),
+                    width=int(self.config.capture_region["width"]),
+                    height=int(self.config.capture_region["height"]),
+                )
+                return capture_region_to_image(region)
+                
+            if self.config.capture_mode == "image":
+                # For replay mode, read from disk
+                if self.config.image_path.exists():
+                    from PIL import Image
+                    return Image.open(self.config.image_path)
+                # Fallback if file missing
+                return capture_fullscreen_to_image()
+                
+            if self.config.capture_mode == "select":
+                region = self._select_region()
+                if region is None:
+                    raise RuntimeError("未选择区域")
+                return capture_region_to_image(region)
+                
+            raise RuntimeError(f"未知 capture_mode: {self.config.capture_mode}")
+        except CaptureError:
+            return capture_fullscreen_to_image()
+        except Exception as e:
+            raise e
+
+    def _capture_image(self, selected_region: CaptureRegion | None) -> None:
+        # Legacy method kept only for compatibility if needed, but updated logic uses _capture_image_to_memory
+        pass
+            
     def _validate_capture(self, image_path: Path) -> None:
-        try:
-            from PIL import Image
-        except Exception:
-            return
-        try:
-            if not image_path.exists():
-                return
-            if image_path.stat().st_size < 20000:
-                self.signals.log.emit("[CAPTURE] 图片过小，回退全屏截图")
-                capture_fullscreen(image_path)
-            img = Image.open(image_path)
-            if img.width < 300 or img.height < 60:
-                self.signals.log.emit("[CAPTURE] 尺寸异常，回退全屏截图")
-                capture_fullscreen(image_path)
-        except Exception as exc:
-            self.signals.log.emit(f"[CAPTURE] 校验失败: {exc}")
+       # No loconger used in memory pipeline
+       pass
 
 
     def _build_candidates(self, lines: list[tuple[str, float]]) -> list[tuple[str, float]]:
