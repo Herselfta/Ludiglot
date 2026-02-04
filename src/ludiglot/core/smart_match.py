@@ -134,6 +134,21 @@ def build_smart_candidates(
     if len(lines_info) >= 2:
         full_text = ' '.join(l['cleaned'] for l in lines_info)
         candidates = [(full_text, sum(l['conf'] for l in lines_info) / len(lines_info))]
+
+        # 优化：尝试剥离人名/Title前缀 (For text that starts with "Name Text...")
+        # 场景：OCR结果第一行即合并了 "Name Dialogue..."
+        first_line_cleaned = lines_info[0]['cleaned']
+        words = first_line_cleaned.split()
+        if len(words) > 0:
+             first_word = words[0]
+             # Check if first word looks like a name (Capitalized, alpha)
+             if len(first_word) < 10 and first_word[0].isupper() and first_word.isalpha():
+                 # Create a candidate removing the first word from the *full text*
+                 full_words = full_text.split()
+                 if len(full_words) > 3:
+                     stripped_text = " ".join(full_words[1:])
+                     candidates.append((stripped_text, 0.85)) # Slightly lower conf penalty
+
         # 添加滑动窗口候选（如果文本很长）
         if len(full_text.split()) >= 10:
             words = full_text.split()
@@ -150,10 +165,24 @@ def build_smart_candidates(
     # 单行模式
     if lines_info:
         l = lines_info[0]
+        base_candidates = [(l['cleaned'], l['conf'])]
+        
+        # 优化：尝试剥离人名/Title前缀
+        # 场景：OCR结果为 "Name Dialogue..." 但库中只有 "Dialogue..."
+        words = l['cleaned'].split()
+        if len(words) > 3:
+            first_word = words[0]
+            # 如果第一个词较短，且看起来像名字（首字母大写，非数字）
+            if len(first_word) < 10 and first_word[0].isupper() and first_word.isalpha():
+                # 且剩余部分要有一定长度
+                rest_text = " ".join(words[1:])
+                if len(rest_text) > 10:
+                    base_candidates.append((rest_text, l['conf']))
+        
         return {
             'is_mixed': False,
             'full_text': l['cleaned'],
-            'candidates': [(l['cleaned'], l['conf'])],
+            'candidates': base_candidates,
             'strategy': 'single',
         }
     

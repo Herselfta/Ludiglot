@@ -1692,7 +1692,7 @@ class OverlayWindow(QMainWindow):
         
         if result is None:
             self.signals.status.emit("未提取到可用文本")
-            self.signals.log.emit("[OCR] 归一化后为空，跳过")
+            self.signals.log.emit("[OCR] 未找到有效匹配 (Score too low)")
             return
         
         print(f"[DEBUG] _capture_and_process: Got result. Keys: {list(result.keys())}", flush=True)

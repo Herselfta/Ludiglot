@@ -1648,9 +1648,16 @@ def group_ocr_lines(box_lines: List[Dict[str, object]], lang: str = "en") -> Lis
             
             gap = c_y1 - l_y2
             
-            # Threshold: Gap < 0.7 * LineHeight implies same paragraph
-            # (Normal line spacing is tight, paragraph spacing is wide)
-            allowed_gap = min(l_h, c_h) * 0.8
+            # Threshold: Gap < 0.5 * LineHeight (Reduced from 0.8)
+            allowed_gap = min(l_h, c_h) * 0.5
+            
+            # Extra Check: Horizontal Indentation
+            # If start position differs significantly (> 50px), enforce stricter gap or force split
+            l_x1 = min(t["box"][0][0] for t in last_line)
+            c_x1 = min(t["box"][0][0] for t in curr_line)
+            
+            if abs(c_x1 - l_x1) > 50:
+                 allowed_gap = min(l_h, c_h) * 0.2  # Very strict if not aligned
             
             if gap < allowed_gap:
                 current_para.append(curr_line)
