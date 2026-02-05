@@ -827,7 +827,14 @@ def cmd_run(args: argparse.Namespace) -> None:
         capture_fullscreen(cfg.image_path)
 
     db = _load_db(cfg.db_path)
-    engine = OCREngine(lang=cfg.ocr_lang, use_gpu=cfg.ocr_gpu, mode=cfg.ocr_mode)
+    engine = OCREngine(
+        lang=cfg.ocr_lang,
+        use_gpu=cfg.ocr_gpu,
+        mode=cfg.ocr_mode,
+        glm_endpoint=getattr(cfg, "ocr_glm_endpoint", None),
+        glm_model=getattr(cfg, "ocr_glm_model", None),
+        glm_timeout=getattr(cfg, "ocr_glm_timeout", None),
+    )
     try:
         engine.win_ocr_adaptive = bool(getattr(cfg, "ocr_adaptive", True))
         engine.win_ocr_preprocess = bool(getattr(cfg, "ocr_preprocess", False))
@@ -846,7 +853,7 @@ def cmd_run(args: argparse.Namespace) -> None:
         cache_index.load()
         cache_index.scan()
     wwiser_path = cfg.wwiser_path or default_wwiser_path()
-    lines = engine.recognize_with_confidence(cfg.image_path)
+    lines = engine.recognize_with_confidence(cfg.image_path, backend=cfg.ocr_backend)
 
     if not lines:
         print("OCR 未识别到文本")

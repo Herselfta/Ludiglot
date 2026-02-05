@@ -101,7 +101,11 @@ class OverlayWindow(QMainWindow):
             lang=config.ocr_lang,
             use_gpu=config.ocr_gpu,
             mode=config.ocr_mode,
+            glm_endpoint=getattr(config, "ocr_glm_endpoint", None),
+            glm_model=getattr(config, "ocr_glm_model", None),
+            glm_timeout=getattr(config, "ocr_glm_timeout", None),
         )
+        self.engine.set_logger(self.signals.log.emit, self.signals.status.emit)
         try:
             self.engine.win_ocr_line_refine = bool(getattr(config, "ocr_line_refine", False))
         except Exception:
@@ -449,9 +453,11 @@ class OverlayWindow(QMainWindow):
 
         self.ocr_backend_group = QActionGroup(self)
         self.ocr_backend_group.setExclusive(True)
-        for backend in ["auto", "paddle", "tesseract"]:
+        for backend in ["auto", "glm", "glm_ollama", "paddle", "tesseract"]:
             display_name = {
                 "auto": "Auto (Prefer WinOCR)",
+                "glm": "GLM-OCR (Local)",
+                "glm_ollama": "GLM-OCR (Ollama)",
                 "paddle": "Paddle",
                 "tesseract": "Tesseract"
             }.get(backend, backend)
@@ -1649,6 +1655,8 @@ class OverlayWindow(QMainWindow):
             backend = getattr(self.engine, "last_backend", None) or "paddle"
             backend_label = {
                 "windows": "WindowsOCR",
+                "glm": "GLM-OCR",
+                "glm_ollama": "GLM-OCR (Ollama)",
                 "tesseract": "Tesseract",
                 "paddle": "PaddleOCR",
             }.get(backend, backend)

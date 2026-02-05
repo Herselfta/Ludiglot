@@ -33,7 +33,10 @@ class AppConfig:
     ocr_lang: str = "en"
     ocr_mode: str = "auto"  # auto | gpu | cpu
     ocr_gpu: bool = False  # legacy field
-    ocr_backend: str = "auto"  # auto | paddle | tesseract
+    ocr_backend: str = "auto"  # auto | paddle | tesseract | glm | glm_ollama
+    ocr_glm_endpoint: str | None = None
+    ocr_glm_model: str | None = None
+    ocr_glm_timeout: float | None = None
     ocr_debug_dump_input: bool = False
     ocr_raw_capture: bool = False
     ocr_windows_input: str = "auto"  # auto | raw | png
@@ -164,6 +167,13 @@ def load_config(path: Path) -> AppConfig:
     ocr_windows_input = str(raw.get("ocr_windows_input", "auto")).lower()
     if ocr_windows_input not in {"auto", "raw", "png"}:
         ocr_windows_input = "auto"
+    ocr_glm_endpoint = raw.get("ocr_glm_endpoint")
+    ocr_glm_model = raw.get("ocr_glm_model")
+    ocr_glm_timeout = raw.get("ocr_glm_timeout")
+    try:
+        ocr_glm_timeout = float(ocr_glm_timeout) if ocr_glm_timeout is not None else None
+    except Exception:
+        ocr_glm_timeout = None
     capture_force_dpr = raw.get("capture_force_dpr")
     try:
         capture_force_dpr = float(capture_force_dpr) if capture_force_dpr is not None else None
@@ -272,6 +282,9 @@ def load_config(path: Path) -> AppConfig:
         ocr_mode=str(ocr_mode).lower(),
         ocr_gpu=bool(raw.get("ocr_gpu", False)),
         ocr_backend=str(raw.get("ocr_backend", "auto")).lower(),
+        ocr_glm_endpoint=str(ocr_glm_endpoint) if ocr_glm_endpoint else None,
+        ocr_glm_model=str(ocr_glm_model) if ocr_glm_model else None,
+        ocr_glm_timeout=ocr_glm_timeout,
         ocr_debug_dump_input=bool(raw.get("ocr_debug_dump_input", False)),
         ocr_raw_capture=bool(raw.get("ocr_raw_capture", False)),
         ocr_windows_input=ocr_windows_input,

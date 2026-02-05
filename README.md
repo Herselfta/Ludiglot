@@ -16,7 +16,7 @@
 
 ## ✨ 特性一览
 
-- **🔍 智能 OCR**：Windows 原生 OCR 优先，秒级启动。智能回退 PaddleOCR/Tesseract 机制。
+- **🔍 智能 OCR**：Windows 原生 OCR 优先，秒级启动。支持 GLM-OCR (本地 Transformers) 一体化部署，智能回退 PaddleOCR/Tesseract。
 - **🌏 即时翻译**：非侵入式复刻《鸣潮》风格覆盖层，实时检索官方文本。
 - **🎵 原声语音**：自动定位并播放对应官方语音，支持 Wwise 逻辑推导。
 - **⌨️ 全局集成**：热键截图、历史记录、智能标题分离一应俱全。

@@ -31,6 +31,8 @@ Ludiglot 使用以下后端优先级策略（`ocr_backend: "auto"` 模式）：
 3. Tesseract (兜底)   → 开源方案，最大兼容性
 ```
 
+如果指定 `ocr_backend: "glm"`，将优先调用 **GLM-OCR (本地 Transformers)**，失败后回退到 Windows/Paddle/Tesseract。
+
 
 ### 自动回退机制
 
@@ -81,7 +83,10 @@ pip install -e .
 {
   "ocr_lang": "en",           // OCR 语言（en/zh/ja等）
   "ocr_mode": "auto",         // OCR 模式：auto/gpu/cpu
-  "ocr_backend": "auto"       // 后端选择：auto/paddle/tesseract
+  "ocr_backend": "glm",       // 后端选择：auto/paddle/tesseract/glm/glm_ollama
+  "ocr_glm_model": "zai-org/GLM-OCR",
+  "ocr_glm_timeout": 30,
+  "ocr_glm_endpoint": "http://127.0.0.1:11434"
 }
 ```
 
@@ -90,6 +95,21 @@ pip install -e .
 - `"auto"` (推荐)：Windows OCR → PaddleOCR → Tesseract
 - `"paddle"`：仅使用 PaddleOCR（需要 GPU 或 CPU 推理）
 - `"tesseract"`：仅使用 Tesseract（开源方案）
+- `"glm"`：使用 GLM-OCR（本地 Transformers），失败自动回退
+- `"glm_ollama"`：使用 GLM-OCR（Ollama 服务），失败自动回退
+
+### GLM-OCR (本地 Transformers) 快速启用
+
+1. 配置 `ocr_backend: "glm"`
+2. 若未安装依赖，程序会自动尝试安装 `ludiglot[glm]`
+3. 首次运行会自动下载 `zai-org/GLM-OCR` 模型
+
+### GLM-OCR (Ollama) 快速启用
+
+1. 安装 Ollama
+2. 拉取模型：`ollama pull glm-ocr`
+3. 确保服务可访问（默认 `http://127.0.0.1:11434`）
+4. 配置 `ocr_backend: "glm_ollama"`
 
 ## 日志示例
 

@@ -21,6 +21,24 @@ if (-not (Test-Path ".venv")) {
 # 使用虚拟环境的Python
 $venvPython = ".\.venv\Scripts\python.exe"
 
+# 本地依赖隔离（缓存与工具路径）
+$projectRoot = $PSScriptRoot
+$cacheRoot = Join-Path $projectRoot "cache"
+$hfCache = Join-Path $cacheRoot "hf"
+$paddlexCache = Join-Path $cacheRoot "paddlex"
+$tesseractExe = Join-Path $projectRoot "tools\\tesseract\\tesseract.exe"
+
+$env:HF_HOME = $hfCache
+$env:TRANSFORMERS_CACHE = $hfCache
+$env:HUGGINGFACE_HUB_CACHE = Join-Path $hfCache "hub"
+$env:XDG_CACHE_HOME = $cacheRoot
+$env:PADDLE_PDX_CACHE_HOME = $paddlexCache
+
+if (Test-Path $tesseractExe) {
+    $env:TESSERACT_CMD = $tesseractExe
+    $env:PATH = (Split-Path $tesseractExe) + ";" + $env:PATH
+}
+
 # 检查安装状态
 Write-Host "检查安装状态..." -ForegroundColor Yellow
 & $venvPython -c "import ludiglot" 2>$null

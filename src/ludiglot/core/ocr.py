@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+import base64
+import io
+import json
 import os
 import shutil
+import subprocess
+import sys
 import threading
-import io
+import urllib.error
+import urllib.request
 from pathlib import Path
-from typing import Any, Dict, List, Tuple, Union
+from typing import Any, Callable, Dict, List, Tuple, Union
 
 import re
 import inspect
@@ -26,10 +32,19 @@ except ImportError:
     HAS_NUMPY = False
 
 PaddleOCR = None
+DEFAULT_GLM_OCR_PROMPT = (
+    "You are an OCR engine. Extract all readable text from the image.\n"
+    "Rules:\n"
+    "- Return only the recognized text.\n"
+    "- Preserve line breaks as in the image.\n"
+    "- Do not add any commentary or formatting.\n"
+)
+DEFAULT_GLM_OCR_TIMEOUT = 30.0
+DEFAULT_GLM_OCR_MAX_TOKENS = 512
 
 
 class OCREngine:
-    """封装 PaddleOCR。"""
+    """封装多后端 OCR。"""
 
     def __init__(
         self,
@@ -39,6 +54,9 @@ class OCREngine:
         det: bool = True,
         rec: bool = True,
         cls: bool = False,
+        glm_endpoint: str | None = None,
+        glm_model: str | None = None,
+        glm_timeout: float | None = None,
     ) -> None:
         self.lang = lang
         self.mode = (mode or ("gpu" if use_gpu else "cpu")).lower()
@@ -63,6 +81,62 @@ class OCREngine:
         self.win_ocr_multiscale = False
         self._words_segmenter = None
         self._words_segmenter_ready = False
+        endpoint = glm_endpoint or os.getenv("LUDIGLOT_GLM_OCR_ENDPOINT") or os.getenv("OLLAMA_HOST")
+        if endpoint:
+            endpoint = str(endpoint).strip()
+            if not endpoint.startswith(("http://", "https://")):
+                endpoint = f"http://{endpoint}"
+            self.glm_endpoint = endpoint.rstrip("/")
+        else:
+            self.glm_endpoint = None
+        self.glm_model = str(glm_model or os.getenv("LUDIGLOT_GLM_OCR_MODEL") or "zai-org/GLM-OCR")
+        timeout_raw = glm_timeout if glm_timeout is not None else os.getenv("LUDIGLOT_GLM_OCR_TIMEOUT")
+        try:
+            self.glm_timeout = float(timeout_raw) if timeout_raw is not None else DEFAULT_GLM_OCR_TIMEOUT
+        except Exception:
+            self.glm_timeout = DEFAULT_GLM_OCR_TIMEOUT
+        max_tokens_raw = os.getenv("LUDIGLOT_GLM_OCR_MAX_TOKENS")
+        try:
+            self.glm_max_tokens = int(max_tokens_raw) if max_tokens_raw is not None else DEFAULT_GLM_OCR_MAX_TOKENS
+        except Exception:
+            self.glm_max_tokens = DEFAULT_GLM_OCR_MAX_TOKENS
+        self.glm_prompt = DEFAULT_GLM_OCR_PROMPT
+        self._glm_ready = False
+        self._glm_model_obj = None
+        self._glm_processor = None
+        self._glm_device = "cpu"
+        self._glm_dtype = None
+        self._glm_install_attempted = False
+        self._glm_repair_attempted = False
+        self._log_callback: Callable[[str], None] | None = None
+        self._status_callback: Callable[[str], None] | None = None
+
+    def set_logger(
+        self,
+        log_callback: Callable[[str], None] | None = None,
+        status_callback: Callable[[str], None] | None = None,
+    ) -> None:
+        self._log_callback = log_callback
+        self._status_callback = status_callback
+
+    def _emit_log(self, message: str) -> None:
+        if message:
+            try:
+                print(message)
+            except Exception:
+                pass
+            if self._log_callback:
+                try:
+                    self._log_callback(message)
+                except Exception:
+                    pass
+
+    def _emit_status(self, message: str) -> None:
+        if self._status_callback and message:
+            try:
+                self._status_callback(message)
+            except Exception:
+                pass
 
     def set_mode(self, mode: str) -> None:
         self.mode = mode.lower()
@@ -327,6 +401,481 @@ class OCREngine:
             self._windows_ocr = None
         
         self._windows_ready = True
+
+    def _pil_to_png_bytes(self, image: Any) -> bytes | None:
+        if not HAS_PIL or Image is None or image is None:
+            return None
+        try:
+            buf = io.BytesIO()
+            image.save(buf, format="PNG")
+            return buf.getvalue()
+        except Exception:
+            return None
+
+    def _glm_image_to_bytes(self, image_input: Union[str, Path, Any, tuple]) -> bytes | None:
+        if isinstance(image_input, (str, Path)):
+            try:
+                return Path(image_input).read_bytes()
+            except Exception:
+                return None
+
+        if isinstance(image_input, tuple) and len(image_input) == 3:
+            if not HAS_PIL or Image is None:
+                return None
+            try:
+                r_bytes, r_w, r_h = image_input
+                img = Image.frombytes("RGBA", (int(r_w), int(r_h)), r_bytes, "raw", "BGRA")
+                return self._pil_to_png_bytes(img)
+            except Exception:
+                return None
+
+        if HAS_NUMPY and np is not None and isinstance(image_input, np.ndarray):
+            if not HAS_PIL or Image is None:
+                return None
+            try:
+                if len(image_input.shape) == 3 and image_input.shape[2] == 3:
+                    img = Image.fromarray(image_input[:, :, ::-1])
+                else:
+                    img = Image.fromarray(image_input)
+                return self._pil_to_png_bytes(img)
+            except Exception:
+                return None
+
+        if HAS_PIL and Image is not None and isinstance(image_input, Image.Image):
+            return self._pil_to_png_bytes(image_input)
+
+        return None
+
+    def _glm_extract_lines(self, text: str) -> List[str]:
+        if not text:
+            return []
+        cleaned = str(text).strip()
+        if not cleaned:
+            return []
+        if "```" in cleaned:
+            try:
+                block = re.findall(r"```(?:json)?\\s*([\\s\\S]*?)\\s*```", cleaned)
+                if block:
+                    cleaned = block[0].strip()
+            except Exception:
+                pass
+
+        parsed_lines: list[str] = []
+        try:
+            data = json.loads(cleaned)
+        except Exception:
+            data = None
+
+        if data is not None:
+            if isinstance(data, dict):
+                if isinstance(data.get("lines"), list):
+                    for item in data.get("lines", []):
+                        if isinstance(item, str):
+                            parsed_lines.append(item)
+                        elif isinstance(item, dict) and item.get("text"):
+                            parsed_lines.append(str(item.get("text")))
+                elif data.get("text"):
+                    parsed_lines.append(str(data.get("text")))
+            elif isinstance(data, list):
+                for item in data:
+                    if isinstance(item, str):
+                        parsed_lines.append(item)
+                    elif isinstance(item, dict) and item.get("text"):
+                        parsed_lines.append(str(item.get("text")))
+            parsed_lines = [line.strip() for line in parsed_lines if str(line).strip()]
+            if parsed_lines:
+                return parsed_lines
+
+        lines = [line.strip() for line in cleaned.splitlines() if line.strip()]
+        cleaned_lines: list[str] = []
+        for line in lines:
+            normalized = re.sub(r"^([-*•]\\s+|\\d+[\\.)]\\s+)", "", line).strip()
+            if normalized:
+                cleaned_lines.append(normalized)
+        return cleaned_lines
+
+    def _glm_build_boxes(self, lines: List[str]) -> List[Dict[str, object]]:
+        if not lines:
+            return []
+        box_lines: List[Dict[str, object]] = []
+        y_step = 80
+        box_h = 40
+        box_w = 1000
+        for idx, text in enumerate(lines):
+            y1 = idx * y_step
+            y2 = y1 + box_h
+            box = [[0, y1], [box_w, y1], [box_w, y2], [0, y2]]
+            box_lines.append({"text": text, "conf": 0.85, "box": box})
+        return box_lines
+
+    def _run_pip_install(self, cmd: list[str]) -> bool:
+        self._emit_log(f"[OCR] 执行: {' '.join(cmd)}")
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+        except Exception as exc:
+            self._emit_log(f"[OCR] 自动安装失败：{exc}")
+            return False
+
+        if proc.stdout:
+            for line in proc.stdout:
+                line = line.rstrip()
+                if line:
+                    self._emit_log(f"[OCR] {line}")
+
+        try:
+            return proc.wait() == 0
+        except Exception:
+            return False
+
+    def _attempt_install_glm_deps(self) -> bool:
+        if self._glm_install_attempted:
+            return False
+        self._glm_install_attempted = True
+        try:
+            project_root = Path(__file__).resolve().parents[3]
+        except Exception:
+            project_root = None
+
+        candidates: list[list[str]] = []
+        if project_root and (project_root / "pyproject.toml").exists():
+            candidates.append([sys.executable, "-m", "pip", "install", "-e", f"{project_root}[glm]"])
+        candidates.append([sys.executable, "-m", "pip", "install", "ludiglot[glm]"])
+
+        self._emit_status("GLM-OCR: 安装依赖中…")
+        self._emit_log("[OCR] 尝试自动安装 GLM-OCR 依赖...")
+        for cmd in candidates:
+            if self._run_pip_install(cmd):
+                self._emit_log("[OCR] GLM-OCR 依赖安装完成")
+                self._emit_status("GLM-OCR: 依赖安装完成")
+                return True
+        self._emit_log("[OCR] GLM-OCR 依赖自动安装失败，继续回退")
+        self._emit_status("GLM-OCR: 依赖安装失败，已回退")
+        return False
+
+    def _attempt_repair_glm_transformers(self, reason: str | None = None) -> bool:
+        if self._glm_repair_attempted:
+            return False
+        self._glm_repair_attempted = True
+        self._emit_status("GLM-OCR: 修复依赖中…")
+        if reason:
+            self._emit_log(f"[OCR] GLM-OCR 依赖修复原因：{reason}")
+        cmd = [sys.executable, "-m", "pip", "install", "git+https://github.com/huggingface/transformers.git", "-U"]
+        if self._run_pip_install(cmd):
+            self._emit_log("[OCR] GLM-OCR 依赖修复完成")
+            self._emit_status("GLM-OCR: 依赖修复完成")
+            return True
+        self._emit_log("[OCR] GLM-OCR 依赖修复失败")
+        self._emit_status("GLM-OCR: 依赖修复失败")
+        return False
+
+    def _attempt_install_glm_vision_deps(self) -> bool:
+        self._emit_status("GLM-OCR: 安装视觉依赖中…")
+        self._emit_log("[OCR] 尝试安装 torchvision...")
+        cmd = [sys.executable, "-m", "pip", "install", "torchvision", "-U"]
+        if self._run_pip_install(cmd):
+            self._emit_log("[OCR] torchvision 安装完成")
+            self._emit_status("GLM-OCR: 视觉依赖安装完成")
+            return True
+        self._emit_log("[OCR] torchvision 安装失败")
+        self._emit_status("GLM-OCR: 视觉依赖安装失败")
+        return False
+
+    def _init_glm_local(self) -> bool:
+        if self._glm_ready:
+            return self._glm_model_obj is not None and self._glm_processor is not None
+        self._glm_ready = True
+        self._emit_status("GLM-OCR: 初始化中…")
+        try:
+            import torch
+            from transformers import AutoModelForImageTextToText, AutoProcessor
+        except Exception as exc:
+            self._emit_log(f"[OCR] GLM-OCR 本地依赖未安装：{exc.__class__.__name__}")
+            if self._attempt_install_glm_deps():
+                try:
+                    import torch
+                    from transformers import AutoModelForImageTextToText, AutoProcessor
+                except Exception as exc2:
+                    self._emit_log(f"[OCR] GLM-OCR 依赖安装后仍不可用：{exc2.__class__.__name__}")
+                    return False
+            else:
+                return False
+
+        device = "cpu"
+        if self.mode in {"gpu", "auto"}:
+            try:
+                if torch.cuda.is_available():
+                    device = "cuda"
+            except Exception:
+                device = "cpu"
+
+        dtype = torch.float16 if device == "cuda" else torch.float32
+        self._glm_device = device
+        self._glm_dtype = dtype
+
+        # Ensure vision deps for processor
+        try:
+            import importlib.util as _importlib_util
+            if _importlib_util.find_spec("torchvision") is None:
+                self._attempt_install_glm_vision_deps()
+        except Exception:
+            pass
+
+        def _need_repair_from_error(err: Exception) -> bool:
+            msg = str(err).lower()
+            if isinstance(err, (TypeError, ValueError)):
+                return True
+            if "video_processor_class_from_name" in msg:
+                return True
+            if "nonetype" in msg or "none type" in msg:
+                return True
+            if "glm_ocr" in msg:
+                return True
+            if "unrecognized processing class" in msg:
+                return True
+            if "does not recognize this architecture" in msg:
+                return True
+            return False
+
+        def _load_processor_auto() -> Any:
+            return AutoProcessor.from_pretrained(self.glm_model, trust_remote_code=True)
+
+        def _load_processor_manual() -> Any:
+            from transformers import AutoTokenizer, Glm46VImageProcessor, Glm46VProcessor, BaseVideoProcessor
+            from transformers.models.glm46v.video_processing_glm46v import Glm46VVideoProcessor
+
+            if "dummy_torchvision_objects" in BaseVideoProcessor.__module__:
+                self._emit_log("[OCR] torchvision 未安装或未生效，无法构建 GLM-OCR 处理器")
+                self._emit_status("GLM-OCR: 视觉依赖缺失")
+                return None
+
+            img_proc = Glm46VImageProcessor.from_pretrained(self.glm_model)
+            vid_proc = Glm46VVideoProcessor.from_pretrained(self.glm_model)
+            tokenizer = AutoTokenizer.from_pretrained(self.glm_model, trust_remote_code=True)
+            return Glm46VProcessor(image_processor=img_proc, tokenizer=tokenizer, video_processor=vid_proc)
+
+        processor = None
+        try:
+            self._emit_status("GLM-OCR: 加载处理器…")
+            processor = _load_processor_auto()
+        except Exception as exc:
+            err_msg = f"{exc.__class__.__name__}: {exc}"
+            self._emit_log(f"[OCR] GLM-OCR 处理器加载失败：{err_msg}")
+            if _need_repair_from_error(exc) and self._attempt_repair_glm_transformers(reason=err_msg):
+                try:
+                    self._emit_status("GLM-OCR: 重新加载处理器…")
+                    processor = _load_processor_auto()
+                except Exception as exc2:
+                    err_msg2 = f"{exc2.__class__.__name__}: {exc2}"
+                    self._emit_log(f"[OCR] GLM-OCR 修复后处理器仍失败：{err_msg2}")
+                    processor = None
+            if processor is None:
+                try:
+                    self._emit_status("GLM-OCR: 构建处理器…")
+                    processor = _load_processor_manual()
+                except Exception as exc3:
+                    err_msg3 = f"{exc3.__class__.__name__}: {exc3}"
+                    self._emit_log(f"[OCR] GLM-OCR 处理器构建失败：{err_msg3}")
+                    processor = None
+
+        if processor is None:
+            self._emit_status("GLM-OCR: 处理器不可用")
+            return False
+
+        self._glm_processor = processor
+
+        try:
+            self._emit_status("GLM-OCR: 加载模型中…")
+            model_kwargs = {"torch_dtype": dtype, "trust_remote_code": True}
+            if device == "cuda":
+                model_kwargs["device_map"] = "auto"
+            self._glm_model_obj = AutoModelForImageTextToText.from_pretrained(self.glm_model, **model_kwargs)
+            if device == "cpu":
+                self._glm_model_obj = self._glm_model_obj.to(device)
+            self._glm_model_obj.eval()
+        except Exception as exc:
+            err_msg = f"{exc.__class__.__name__}: {exc}"
+            self._emit_log(f"[OCR] GLM-OCR 本地模型加载失败：{err_msg}")
+            if _need_repair_from_error(exc) and self._attempt_repair_glm_transformers(reason=err_msg):
+                try:
+                    self._emit_status("GLM-OCR: 重新加载模型中…")
+                    model_kwargs = {"torch_dtype": dtype, "trust_remote_code": True}
+                    if device == "cuda":
+                        model_kwargs["device_map"] = "auto"
+                    self._glm_model_obj = AutoModelForImageTextToText.from_pretrained(self.glm_model, **model_kwargs)
+                    if device == "cpu":
+                        self._glm_model_obj = self._glm_model_obj.to(device)
+                    self._glm_model_obj.eval()
+                except Exception as exc2:
+                    err_msg2 = f"{exc2.__class__.__name__}: {exc2}"
+                    self._emit_log(f"[OCR] GLM-OCR 修复后仍加载失败：{err_msg2}")
+                    self._emit_status("GLM-OCR: 模型加载失败")
+                    self._glm_model_obj = None
+                    return False
+            else:
+                self._emit_status("GLM-OCR: 模型加载失败")
+                self._glm_model_obj = None
+                return False
+        self._emit_status("GLM-OCR: 就绪")
+        return True
+
+    def _glm_decode_output(self, generated) -> str:
+        if generated is None or self._glm_processor is None:
+            return ""
+        try:
+            if hasattr(self._glm_processor, "batch_decode"):
+                texts = self._glm_processor.batch_decode(generated, skip_special_tokens=True)
+                if texts:
+                    return str(texts[0])
+            if hasattr(self._glm_processor, "decode"):
+                return str(self._glm_processor.decode(generated[0], skip_special_tokens=True))
+            tokenizer = getattr(self._glm_processor, "tokenizer", None)
+            if tokenizer is not None and hasattr(tokenizer, "batch_decode"):
+                texts = tokenizer.batch_decode(generated, skip_special_tokens=True)
+                if texts:
+                    return str(texts[0])
+        except Exception:
+            return ""
+        return ""
+
+    def _glm_local_recognize_boxes(self, image_input: Union[str, Path, Any, tuple]) -> List[Dict[str, object]]:
+        if not self._init_glm_local():
+            return []
+        image_bytes = self._glm_image_to_bytes(image_input)
+        if not image_bytes:
+            print("[OCR] GLM-OCR 输入转换失败")
+            return []
+        if not HAS_PIL or Image is None:
+            print("[OCR] GLM-OCR 需要 Pillow")
+            return []
+        try:
+            image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        except Exception as exc:
+            print(f"[OCR] GLM-OCR 读取图片失败：{exc}")
+            return []
+
+        processor = self._glm_processor
+        model = self._glm_model_obj
+        if processor is None or model is None:
+            return []
+
+        inputs = None
+        if hasattr(processor, "apply_chat_template"):
+            try:
+                messages = [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": self.glm_prompt},
+                            {"type": "image"},
+                        ],
+                    }
+                ]
+                try:
+                    prompt_text = processor.apply_chat_template(
+                        messages, add_generation_prompt=True, tokenize=False
+                    )
+                except TypeError:
+                    prompt_text = processor.apply_chat_template(
+                        messages, add_generation_prompt=True
+                    )
+                inputs = processor(text=prompt_text, images=image, return_tensors="pt")
+            except Exception:
+                inputs = None
+        if inputs is None:
+            try:
+                inputs = processor(text=self.glm_prompt, images=image, return_tensors="pt")
+            except Exception as exc:
+                print(f"[OCR] GLM-OCR 处理输入失败：{exc}")
+                return []
+
+        try:
+            for k, v in list(inputs.items()):
+                if hasattr(v, "to"):
+                    inputs[k] = v.to(self._glm_device)
+        except Exception:
+            pass
+
+        try:
+            import torch
+            with torch.inference_mode():
+                generated = model.generate(**inputs, max_new_tokens=self.glm_max_tokens)
+        except Exception as exc:
+            print(f"[OCR] GLM-OCR 本地推理失败：{exc}")
+            return []
+
+        text = self._glm_decode_output(generated)
+        lines = self._glm_extract_lines(text)
+        if not lines:
+            return []
+        return self._glm_build_boxes(lines)
+
+    def _glm_ollama_recognize_boxes(self, image_input: Union[str, Path, Any, tuple]) -> List[Dict[str, object]]:
+        if not self.glm_endpoint:
+            return []
+        image_bytes = self._glm_image_to_bytes(image_input)
+        if not image_bytes:
+            print("[OCR] GLM-OCR 输入转换失败")
+            return []
+
+        payload = {
+            "model": self.glm_model,
+            "prompt": self.glm_prompt,
+            "images": [base64.b64encode(image_bytes).decode("ascii")],
+            "stream": False,
+        }
+        url = f"{self.glm_endpoint}/api/generate"
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=self.glm_timeout) as resp:
+                raw = resp.read().decode("utf-8", errors="ignore")
+        except urllib.error.URLError as exc:
+            print(f"[OCR] GLM-OCR 请求失败：{exc}")
+            return []
+        except Exception as exc:
+            print(f"[OCR] GLM-OCR 请求失败：{exc}")
+            return []
+
+        response_obj = None
+        try:
+            response_obj = json.loads(raw)
+        except Exception:
+            for line in raw.splitlines():
+                try:
+                    response_obj = json.loads(line)
+                    break
+                except Exception:
+                    continue
+
+        if isinstance(response_obj, dict):
+            if response_obj.get("error"):
+                print(f"[OCR] GLM-OCR 错误：{response_obj.get('error')}")
+                return []
+            text = response_obj.get("response") or response_obj.get("message") or ""
+        else:
+            text = raw
+
+        lines = self._glm_extract_lines(text)
+        if not lines:
+            return []
+        return self._glm_build_boxes(lines)
+
+    def _glm_ocr_recognize_boxes(self, image_input: Union[str, Path, Any, tuple]) -> List[Dict[str, object]]:
+        lines = self._glm_local_recognize_boxes(image_input)
+        if lines:
+            return lines
+        if self.glm_endpoint:
+            return self._glm_ollama_recognize_boxes(image_input)
+        return []
 
     def _windows_ocr_recognize_boxes(self, image_path: str | Path) -> List[Dict[str, object]]:
         """使用 Windows 原生 OCR 识别图片中的文本。
@@ -1298,27 +1847,15 @@ class OCREngine:
         lines = self.recognize_with_confidence(image_path)
         return [text for text, _ in lines]
 
-    def recognize_with_confidence(self, image_path: str | Path) -> List[Tuple[str, float]]:
-        if backend_key == "paddle" and self._ocr is None:
-            self.initialize(force_paddle=True)
-        elif not self.ready:
-            self.initialize()
-        
-        if self._ocr is None:
-            # 如果 Paddle 不可用，直退 Tesseract
-            return self._pytesseract_recognize(image_path)
-
-        try:
-            if self._supports_cls:
-                result = self._ocr.ocr(str(image_path), cls=self.cls)
-            else:
-                result = self._ocr.ocr(str(image_path))
-        except NotImplementedError:
-            return self._pytesseract_recognize(image_path)
-        if not result:
+    def recognize_with_confidence(
+        self,
+        image_path: str | Path,
+        backend: str | None = None,
+    ) -> List[Tuple[str, float]]:
+        box_lines = self.recognize_with_boxes(image_path, backend=backend)
+        if not box_lines:
             return []
-        lines = self._paddle_extract_lines(result)
-        return [(str(x.get("text", "")).strip(), float(x.get("conf", 0.0))) for x in lines if str(x.get("text", "")).strip()]
+        return group_ocr_lines(box_lines, lang=self.lang)
 
     def recognize_with_boxes(
         self,
@@ -1331,16 +1868,38 @@ class OCREngine:
         Args:
             image_input: 文件路径 (str/Path) 或 PIL Image 对象
             prefer_tesseract: 是否强制使用 Tesseract
-            backend: 指定后端（auto/windows/paddle/tesseract）
+            backend: 指定后端（auto/windows/paddle/tesseract/glm/glm_ollama）
         """
         backend_key = str(backend or "auto").strip().lower().replace("-", "_")
-        if backend_key not in {"auto", "windows", "paddle", "tesseract"}:
+        if backend_key == "glm_ocr":
+            backend_key = "glm"
+        if backend_key not in {"auto", "windows", "paddle", "tesseract", "glm", "glm_ollama"}:
             backend_key = "auto"
         raw_tuple = None
         if isinstance(image_input, tuple) and len(image_input) == 3:
             raw_tuple = image_input
             # Keep a lazy fallback for non-Windows backends
             image_input = image_input  # preserve for now
+
+        # 策略0: GLM-OCR (Ollama) - 显式指定
+        if backend_key == "glm_ollama":
+            print("[OCR] 尝试后端: GLM-OCR (Ollama)")
+            glm_lines = self._glm_ollama_recognize_boxes(image_input)
+            if glm_lines:
+                self.last_backend = "glm_ollama"
+                return glm_lines
+            print("[OCR] GLM-OCR (Ollama) 不可用，回退到 Windows/Paddle/Tesseract")
+            backend_key = "auto"
+
+        # 策略0: GLM-OCR (Ollama) - 显式指定优先
+        if backend_key == "glm":
+            print("[OCR] 尝试后端: GLM-OCR (Local)")
+            glm_lines = self._glm_ocr_recognize_boxes(image_input)
+            if glm_lines:
+                self.last_backend = "glm"
+                return glm_lines
+            print("[OCR] GLM-OCR 不可用，回退到 Windows/Paddle/Tesseract")
+            backend_key = "auto"
 
         # 策略1: 如果明确要求 Tesseract，直接使用
         if prefer_tesseract or backend_key == "tesseract":
@@ -1692,4 +2251,3 @@ def group_ocr_lines(box_lines: List[Dict[str, object]], lang: str = "en") -> Lis
             final_output.append((full_text, avg_conf))
 
     return final_output
-
