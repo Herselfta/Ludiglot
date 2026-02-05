@@ -1,6 +1,5 @@
 import os
 import shutil
-import urllib.request
 from pathlib import Path
 
 class ToolManager:
@@ -13,15 +12,14 @@ class ToolManager:
         self.tools_dir = self.root_dir / "tools"
         self.fmodel_cli_exe = self.tools_dir / "FModelCLI.exe"
         
-        # GitHub Release Info
+        # GitHub Release Info (for manual download instructions)
         self.repo_owner = "Herselfta"
         self.repo_name = "FModelCLI"
-        # Standard release URL pattern for latest
-        self.download_url = f"https://github.com/{self.repo_owner}/{self.repo_name}/releases/latest/download/FModelCLI.exe"
 
     def ensure_fmodel_cli(self, force_update=False):
         """
-        Ensures FModelCLI.exe is available by checking local paths or downloading.
+        Ensures FModelCLI.exe is available by checking local paths or prompting for manual download.
+        For security reasons, automatic download is disabled.
         """
         if self.fmodel_cli_exe.exists() and not force_update:
             return True
@@ -40,26 +38,14 @@ class ToolManager:
                 shutil.copy2(dev_path, self.fmodel_cli_exe)
                 return True
 
-        # 2. 如果本地没有，则从 GitHub Release 下载
-        print(f"[ToolManager] FModelCLI.exe not found. Downloading from {self.download_url}...")
-        return self._download_fmodel_cli()
-
-    def _download_fmodel_cli(self):
-        try:
-            # Simple download with progress placeholder
-            def progress(block_num, block_size, total_size):
-                if total_size > 0:
-                    percent = min(100, int(block_num * block_size * 100 / total_size))
-                    if percent % 10 == 0: # Reduce spam
-                         print(f"[ToolManager] Downloading... {percent}%", end='\r')
-
-            urllib.request.urlretrieve(self.download_url, str(self.fmodel_cli_exe), reporthook=progress)
-            print("\n[ToolManager] Download complete.")
-            return True
-        except Exception as e:
-            print(f"\n[ToolManager] Download failed: {e}")
-            print(f"Please manually download FModelCLI.exe to {self.fmodel_cli_exe}")
-            return False
+        # 2. 如果本地没有，提示手动下载（安全考虑）
+        print(f"[ToolManager] FModelCLI.exe not found.")
+        print(f"[ToolManager] For security reasons, automatic download has been disabled.")
+        print(f"[ToolManager] Please manually download FModelCLI.exe from:")
+        print(f"[ToolManager]   https://github.com/{self.repo_owner}/{self.repo_name}/releases")
+        print(f"[ToolManager] Verify the file checksum/signature, then place it at:")
+        print(f"[ToolManager]   {self.fmodel_cli_exe}")
+        return False
 
 if __name__ == "__main__":
     tm = ToolManager()
