@@ -83,8 +83,8 @@ pip install -e .
 {
   "ocr_lang": "en",           // OCR 语言（en/zh/ja等）
   "ocr_mode": "auto",         // OCR 模式：auto/gpu/cpu
-  "ocr_backend": "glm",       // 后端选择：auto/paddle/tesseract/glm/glm_ollama
-  "ocr_glm_model": "zai-org/GLM-OCR",
+  "ocr_backend": "glm_ollama",// 后端选择：auto/paddle/tesseract/glm_ollama
+  "ocr_glm_ollama_model": "glm-ocr:latest",
   "ocr_glm_timeout": 30,
   "ocr_glm_endpoint": "http://127.0.0.1:11434"
 }
@@ -95,14 +95,7 @@ pip install -e .
 - `"auto"` (推荐)：Windows OCR → PaddleOCR → Tesseract
 - `"paddle"`：仅使用 PaddleOCR（需要 GPU 或 CPU 推理）
 - `"tesseract"`：仅使用 Tesseract（开源方案）
-- `"glm"`：使用 GLM-OCR（本地 Transformers），失败自动回退
-- `"glm_ollama"`：使用 GLM-OCR（Ollama 服务），失败自动回退
-
-### GLM-OCR (本地 Transformers) 快速启用
-
-1. 配置 `ocr_backend: "glm"`
-2. 若未安装依赖，程序会自动尝试安装 `ludiglot[glm]`
-3. 首次运行会自动下载 `zai-org/GLM-OCR` 模型
+- `"glm_ollama"`：使用 GLM-OCR（通过 Ollama 服务），失败自动回退
 
 ### GLM-OCR (Ollama) 快速启用
 
@@ -147,49 +140,18 @@ pip install -e .
 | **Windows OCR** | < 0.1s | ~0.05s | ~50 MB | 95%+ |
 | PaddleOCR (CPU) | ~2s | ~0.3s | ~500 MB | 90%+ |
 | Tesseract | ~0.5s | ~0.2s | ~100 MB | 85%+ |
-| **GLM-OCR (CUDA)** | ~10s | ~0.72s | ~2GB | 98%+ |
+| **GLM-OCR (Ollama)** | ~2s | ~1-2s | 取决于 Ollama | 98%+ |
 
-> 📊 **结论**：Windows OCR 在速度和内存占用上具有显著优势，尤其适合实时游戏场景。GLM-OCR 提供最高的识别准确率，适合对质量要求高的场景。
+> 📊 **结论**：Windows OCR 在速度和内存占用上具有显著优势，尤其适合实时游戏场景。GLM-OCR (Ollama) 提供最高的识别准确率，适合对质量要求高的场景。
 
-## GLM-OCR 性能优化
-
-GLM-OCR 使用 Transformers 框架运行本地 VLM 模型进行 OCR。通过以下优化，在 RTX 3080 上可实现约 0.72s 的单帧识别时间：
-
-### 优化策略
-
-1. **torch.compile 编译优化** (默认启用)
-   - 使用 `reduce-overhead` 模式减少 Python 调用开销
-   - 利用 CUDA Graphs 进行运算图缓存
-   - 环境变量控制：`LUDIGLOT_GLM_COMPILE=0` 可禁用
-
-2. **Triton 加速** (Windows)
-   - 需要安装兼容版本的 triton-windows
-   - 安装命令：`pip install triton-windows==3.1.0.post17`
-   - setup.ps1 会自动安装
-
-3. **Token 数量优化**
-   - 默认 `max_new_tokens=48`，足够识别典型游戏字幕
-   - 可通过 `LUDIGLOT_GLM_OCR_MAX_TOKENS` 环境变量调整
-   - 减少 token 数量可显著提升速度
-
-4. **SDPA 注意力机制**
-   - 模型自动使用 Scaled Dot-Product Attention
-   - 在支持的 GPU 上自动启用 Flash Attention
-
-### 环境变量配置
+### GLM-OCR 环境变量
 
 | 变量名 | 默认值 | 说明 |
 |--------|--------|------|
-| `LUDIGLOT_GLM_COMPILE` | `1` | 是否启用 torch.compile |
-| `LUDIGLOT_GLM_COMPILE_MODE` | `reduce-overhead` | 编译模式 |
-| `LUDIGLOT_GLM_OCR_MAX_TOKENS` | `48` | 最大生成 token 数 |
-| `LUDIGLOT_GLM_MAX_IMAGE_SIZE` | `1024` | 最大图像尺寸 |
-
-### 性能调优建议
-
-- **首次运行较慢**：torch.compile 需要编译内核，首次推理会慢约 50%
-- **稳定性能**：连续运行后性能会稳定在 ~0.72s
-- **长文本**：如需识别更长文本，可增加 `max_new_tokens` 到 64-128
+| `LUDIGLOT_GLM_OCR_MAX_TOKENS` | `128` | 最大生成 token 数 |
+| `LUDIGLOT_GLM_OCR_ENDPOINT` | - | Ollama 服务地址 |
+| `LUDIGLOT_GLM_OCR_OLLAMA_MODEL` | `glm-ocr:latest` | Ollama 模型标签 |
+| `LUDIGLOT_GLM_OCR_TIMEOUT` | `30` | 请求超时（秒） |
 
 ## 故障排除
 

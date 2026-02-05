@@ -33,12 +33,10 @@ class AppConfig:
     ocr_lang: str = "en"
     ocr_mode: str = "auto"  # auto | gpu | cpu
     ocr_gpu: bool = False  # legacy field
-    ocr_backend: str = "auto"  # auto | paddle | tesseract | glm | glm_ollama
+    ocr_backend: str = "auto"  # auto | paddle | tesseract | glm_ollama
     ocr_glm_endpoint: str | None = None
-    ocr_glm_local_model: str | None = None
     ocr_glm_ollama_model: str | None = None
     ocr_glm_max_tokens: int | None = None
-    ocr_glm_prefer_ollama: bool = True
     ocr_glm_timeout: float | None = None
     ocr_debug_dump_input: bool = False
     ocr_raw_capture: bool = False
@@ -71,22 +69,6 @@ class AppConfig:
     font_en: str = "Source Han Serif SC, 思源宋体, serif"
     font_cn: str = "Source Han Serif SC, 思源宋体, serif"
     capture_force_dpr: float | None = None
-
-
-def _looks_like_ollama_model_id(model_id: str | None) -> bool:
-    if not model_id:
-        return False
-    text = str(model_id).strip()
-    if not text:
-        return False
-    if "/" in text or "\\" in text:
-        return False
-    try:
-        if Path(text).exists():
-            return False
-    except Exception:
-        pass
-    return True
 
 
 def load_config(path: Path) -> AppConfig:
@@ -188,15 +170,8 @@ def load_config(path: Path) -> AppConfig:
         ocr_windows_input = "auto"
     ocr_glm_endpoint = raw.get("ocr_glm_endpoint")
     legacy_glm_model = raw.get("ocr_glm_model")
-    ocr_glm_local_model = raw.get("ocr_glm_local_model") or legacy_glm_model
     ocr_glm_ollama_model = raw.get("ocr_glm_ollama_model") or legacy_glm_model
-    if _looks_like_ollama_model_id(ocr_glm_local_model):
-        ocr_glm_local_model = None
-    if legacy_glm_model and ocr_glm_ollama_model == legacy_glm_model:
-        if not _looks_like_ollama_model_id(ocr_glm_ollama_model):
-            ocr_glm_ollama_model = None
     ocr_glm_max_tokens = raw.get("ocr_glm_max_tokens")
-    ocr_glm_prefer_ollama = raw.get("ocr_glm_prefer_ollama", True)
     ocr_glm_timeout = raw.get("ocr_glm_timeout")
     try:
         ocr_glm_timeout = float(ocr_glm_timeout) if ocr_glm_timeout is not None else None
@@ -315,10 +290,8 @@ def load_config(path: Path) -> AppConfig:
         ocr_gpu=bool(raw.get("ocr_gpu", False)),
         ocr_backend=str(raw.get("ocr_backend", "auto")).lower(),
         ocr_glm_endpoint=str(ocr_glm_endpoint) if ocr_glm_endpoint else None,
-        ocr_glm_local_model=str(ocr_glm_local_model) if ocr_glm_local_model else None,
         ocr_glm_ollama_model=str(ocr_glm_ollama_model) if ocr_glm_ollama_model else None,
         ocr_glm_max_tokens=ocr_glm_max_tokens,
-        ocr_glm_prefer_ollama=bool(ocr_glm_prefer_ollama),
         ocr_glm_timeout=ocr_glm_timeout,
         ocr_debug_dump_input=bool(raw.get("ocr_debug_dump_input", False)),
         ocr_raw_capture=bool(raw.get("ocr_raw_capture", False)),

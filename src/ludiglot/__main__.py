@@ -836,10 +836,8 @@ def cmd_run(args: argparse.Namespace) -> None:
         use_gpu=cfg.ocr_gpu,
         mode=cfg.ocr_mode,
         glm_endpoint=getattr(cfg, "ocr_glm_endpoint", None),
-        glm_local_model=getattr(cfg, "ocr_glm_local_model", None),
         glm_ollama_model=getattr(cfg, "ocr_glm_ollama_model", None),
         glm_max_tokens=getattr(cfg, "ocr_glm_max_tokens", None),
-        glm_prefer_ollama=getattr(cfg, "ocr_glm_prefer_ollama", None),
         glm_timeout=getattr(cfg, "ocr_glm_timeout", None),
         allow_paddle=(getattr(cfg, "ocr_backend", "auto") == "paddle"),
     )

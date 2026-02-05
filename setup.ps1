@@ -259,15 +259,15 @@ if (Test-Path "config/settings.json") {
 
 Write-Host ""
 Write-Host "选择 OCR 后端 (可多选，首个为首选)..." -ForegroundColor Yellow
-Write-Host "  1. GLM-OCR" -ForegroundColor White
-Write-Host "  2. Paddle-OCR" -ForegroundColor White
-Write-Host "  3. Windows-OCR" -ForegroundColor White
-Write-Host "  4. Tesseract-OCR" -ForegroundColor White
-$choiceRaw = Read-Host "  请输入数字 (例: 1 3 4)"
+Write-Host "  1. Paddle-OCR" -ForegroundColor White
+Write-Host "  2. Windows-OCR" -ForegroundColor White
+Write-Host "  3. Tesseract-OCR" -ForegroundColor White
+Write-Host "  提示: GLM-OCR 通过 Ollama 使用，无需额外安装" -ForegroundColor Gray
+$choiceRaw = Read-Host "  请输入数字 (例: 1 2 3)"
 
 $selected = @()
 if ($choiceRaw) {
-    $matches = [regex]::Matches($choiceRaw, "[1-4]")
+    $matches = [regex]::Matches($choiceRaw, "[1-3]")
     foreach ($m in $matches) {
         $n = [int]$m.Value
         if (-not ($selected -contains $n)) {
@@ -279,27 +279,24 @@ if ($selected.Count -eq 0) {
     Write-Host "  未识别有效选择，跳过 OCR 后端安装" -ForegroundColor Gray
 }
 
-$selectGlm = $false
 $selectPaddle = $false
 $selectWindows = $false
 $selectTesseract = $false
 
 foreach ($n in $selected) {
     switch ($n) {
-        1 { $selectGlm = $true }
-        2 { $selectPaddle = $true }
-        3 { $selectWindows = $true }
-        4 { $selectTesseract = $true }
+        1 { $selectPaddle = $true }
+        2 { $selectWindows = $true }
+        3 { $selectTesseract = $true }
     }
 }
 
 $preferredBackend = $null
 if ($selected.Count -gt 0) {
     switch ($selected[0]) {
-        1 { $preferredBackend = "glm" }
-        2 { $preferredBackend = "paddle" }
-        3 { $preferredBackend = "windows" }
-        4 { $preferredBackend = "tesseract" }
+        1 { $preferredBackend = "paddle" }
+        2 { $preferredBackend = "windows" }
+        3 { $preferredBackend = "tesseract" }
     }
 }
 
@@ -363,38 +360,6 @@ if ($LASTEXITCODE -eq 0) {
     }
 }
 
-Write-Host "  - GLM-OCR (Local Transformers)..." -NoNewline
-$glmAvailable = $false
-& $venvPython -c "import transformers, torch" 2>$null
-if ($LASTEXITCODE -eq 0) {
-    Write-Host " 已安装" -ForegroundColor Green
-    $glmAvailable = $true
-    # Check and install triton-windows for torch.compile optimization
-    Write-Host "    检查 Triton 优化支持..." -ForegroundColor Gray
-    & $venvPython -c "from triton.compiler.compiler import triton_key" 2>$null
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "    安装 triton-windows (torch.compile 优化)..." -ForegroundColor Yellow
-        & $venvPython -m pip install triton-windows==3.1.0.post17 --quiet 2>$null
-    }
-} else {
-    Write-Host " 未安装 (可选)" -ForegroundColor Cyan
-    Write-Host "    如需 GLM-OCR 本地推理，请安装: pip install ludiglot[glm]" -ForegroundColor Gray
-    if ($selectGlm) {
-        Write-Host "    正在安装 GLM-OCR 依赖..." -ForegroundColor Yellow
-        & $venvPython -m pip install -e .[glm]
-        & $venvPython -c "import transformers, torch" 2>$null
-        if ($LASTEXITCODE -eq 0) {
-            Write-Host "    GLM-OCR 依赖安装完成" -ForegroundColor Green
-            $glmAvailable = $true
-            # Install triton-windows for torch.compile optimization
-            Write-Host "    安装 triton-windows (torch.compile 优化)..." -ForegroundColor Yellow
-            & $venvPython -m pip install triton-windows==3.1.0.post17 --quiet 2>$null
-        } else {
-            Write-Host "    GLM-OCR 安装失败，可稍后手动安装" -ForegroundColor Yellow
-        }
-    }
-}
-
 Write-Host "  - Tesseract OCR..." -NoNewline
 $tesseractOk = $false
 $tesseractLocalExe = Join-Path $PSScriptRoot "tools\\tesseract\\tesseract.exe"
@@ -452,53 +417,6 @@ PaddleOCR(lang='$lang')
 print('PaddleOCR model ready')
 "@ | & $venvPython
     if ($LASTEXITCODE -ne 0) {
-        Write-Host "    预下载失败，可稍后手动触发" -ForegroundColor Yellow
-    }
-}
-
-# 预下载 GLM-OCR 模型（可选）
-if ($glmAvailable -and $selectGlm) {
-    try {
-        Write-Host "    预下载 GLM-OCR 模型..." -ForegroundColor Yellow
-        @'
-import sys
-
-model_id = "zai-org/GLM-OCR"
-
-def load_processor():
-    try:
-        from transformers import AutoProcessor
-        return AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
-    except Exception:
-        try:
-            from transformers import AutoTokenizer, Glm46VImageProcessor, Glm46VProcessor, BaseVideoProcessor
-            from transformers.models.glm46v.video_processing_glm46v import Glm46VVideoProcessor
-            if "dummy_torchvision_objects" in BaseVideoProcessor.__module__:
-                raise RuntimeError("torchvision missing")
-            img_proc = Glm46VImageProcessor.from_pretrained(model_id)
-            vid_proc = Glm46VVideoProcessor.from_pretrained(model_id)
-            tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
-            return Glm46VProcessor(image_processor=img_proc, tokenizer=tokenizer, video_processor=vid_proc)
-        except Exception as exc:
-            print(f"GLM-OCR processor preload skipped: {type(exc).__name__}: {exc}", file=sys.stderr)
-            return None
-
-try:
-    from transformers import AutoModelForImageTextToText
-    AutoModelForImageTextToText.from_pretrained(model_id, trust_remote_code=True)
-    processor = load_processor()
-    if processor is None:
-        print("GLM-OCR model downloaded, processor not ready")
-    else:
-        print("GLM-OCR model ready")
-except Exception as exc:
-    print(f"GLM-OCR predownload failed: {type(exc).__name__}: {exc}", file=sys.stderr)
-    sys.exit(1)
-'@ | & $venvPython
-        if ($LASTEXITCODE -ne 0) {
-            Write-Host "    预下载失败，可稍后手动触发" -ForegroundColor Yellow
-        }
-    } catch {
         Write-Host "    预下载失败，可稍后手动触发" -ForegroundColor Yellow
     }
 }

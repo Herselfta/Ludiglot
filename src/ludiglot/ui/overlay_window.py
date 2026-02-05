@@ -102,10 +102,8 @@ class OverlayWindow(QMainWindow):
             use_gpu=config.ocr_gpu,
             mode=config.ocr_mode,
             glm_endpoint=getattr(config, "ocr_glm_endpoint", None),
-            glm_local_model=getattr(config, "ocr_glm_local_model", None),
             glm_ollama_model=getattr(config, "ocr_glm_ollama_model", None),
             glm_max_tokens=getattr(config, "ocr_glm_max_tokens", None),
-            glm_prefer_ollama=getattr(config, "ocr_glm_prefer_ollama", None),
             glm_timeout=getattr(config, "ocr_glm_timeout", None),
             allow_paddle=(getattr(config, "ocr_backend", "auto") == "paddle"),
         )
@@ -464,10 +462,9 @@ class OverlayWindow(QMainWindow):
 
         self.ocr_backend_group = QActionGroup(self)
         self.ocr_backend_group.setExclusive(True)
-        for backend in ["auto", "glm", "glm_ollama", "paddle", "tesseract"]:
+        for backend in ["auto", "glm_ollama", "paddle", "tesseract"]:
             display_name = {
                 "auto": "Auto (Prefer WinOCR)",
-                "glm": "GLM-OCR (Local)",
                 "glm_ollama": "GLM-OCR (Ollama)",
                 "paddle": "Paddle",
                 "tesseract": "Tesseract"
@@ -1671,7 +1668,6 @@ class OverlayWindow(QMainWindow):
             backend = getattr(self.engine, "last_backend", None) or "paddle"
             backend_label = {
                 "windows": "WindowsOCR",
-                "glm": "GLM-OCR",
                 "glm_ollama": "GLM-OCR (Ollama)",
                 "tesseract": "Tesseract",
                 "paddle": "PaddleOCR",
