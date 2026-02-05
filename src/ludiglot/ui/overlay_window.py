@@ -102,8 +102,12 @@ class OverlayWindow(QMainWindow):
             use_gpu=config.ocr_gpu,
             mode=config.ocr_mode,
             glm_endpoint=getattr(config, "ocr_glm_endpoint", None),
-            glm_model=getattr(config, "ocr_glm_model", None),
+            glm_local_model=getattr(config, "ocr_glm_local_model", None),
+            glm_ollama_model=getattr(config, "ocr_glm_ollama_model", None),
+            glm_max_tokens=getattr(config, "ocr_glm_max_tokens", None),
+            glm_prefer_ollama=getattr(config, "ocr_glm_prefer_ollama", None),
             glm_timeout=getattr(config, "ocr_glm_timeout", None),
+            allow_paddle=(getattr(config, "ocr_backend", "auto") == "paddle"),
         )
         self.engine.set_logger(self.signals.log.emit, self.signals.status.emit)
         try:
@@ -1270,6 +1274,7 @@ class OverlayWindow(QMainWindow):
         try:
             self.signals.status.emit("预加载 OCR 模型…")
             self.engine.initialize()
+            self.engine.prewarm(self.config.ocr_backend, async_=True)
             self.signals.log.emit("[OCR] 模型已预加载")
         except Exception as exc:
             self.signals.log.emit(f"[OCR] 预加载失败: {exc}")
@@ -1560,6 +1565,10 @@ class OverlayWindow(QMainWindow):
 
     def _on_backend_changed(self, backend: str) -> None:
         self.config.ocr_backend = backend
+        try:
+            self.engine.allow_paddle = backend == "paddle"
+        except Exception:
+            pass
         self.signals.status.emit(f"OCR 后端: {backend}")
         self._persist_window_position()
 

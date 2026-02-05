@@ -384,28 +384,55 @@ def build_text_db_from_maps(
     voice_map: Dict[str, list[str]] | None = None,
 ) -> Dict[str, dict]:
     db: Dict[str, dict] = {}
-    for text_key, en_text in en_map.items():
+    seen: set[tuple[str, str]] = set()
+
+    def add_match(norm_key: str, text_key: str, match: dict) -> None:
+        if not norm_key:
+            return
+        sig = (norm_key, text_key)
+        if sig in seen:
+            return
+        seen.add(sig)
+        if norm_key not in db:
+            db[norm_key] = {"key": norm_key, "matches": [match]}
+        else:
+            db[norm_key]["matches"].append(match)
+
+    all_keys = set(en_map.keys()) | set(zh_map.keys())
+    for text_key in all_keys:
+        en_text = en_map.get(text_key, "")
+        zh_text = zh_map.get(text_key, "")
+        if not (isinstance(en_text, str) or isinstance(zh_text, str)):
+            continue
+
         if not isinstance(en_text, str):
+            en_text = ""
+        if not isinstance(zh_text, str):
+            zh_text = ""
+
+        cleaned_en = clean_en_text(en_text) if en_text else ""
+        cleaned_zh = clean_en_text(zh_text) if zh_text else ""
+
+        key_en = normalize_en(cleaned_en) if cleaned_en else ""
+        key_zh = normalize_en(cleaned_zh) if cleaned_zh else ""
+
+        if not key_en and not key_zh:
             continue
-        cleaned = clean_en_text(en_text)
-        key = normalize_en(cleaned)
-        if not key:
-            continue
+
         audio_hash, audio_event = _resolve_audio_hash(text_key, plot_audio, voice_map)
         match = {
             "text_key": text_key,
             "official_en": en_text,  # 存储原始英文（包含HTML标记）
-            "official_cn": zh_map.get(text_key, ""),
+            "official_cn": zh_text,
             "source_json": source_json,
             "audio_rule": "vo_{text_key}",
             "audio_hash": audio_hash,
             "audio_event": audio_event,
             "terms": [],
         }
-        if key not in db:
-            db[key] = {"key": key, "matches": [match]}
-        else:
-            db[key]["matches"].append(match)
+
+        add_match(key_en, text_key, match)
+        add_match(key_zh, text_key, match)
     return db
 
 

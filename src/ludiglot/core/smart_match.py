@@ -167,9 +167,18 @@ def build_smart_candidates(
         l = lines_info[0]
         base_candidates = [(l['cleaned'], l['conf'])]
         
+        # 额外候选：短文本拆分 n-gram（解决“Weapon Wildfire Mark”一类带前后缀情况）
+        words = l['cleaned'].split()
+        if 2 <= len(words) <= 6:
+            max_n = min(4, len(words))
+            for n in range(2, max_n + 1):
+                for i in range(0, len(words) - n + 1):
+                    seg = " ".join(words[i:i + n])
+                    if seg != l['cleaned']:
+                        base_candidates.append((seg, l['conf'] * 0.95))
+
         # 优化：尝试剥离人名/Title前缀
         # 场景：OCR结果为 "Name Dialogue..." 但库中只有 "Dialogue..."
-        words = l['cleaned'].split()
         if len(words) > 3:
             first_word = words[0]
             # 如果第一个词较短，且看起来像名字（首字母大写，非数字）

@@ -32,15 +32,60 @@ except ImportError:
     HAS_NUMPY = False
 
 PaddleOCR = None
+GLM_OCR_OUTPUT_SCHEMA = (
+    '{"lines":["<line1>","<line2>"]}'
+)
+
 DEFAULT_GLM_OCR_PROMPT = (
     "You are an OCR engine. Extract all readable text from the image.\n"
     "Rules:\n"
     "- Return only the recognized text.\n"
     "- Preserve line breaks as in the image.\n"
     "- Do not add any commentary or formatting.\n"
+    "Output ONLY the following JSON, do not include any other text:\n"
+    + GLM_OCR_OUTPUT_SCHEMA
+    + "\n"
 )
 DEFAULT_GLM_OCR_TIMEOUT = 30.0
-DEFAULT_GLM_OCR_MAX_TOKENS = 512
+DEFAULT_GLM_OCR_MAX_TOKENS = 128
+_PROJECT_CACHE_READY = False
+
+
+def _looks_like_ollama_model_id(model_id: str | None) -> bool:
+    if not model_id:
+        return False
+    text = str(model_id).strip()
+    if not text:
+        return False
+    if "/" in text or "\\" in text:
+        return False
+    try:
+        if Path(text).exists():
+            return False
+    except Exception:
+        pass
+    return True
+
+
+def _force_project_hf_cache() -> None:
+    global _PROJECT_CACHE_READY
+    if _PROJECT_CACHE_READY:
+        return
+    try:
+        project_root = Path(__file__).resolve().parents[3]
+        cache_root = project_root / "cache"
+        hf_cache = cache_root / "hf"
+        hub_cache = hf_cache / "hub"
+        for p in (cache_root, hf_cache, hub_cache):
+            p.mkdir(parents=True, exist_ok=True)
+        os.environ["HF_HOME"] = str(hf_cache)
+        os.environ["TRANSFORMERS_CACHE"] = str(hf_cache)
+        os.environ["HUGGINGFACE_HUB_CACHE"] = str(hub_cache)
+        os.environ["HF_HUB_CACHE"] = str(hub_cache)
+        os.environ["XDG_CACHE_HOME"] = str(cache_root)
+    except Exception:
+        pass
+    _PROJECT_CACHE_READY = True
 
 
 class OCREngine:
@@ -55,8 +100,12 @@ class OCREngine:
         rec: bool = True,
         cls: bool = False,
         glm_endpoint: str | None = None,
-        glm_model: str | None = None,
+        glm_local_model: str | None = None,
+        glm_ollama_model: str | None = None,
         glm_timeout: float | None = None,
+        glm_max_tokens: int | None = None,
+        glm_prefer_ollama: bool | None = None,
+        allow_paddle: bool = True,
     ) -> None:
         self.lang = lang
         self.mode = (mode or ("gpu" if use_gpu else "cpu")).lower()
@@ -81,6 +130,8 @@ class OCREngine:
         self.win_ocr_multiscale = False
         self._words_segmenter = None
         self._words_segmenter_ready = False
+        self.allow_paddle = bool(allow_paddle)
+        _force_project_hf_cache()
         endpoint = glm_endpoint or os.getenv("LUDIGLOT_GLM_OCR_ENDPOINT") or os.getenv("OLLAMA_HOST")
         if endpoint:
             endpoint = str(endpoint).strip()
@@ -89,27 +140,55 @@ class OCREngine:
             self.glm_endpoint = endpoint.rstrip("/")
         else:
             self.glm_endpoint = None
-        self.glm_model = str(glm_model or os.getenv("LUDIGLOT_GLM_OCR_MODEL") or "zai-org/GLM-OCR")
+        legacy_model_env = os.getenv("LUDIGLOT_GLM_OCR_MODEL")
+        local_model = glm_local_model or os.getenv("LUDIGLOT_GLM_OCR_LOCAL_MODEL")
+        if not local_model:
+            if legacy_model_env and not _looks_like_ollama_model_id(legacy_model_env):
+                local_model = legacy_model_env
+            else:
+                local_model = "zai-org/GLM-OCR"
+        ollama_model = glm_ollama_model or os.getenv("LUDIGLOT_GLM_OCR_OLLAMA_MODEL")
+        if not ollama_model:
+            if legacy_model_env and _looks_like_ollama_model_id(legacy_model_env):
+                ollama_model = legacy_model_env
+            else:
+                ollama_model = "glm-ocr:latest"
+        self.glm_local_model = str(local_model)
+        self.glm_ollama_model = str(ollama_model)
+        if _looks_like_ollama_model_id(self.glm_local_model):
+            self._emit_log(
+                "[OCR] GLM-OCR 本地模型名疑似 Ollama tag，已回退到 zai-org/GLM-OCR"
+            )
+            self.glm_local_model = "zai-org/GLM-OCR"
         timeout_raw = glm_timeout if glm_timeout is not None else os.getenv("LUDIGLOT_GLM_OCR_TIMEOUT")
         try:
             self.glm_timeout = float(timeout_raw) if timeout_raw is not None else DEFAULT_GLM_OCR_TIMEOUT
         except Exception:
             self.glm_timeout = DEFAULT_GLM_OCR_TIMEOUT
-        max_tokens_raw = os.getenv("LUDIGLOT_GLM_OCR_MAX_TOKENS")
+        max_tokens_raw = glm_max_tokens if glm_max_tokens is not None else os.getenv("LUDIGLOT_GLM_OCR_MAX_TOKENS")
         try:
             self.glm_max_tokens = int(max_tokens_raw) if max_tokens_raw is not None else DEFAULT_GLM_OCR_MAX_TOKENS
         except Exception:
             self.glm_max_tokens = DEFAULT_GLM_OCR_MAX_TOKENS
+        if glm_prefer_ollama is None:
+            glm_prefer_ollama = os.getenv("LUDIGLOT_GLM_OCR_PREFER_OLLAMA")
+        if isinstance(glm_prefer_ollama, str):
+            glm_prefer_ollama = glm_prefer_ollama.strip().lower() in {"1", "true", "yes", "y"}
+        self.glm_prefer_ollama = bool(glm_prefer_ollama) if glm_prefer_ollama is not None else True
         self.glm_prompt = DEFAULT_GLM_OCR_PROMPT
         self._glm_ready = False
         self._glm_model_obj = None
         self._glm_processor = None
         self._glm_device = "cpu"
         self._glm_dtype = None
+        self._glm_prompt_text = None
+        self._glm_generation_kwargs = None
         self._glm_install_attempted = False
         self._glm_repair_attempted = False
         self._log_callback: Callable[[str], None] | None = None
         self._status_callback: Callable[[str], None] | None = None
+        self._prewarm_lock = threading.Lock()
+        self._prewarm_started: set[str] = set()
 
     def set_logger(
         self,
@@ -142,6 +221,53 @@ class OCREngine:
         self.mode = mode.lower()
         self.ready = False
         self._ocr = None
+
+    def _normalize_backend_key(self, backend: str | None) -> str:
+        key = str(backend or "auto").strip().lower().replace("-", "_")
+        if key == "glm_ocr":
+            key = "glm"
+        return key
+
+    def _warmup_glm_ollama(self) -> bool:
+        if not self.glm_endpoint:
+            return False
+        url = f"{self.glm_endpoint}/api/tags"
+        req = urllib.request.Request(
+            url,
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=min(self.glm_timeout, 5.0)) as resp:
+                return 200 <= getattr(resp, "status", 200) < 300
+        except Exception as exc:
+            self._emit_log(f"[OCR] GLM-OCR (Ollama) 预热失败：{exc}")
+            return False
+
+    def prewarm(self, backend: str | None = None, async_: bool = True) -> None:
+        key = self._normalize_backend_key(backend)
+        if key == "glm_ollama" and not self.glm_endpoint:
+            return
+        with self._prewarm_lock:
+            if key in self._prewarm_started:
+                return
+            self._prewarm_started.add(key)
+
+        def _worker() -> None:
+            if key == "glm":
+                self._emit_log("[OCR] 预热 GLM-OCR (Local)...")
+                self._init_glm_local()
+            elif key == "glm_ollama":
+                self._emit_log("[OCR] 预热 GLM-OCR (Ollama)...")
+                self._warmup_glm_ollama()
+            elif key == "paddle":
+                self.initialize(force_paddle=True, allow_paddle=True)
+            elif key == "auto":
+                self.initialize(allow_paddle=self.allow_paddle)
+
+        if async_:
+            threading.Thread(target=_worker, daemon=True).start()
+        else:
+            _worker()
 
     def _detect_paddle_cls_support(self, ocr_obj) -> bool:
         try:
@@ -215,15 +341,21 @@ class OCREngine:
                 lines.append({"text": text, "conf": conf, "box": box})
         return lines
 
-    def initialize(self, force_paddle: bool = False) -> None:
+    def initialize(self, force_paddle: bool = False, allow_paddle: bool | None = None) -> None:
         """初始化 OCR 引擎。
 
         策略：
         1. 总是初始化 Windows OCR（如果可用）。
         2. 只有在明确指定paddle模式或auto模式下Windows OCR不可用时才加载PaddleOCR。
         """
+        if allow_paddle is None:
+            allow_paddle = self.allow_paddle
         # 1. 初始化 Windows OCR (轻量级)
         self._init_windows_ocr()
+
+        if not allow_paddle and not force_paddle:
+            self.ready = True
+            return
 
         # 2. 检查是否需要加载 PaddleOCR
         # 如果是 winrt 模式，或 auto 模式下 Windows OCR 可用，则无需加载 Paddle
@@ -452,39 +584,265 @@ class OCREngine:
         cleaned = str(text).strip()
         if not cleaned:
             return []
-        if "```" in cleaned:
+        try:
+            prompt_text = str(self.glm_prompt or "").strip()
+        except Exception:
+            prompt_text = ""
+        if prompt_text and prompt_text in cleaned:
+            cleaned = cleaned.rsplit(prompt_text, 1)[-1].strip()
+
+        def _normalize_line(value: str) -> str:
+            normalized = re.sub(r"^([-*•]\\s+|\\d+[\\.)]\\s+)", "", value.strip())
+            normalized = re.sub(r"\\s+", " ", normalized)
+            normalized = normalized.lower()
+            normalized = normalized.rstrip(":")
+            return normalized
+
+        prompt_lines: list[str] = []
+        for line in str(self.glm_prompt).splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            line = re.sub(r"^([-*•]\\s+|\\d+[\\.)]\\s+)", "", line).strip()
+            if line:
+                prompt_lines.append(line)
+        prompt_norm = {_normalize_line(line) for line in prompt_lines if line}
+
+        def _strip_image_tokens(value: str) -> str:
+            stripped = re.sub(r"<\\|image[^|>]*\\|>", "", value)
+            stripped = re.sub(r"<\\|image[^>]*", "", stripped)
+            stripped = stripped.replace("<|endoftext|>", "")
+            stripped = stripped.replace("<|begin_of_text|>", "")
+            stripped = stripped.replace("<|assistant|>", "")
+            stripped = stripped.replace("<|user|>", "")
+            stripped = stripped.replace("<|system|>", "")
+            stripped = stripped.replace("<|bos|>", "")
+            stripped = stripped.replace("<|eos|>", "")
+            stripped = stripped.replace("<|im_start|>", "")
+            stripped = stripped.replace("<|im_end|>", "")
+            return stripped.strip()
+
+        def _filter_prompt_lines(lines: list[str]) -> list[str]:
+            if not lines:
+                return []
+            def _is_token_fragment(value: str) -> bool:
+                v = value.strip()
+                if not v:
+                    return True
+                if v.startswith("```"):
+                    return True
+                if re.fullmatch(r"[{}\[\]\s,:-]+", v):
+                    return True
+                compact = re.sub(r"[\s\[\]{},:]", "", v).strip("\"'").lower()
+                if compact == "lines":
+                    return True
+                if "<|" in v or "|>" in v:
+                    if len(v) <= 8:
+                        return True
+                    if not re.search(r"[A-Za-z0-9]", v):
+                        return True
+                if all(ch in "<|>-." for ch in v):
+                    return True
+                return False
+
+            def _is_schema_placeholder(value: str) -> bool:
+                v = value.strip()
+                if not v:
+                    return True
+                if re.fullmatch(r"<line\\d+>", v, flags=re.IGNORECASE):
+                    return True
+                if re.fullmatch(r"<line\\d+", v, flags=re.IGNORECASE):
+                    return True
+                if v.lower().startswith("<line") and len(v) <= 10:
+                    return True
+                return False
+
+            def _looks_like_schema_json(value: str) -> bool:
+                v = value.strip()
+                if not v.startswith("{"):
+                    return False
+                low = v.lower()
+                if "\"lines\"" in low and "<line" in low:
+                    return True
+                if "'lines'" in low and "<line" in low:
+                    return True
+                if "lines" in low and "<line" in low and "[" in low and "]" in low:
+                    return True
+                return False
+
+            def _looks_like_prompt_line(norm_line: str) -> bool:
+                if not norm_line:
+                    return False
+                if norm_line in prompt_norm:
+                    return True
+                if len(norm_line) >= 12:
+                    for p in prompt_norm:
+                        if p.startswith(norm_line) or norm_line.startswith(p):
+                            return True
+                return False
+
+            filtered: list[str] = []
+            for line in lines:
+                cleaned_line = _strip_image_tokens(str(line))
+                if not cleaned_line:
+                    continue
+                if _is_token_fragment(cleaned_line):
+                    continue
+                if _is_schema_placeholder(cleaned_line):
+                    continue
+                if _looks_like_schema_json(cleaned_line):
+                    continue
+                norm = _normalize_line(cleaned_line)
+                if _looks_like_prompt_line(norm):
+                    continue
+                filtered.append(cleaned_line)
+            return filtered
+
+        def _split_text_value(value: str) -> list[str]:
+            parts = []
+            raw_value = str(value)
+            # normalize escaped newlines when JSON parsing fails or returns raw strings
+            raw_value = raw_value.replace("\\r\\n", "\n").replace("\\n", "\n").replace("\\r", "\n")
+            for seg in raw_value.splitlines():
+                seg = seg.strip()
+                if seg:
+                    parts.append(seg)
+            return parts
+
+        def _extract_from_obj(obj: object) -> list[str]:
+            out: list[str] = []
+            if isinstance(obj, dict):
+                if isinstance(obj.get("lines"), list):
+                    for item in obj.get("lines", []):
+                        if isinstance(item, str):
+                            out.extend(_split_text_value(item))
+                        elif isinstance(item, dict) and item.get("text"):
+                            out.extend(_split_text_value(item.get("text")))
+                elif obj.get("text"):
+                    out.extend(_split_text_value(obj.get("text")))
+            elif isinstance(obj, list):
+                for item in obj:
+                    if isinstance(item, str):
+                        out.extend(_split_text_value(item))
+                    elif isinstance(item, dict) and item.get("text"):
+                        out.extend(_split_text_value(item.get("text")))
+            return out
+
+        def _parse_json_payload(raw: str) -> list[str]:
+            if not raw:
+                return []
+            raw_str = str(raw).strip()
+            if not raw_str:
+                return []
+
+            candidates: list[list[str]] = []
+
+            def _score(lines: list[str]) -> tuple[int, int]:
+                return (len(lines), sum(len(x) for x in lines))
+
+            def _push(lines: list[str]) -> None:
+                if not lines:
+                    return
+                filtered = _filter_prompt_lines(lines)
+                if filtered:
+                    candidates.append(filtered)
+
+            def _unwrap_obj(obj: object) -> object:
+                if isinstance(obj, str):
+                    inner = obj.strip()
+                    if inner.startswith("{") or inner.startswith("["):
+                        try:
+                            return json.loads(inner)
+                        except Exception:
+                            return obj
+                return obj
+
+            def _try_obj(obj: object) -> None:
+                obj = _unwrap_obj(obj)
+                extracted = _extract_from_obj(obj)
+                if extracted:
+                    _push(extracted)
+
             try:
-                block = re.findall(r"```(?:json)?\\s*([\\s\\S]*?)\\s*```", cleaned)
-                if block:
-                    cleaned = block[0].strip()
+                _try_obj(json.loads(raw_str))
             except Exception:
                 pass
 
-        parsed_lines: list[str] = []
-        try:
-            data = json.loads(cleaned)
-        except Exception:
-            data = None
+            decoder = json.JSONDecoder()
+            idx = 0
+            length = len(raw_str)
+            while idx < length:
+                next_brace = raw_str.find("{", idx)
+                next_bracket = raw_str.find("[", idx)
+                if next_brace == -1 and next_bracket == -1:
+                    break
+                if next_brace == -1:
+                    start = next_bracket
+                elif next_bracket == -1:
+                    start = next_brace
+                else:
+                    start = min(next_brace, next_bracket)
+                try:
+                    obj, end = decoder.raw_decode(raw_str[start:])
+                    _try_obj(obj)
+                    idx = start + (end if end > 0 else 1)
+                except Exception:
+                    idx = start + 1
+            # line-level JSON
+            for line in raw_str.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                if not (line.startswith("{") and ("\"lines\"" in line or "\"text\"" in line or "'lines'" in line or "'text'" in line)):
+                    continue
+                try:
+                    _try_obj(json.loads(line))
+                except Exception:
+                    continue
+            # try unescape JSON string content (e.g., \"lines\": ...)
+            if "\\\"" in raw_str and ("lines" in raw_str.lower() or "text" in raw_str.lower()):
+                try:
+                    unescaped = raw_str.encode("utf-8", "backslashreplace").decode("unicode_escape")
+                except Exception:
+                    unescaped = raw_str.replace("\\\"", "\"").replace("\\\\", "\\")
+                if unescaped and unescaped != raw_str:
+                    try:
+                        _try_obj(json.loads(unescaped))
+                    except Exception:
+                        pass
+                    # try regex extraction on unescaped payload
+                    raw_str = unescaped
+            # regex fallback for malformed JSON (e.g., unescaped newlines in strings)
+            low = raw_str.lower()
+            if "\"lines\"" in low or "'lines'" in low:
+                match_body = None
+                m = re.search(r"[\"']lines[\"']\s*:\s*\[(.*?)]", raw_str, flags=re.S)
+                if m:
+                    match_body = m.group(1)
+                target = match_body if match_body is not None else raw_str
+                matches = re.findall(r"\"((?:\\\\.|[^\"\\\\])*)\"", target, flags=re.S)
+                if not matches:
+                    matches = re.findall(r"'((?:\\\\.|[^'\\\\])*)'", target, flags=re.S)
+                if matches:
+                    out: list[str] = []
+                    for m in matches:
+                        if m.lower() in ("lines", "text"):
+                            continue
+                        try:
+                            # unescape JSON string content
+                            decoded = json.loads(f"\"{m.replace('\"', '\\\"')}\"")
+                        except Exception:
+                            decoded = m
+                        out.extend(_split_text_value(decoded))
+                    _push(out)
+            if candidates:
+                candidates.sort(key=_score, reverse=True)
+                return candidates[0]
+            return []
 
-        if data is not None:
-            if isinstance(data, dict):
-                if isinstance(data.get("lines"), list):
-                    for item in data.get("lines", []):
-                        if isinstance(item, str):
-                            parsed_lines.append(item)
-                        elif isinstance(item, dict) and item.get("text"):
-                            parsed_lines.append(str(item.get("text")))
-                elif data.get("text"):
-                    parsed_lines.append(str(data.get("text")))
-            elif isinstance(data, list):
-                for item in data:
-                    if isinstance(item, str):
-                        parsed_lines.append(item)
-                    elif isinstance(item, dict) and item.get("text"):
-                        parsed_lines.append(str(item.get("text")))
-            parsed_lines = [line.strip() for line in parsed_lines if str(line).strip()]
-            if parsed_lines:
-                return parsed_lines
+        parsed_lines = _parse_json_payload(cleaned)
+        if parsed_lines:
+            return parsed_lines
 
         lines = [line.strip() for line in cleaned.splitlines() if line.strip()]
         cleaned_lines: list[str] = []
@@ -492,6 +850,13 @@ class OCREngine:
             normalized = re.sub(r"^([-*•]\\s+|\\d+[\\.)]\\s+)", "", line).strip()
             if normalized:
                 cleaned_lines.append(normalized)
+        cleaned_lines = _filter_prompt_lines(cleaned_lines)
+        if cleaned_lines and len(cleaned_lines) == 1:
+            candidate = cleaned_lines[0].strip()
+            if candidate.startswith("{") and ("\"lines\"" in candidate or "\"text\"" in candidate):
+                parsed_again = _parse_json_payload(candidate)
+                if parsed_again:
+                    return parsed_again
         return cleaned_lines
 
     def _glm_build_boxes(self, lines: List[str]) -> List[Dict[str, object]]:
@@ -618,6 +983,21 @@ class OCREngine:
         self._glm_device = device
         self._glm_dtype = dtype
 
+        if device == "cuda":
+            try:
+                torch.backends.cuda.matmul.allow_tf32 = True
+                torch.backends.cudnn.allow_tf32 = True
+                torch.backends.cudnn.benchmark = True
+                if hasattr(torch, "set_float32_matmul_precision"):
+                    torch.set_float32_matmul_precision("high")
+                if hasattr(torch.backends, "cuda"):
+                    if hasattr(torch.backends.cuda, "enable_flash_sdp"):
+                        torch.backends.cuda.enable_flash_sdp(True)
+                    if hasattr(torch.backends.cuda, "enable_mem_efficient_sdp"):
+                        torch.backends.cuda.enable_mem_efficient_sdp(True)
+            except Exception:
+                pass
+
         # Ensure vision deps for processor
         try:
             import importlib.util as _importlib_util
@@ -642,8 +1022,34 @@ class OCREngine:
                 return True
             return False
 
+        def _hf_cache_has_model(model_id: str) -> bool:
+            if not model_id or "/" not in model_id:
+                return False
+            try:
+                if Path(model_id).exists():
+                    return True
+            except Exception:
+                pass
+            org, name = model_id.split("/", 1)
+            hub_cache = os.getenv("HUGGINGFACE_HUB_CACHE") or os.getenv("HF_HUB_CACHE")
+            if not hub_cache:
+                return False
+            model_dir = Path(hub_cache) / f"models--{org}--{name}"
+            snapshots = model_dir / "snapshots"
+            if not snapshots.exists():
+                return False
+            try:
+                return any(snapshots.iterdir())
+            except Exception:
+                return False
+
+        local_files_only = _hf_cache_has_model(self.glm_local_model)
+
         def _load_processor_auto() -> Any:
-            return AutoProcessor.from_pretrained(self.glm_model, trust_remote_code=True)
+            kwargs = {"trust_remote_code": True}
+            if local_files_only:
+                kwargs["local_files_only"] = True
+            return AutoProcessor.from_pretrained(self.glm_local_model, **kwargs)
 
         def _load_processor_manual() -> Any:
             from transformers import AutoTokenizer, Glm46VImageProcessor, Glm46VProcessor, BaseVideoProcessor
@@ -654,9 +1060,11 @@ class OCREngine:
                 self._emit_status("GLM-OCR: 视觉依赖缺失")
                 return None
 
-            img_proc = Glm46VImageProcessor.from_pretrained(self.glm_model)
-            vid_proc = Glm46VVideoProcessor.from_pretrained(self.glm_model)
-            tokenizer = AutoTokenizer.from_pretrained(self.glm_model, trust_remote_code=True)
+            img_proc = Glm46VImageProcessor.from_pretrained(self.glm_local_model, local_files_only=local_files_only)
+            vid_proc = Glm46VVideoProcessor.from_pretrained(self.glm_local_model, local_files_only=local_files_only)
+            tokenizer = AutoTokenizer.from_pretrained(
+                self.glm_local_model, trust_remote_code=True, local_files_only=local_files_only
+            )
             return Glm46VProcessor(image_processor=img_proc, tokenizer=tokenizer, video_processor=vid_proc)
 
         processor = None
@@ -688,13 +1096,55 @@ class OCREngine:
             return False
 
         self._glm_processor = processor
+        self._glm_prompt_text = None
+        try:
+            if hasattr(processor, "apply_chat_template"):
+                messages = [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": self.glm_prompt},
+                            {"type": "image"},
+                        ],
+                    }
+                ]
+                try:
+                    self._glm_prompt_text = processor.apply_chat_template(
+                        messages, add_generation_prompt=True, tokenize=False
+                    )
+                except TypeError:
+                    self._glm_prompt_text = processor.apply_chat_template(
+                        messages, add_generation_prompt=True
+                    )
+        except Exception:
+            self._glm_prompt_text = None
+
+        gen_kwargs: Dict[str, Any] = {
+            "max_new_tokens": int(self.glm_max_tokens),
+            "do_sample": False,
+            "num_beams": 1,
+            "use_cache": True,
+        }
+        try:
+            tokenizer = getattr(processor, "tokenizer", None)
+            pad_id = getattr(tokenizer, "pad_token_id", None)
+            eos_id = getattr(tokenizer, "eos_token_id", None)
+            if pad_id is not None:
+                gen_kwargs["pad_token_id"] = int(pad_id)
+            if eos_id is not None:
+                gen_kwargs["eos_token_id"] = int(eos_id)
+        except Exception:
+            pass
+        self._glm_generation_kwargs = gen_kwargs
 
         try:
             self._emit_status("GLM-OCR: 加载模型中…")
             model_kwargs = {"torch_dtype": dtype, "trust_remote_code": True}
+            if local_files_only:
+                model_kwargs["local_files_only"] = True
             if device == "cuda":
                 model_kwargs["device_map"] = "auto"
-            self._glm_model_obj = AutoModelForImageTextToText.from_pretrained(self.glm_model, **model_kwargs)
+            self._glm_model_obj = AutoModelForImageTextToText.from_pretrained(self.glm_local_model, **model_kwargs)
             if device == "cpu":
                 self._glm_model_obj = self._glm_model_obj.to(device)
             self._glm_model_obj.eval()
@@ -705,9 +1155,11 @@ class OCREngine:
                 try:
                     self._emit_status("GLM-OCR: 重新加载模型中…")
                     model_kwargs = {"torch_dtype": dtype, "trust_remote_code": True}
+                    if local_files_only:
+                        model_kwargs["local_files_only"] = True
                     if device == "cuda":
                         model_kwargs["device_map"] = "auto"
-                    self._glm_model_obj = AutoModelForImageTextToText.from_pretrained(self.glm_model, **model_kwargs)
+                    self._glm_model_obj = AutoModelForImageTextToText.from_pretrained(self.glm_local_model, **model_kwargs)
                     if device == "cpu":
                         self._glm_model_obj = self._glm_model_obj.to(device)
                     self._glm_model_obj.eval()
@@ -765,7 +1217,13 @@ class OCREngine:
             return []
 
         inputs = None
-        if hasattr(processor, "apply_chat_template"):
+        prompt_text = self._glm_prompt_text
+        if prompt_text:
+            try:
+                inputs = processor(text=prompt_text, images=image, return_tensors="pt")
+            except Exception:
+                inputs = None
+        if inputs is None and hasattr(processor, "apply_chat_template"):
             try:
                 messages = [
                     {
@@ -784,6 +1242,8 @@ class OCREngine:
                     prompt_text = processor.apply_chat_template(
                         messages, add_generation_prompt=True
                     )
+                if prompt_text:
+                    self._glm_prompt_text = prompt_text
                 inputs = processor(text=prompt_text, images=image, return_tensors="pt")
             except Exception:
                 inputs = None
@@ -803,8 +1263,27 @@ class OCREngine:
 
         try:
             import torch
+            gen_kwargs = dict(self._glm_generation_kwargs or {})
+            gen_kwargs["max_new_tokens"] = int(self.glm_max_tokens)
             with torch.inference_mode():
-                generated = model.generate(**inputs, max_new_tokens=self.glm_max_tokens)
+                if self._glm_device == "cuda":
+                    with torch.autocast(device_type="cuda", dtype=self._glm_dtype or torch.float16):
+                        generated = model.generate(**inputs, **gen_kwargs)
+                else:
+                    generated = model.generate(**inputs, **gen_kwargs)
+            prompt_len = None
+            try:
+                input_ids = inputs.get("input_ids") if isinstance(inputs, dict) else None
+                if input_ids is not None and hasattr(input_ids, "shape"):
+                    prompt_len = int(input_ids.shape[-1])
+            except Exception:
+                prompt_len = None
+            if prompt_len and hasattr(generated, "shape"):
+                try:
+                    if generated.shape[-1] >= prompt_len:
+                        generated = generated[:, prompt_len:]
+                except Exception:
+                    pass
         except Exception as exc:
             print(f"[OCR] GLM-OCR 本地推理失败：{exc}")
             return []
@@ -824,7 +1303,7 @@ class OCREngine:
             return []
 
         payload = {
-            "model": self.glm_model,
+            "model": self.glm_ollama_model,
             "prompt": self.glm_prompt,
             "images": [base64.b64encode(image_bytes).decode("ascii")],
             "stream": False,
@@ -870,10 +1349,14 @@ class OCREngine:
         return self._glm_build_boxes(lines)
 
     def _glm_ocr_recognize_boxes(self, image_input: Union[str, Path, Any, tuple]) -> List[Dict[str, object]]:
+        if self.glm_prefer_ollama and self.glm_endpoint:
+            lines = self._glm_ollama_recognize_boxes(image_input)
+            if lines:
+                return lines
         lines = self._glm_local_recognize_boxes(image_input)
         if lines:
             return lines
-        if self.glm_endpoint:
+        if (not self.glm_prefer_ollama) and self.glm_endpoint:
             return self._glm_ollama_recognize_boxes(image_input)
         return []
 
@@ -1894,7 +2377,7 @@ class OCREngine:
         # 策略0: GLM-OCR (Ollama) - 显式指定优先
         if backend_key == "glm":
             print("[OCR] 尝试后端: GLM-OCR (Local)")
-            glm_lines = self._glm_ocr_recognize_boxes(image_input)
+            glm_lines = self._glm_local_recognize_boxes(image_input)
             if glm_lines:
                 self.last_backend = "glm"
                 return glm_lines
@@ -1938,12 +2421,13 @@ class OCREngine:
             image_input = Image.frombytes("RGBA", (int(r_w), int(r_h)), r_bytes, "raw", "BGRA")
         
         # 策略4: 尝试 PaddleOCR
-        if backend_key == "paddle" and self._ocr is None:
-            self.initialize(force_paddle=True)
-        elif not self.ready:
-            self.initialize()
-            
-        if self._ocr is not None:
+        allow_paddle = bool(getattr(self, "allow_paddle", True)) or backend_key == "paddle"
+        if allow_paddle and backend_key == "paddle" and self._ocr is None:
+            self.initialize(force_paddle=True, allow_paddle=True)
+        elif allow_paddle and not self.ready and backend_key in {"paddle", "auto"}:
+            self.initialize(allow_paddle=True)
+
+        if allow_paddle and self._ocr is not None:
             print("[OCR] 尝试后端: PaddleOCR")
             try:
                 # Prepare input for Paddle (Path string or Numpy Array)
