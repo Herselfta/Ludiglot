@@ -50,7 +50,7 @@ DEFAULT_GLM_OCR_PROMPT = (
     + "\n"
 )
 DEFAULT_GLM_OCR_TIMEOUT = 30.0
-DEFAULT_GLM_OCR_MAX_TOKENS = 128
+DEFAULT_GLM_OCR_MAX_TOKENS = 48  # Optimized for typical game subtitle length
 _PROJECT_CACHE_READY = False
 
 
@@ -193,6 +193,10 @@ class OCREngine:
         self._glm_last_error = None
         self._glm_last_stage = None
         self._glm_ollama_last_error = None
+        # Performance optimization flags
+        self._glm_compiled = False
+        self._glm_compile_enabled = os.getenv("LUDIGLOT_GLM_COMPILE", "1").strip().lower() in {"1", "true", "yes"}
+        self._glm_max_image_size = int(os.getenv("LUDIGLOT_GLM_MAX_IMAGE_SIZE", "1024"))
         self._log_callback: Callable[[str], None] | None = None
         self._status_callback: Callable[[str], None] | None = None
         self._prewarm_lock = threading.Lock()
@@ -1273,14 +1277,6 @@ class OCREngine:
 
             try:
                 self._emit_status("GLM-OCR: 加载模型中…")
-                # Detect quantization support
-                has_bnb = False
-                try:
-                    import bitsandbytes
-                    has_bnb = True
-                except Exception:
-                    pass
-
                 model_kwargs = {
                     "torch_dtype": dtype, 
                     "trust_remote_code": True,
@@ -1291,16 +1287,40 @@ class OCREngine:
                 
                 if device == "cuda":
                     model_kwargs["device_map"] = "auto"
-                    if has_bnb:
-                        self._emit_log("[OCR] 检测到 bitsandbytes，启用 4-bit 量化加载以优化性能")
-                        model_kwargs["load_in_4bit"] = True
-                    else:
-                        self._emit_log("[OCR] 提示：安装 bitsandbytes 可开启 4-bit 量化，大幅提升 0.9B 模型识别速度")
                 
                 self._glm_model_obj = AutoModelForImageTextToText.from_pretrained(self.glm_local_model, **model_kwargs)
                 if device == "cpu":
                     self._glm_model_obj = self._glm_model_obj.to(device)
                 self._glm_model_obj.eval()
+                
+                # Apply torch.compile for performance optimization (CUDA only)
+                if device == "cuda" and self._glm_compile_enabled and not self._glm_compiled:
+                    try:
+                        if hasattr(torch, "compile"):
+                            # Suppress dynamo errors to fall back to eager mode gracefully
+                            try:
+                                import torch._dynamo
+                                torch._dynamo.config.suppress_errors = True
+                            except Exception:
+                                pass
+                            
+                            self._emit_status("GLM-OCR: 编译优化中…")
+                            self._emit_log("[OCR] 正在应用 torch.compile 编译优化（首次推理会较慢）...")
+                            
+                            # Use reduce-overhead mode for best performance with CUDA graphs
+                            compile_mode = os.getenv("LUDIGLOT_GLM_COMPILE_MODE", "reduce-overhead")
+                            self._glm_model_obj = torch.compile(
+                                self._glm_model_obj, 
+                                mode=compile_mode,
+                                fullgraph=False,  # Allow graph breaks for compatibility
+                            )
+                            self._glm_compiled = True
+                            self._emit_log(f"[OCR] torch.compile 编译优化已启用 (mode={compile_mode})")
+                        else:
+                            self._emit_log("[OCR] PyTorch < 2.0，torch.compile 不可用")
+                    except Exception as compile_exc:
+                        self._emit_log(f"[OCR] torch.compile 编译失败（将使用未编译模型）: {compile_exc}")
+                        self._glm_compiled = False
             except Exception as exc:
                 err_msg = f"{exc.__class__.__name__}: {exc}"
                 self._emit_log(f"[OCR] GLM-OCR 本地模型加载失败：{err_msg}")
@@ -1308,16 +1328,40 @@ class OCREngine:
                 if _need_repair_from_error(exc) and self._attempt_repair_glm_transformers(reason=err_msg):
                     try:
                         self._emit_status("GLM-OCR: 重新加载模型中…")
-                        model_kwargs = {"torch_dtype": dtype, "trust_remote_code": True}
+                        model_kwargs = {"torch_dtype": dtype, "trust_remote_code": True, "low_cpu_mem_usage": True}
                         if local_files_only:
                             model_kwargs["local_files_only"] = True
                         if device == "cuda":
                             model_kwargs["device_map"] = "auto"
-                            # In repair mode, we prefer stability, so no force 4bit unless already there
                         self._glm_model_obj = AutoModelForImageTextToText.from_pretrained(self.glm_local_model, **model_kwargs)
                         if device == "cpu":
                             self._glm_model_obj = self._glm_model_obj.to(device)
                         self._glm_model_obj.eval()
+                        
+                        # Apply torch.compile for performance optimization (CUDA only)
+                        if device == "cuda" and self._glm_compile_enabled and not self._glm_compiled:
+                            try:
+                                if hasattr(torch, "compile"):
+                                    # Suppress dynamo errors to fall back to eager mode gracefully
+                                    try:
+                                        import torch._dynamo
+                                        torch._dynamo.config.suppress_errors = True
+                                    except Exception:
+                                        pass
+                                    
+                                    self._emit_status("GLM-OCR: 编译优化中…")
+                                    self._emit_log("[OCR] 正在应用 torch.compile 编译优化（首次推理会较慢）...")
+                                    compile_mode = os.getenv("LUDIGLOT_GLM_COMPILE_MODE", "reduce-overhead")
+                                    self._glm_model_obj = torch.compile(
+                                        self._glm_model_obj, 
+                                        mode=compile_mode,
+                                        fullgraph=False,
+                                    )
+                                    self._glm_compiled = True
+                                    self._emit_log(f"[OCR] torch.compile 编译优化已启用 (mode={compile_mode})")
+                            except Exception as compile_exc:
+                                self._emit_log(f"[OCR] torch.compile 编译失败: {compile_exc}")
+                                self._glm_compiled = False
                     except Exception as exc2:
                         err_msg2 = f"{exc2.__class__.__name__}: {exc2}"
                         self._emit_log(f"[OCR] GLM-OCR 修复后仍加载失败：{err_msg2}")
@@ -1374,6 +1418,15 @@ class OCREngine:
             return []
         try:
             image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+            
+            # Optimize image size for faster inference
+            max_size = self._glm_max_image_size
+            if max_size > 0 and (image.width > max_size or image.height > max_size):
+                # Resize while maintaining aspect ratio
+                ratio = min(max_size / image.width, max_size / image.height)
+                new_width = int(image.width * ratio)
+                new_height = int(image.height * ratio)
+                image = image.resize((new_width, new_height), Image.Resampling.LANCZOS)
         except Exception as exc:
             print(f"[OCR] GLM-OCR 读取图片失败：{exc}")
             self._set_glm_error("读取图片失败", exc)
@@ -1434,6 +1487,7 @@ class OCREngine:
             import torch
             gen_kwargs = dict(self._glm_generation_kwargs or {})
             gen_kwargs["max_new_tokens"] = int(self.glm_max_tokens)
+            
             with torch.inference_mode():
                 if self._glm_device == "cuda":
                     with torch.autocast(device_type="cuda", dtype=self._glm_dtype or torch.float16):

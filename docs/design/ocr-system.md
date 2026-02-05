@@ -147,8 +147,49 @@ pip install -e .
 | **Windows OCR** | < 0.1s | ~0.05s | ~50 MB | 95%+ |
 | PaddleOCR (CPU) | ~2s | ~0.3s | ~500 MB | 90%+ |
 | Tesseract | ~0.5s | ~0.2s | ~100 MB | 85%+ |
+| **GLM-OCR (CUDA)** | ~10s | ~0.72s | ~2GB | 98%+ |
 
-> 📊 **结论**：Windows OCR 在速度和内存占用上具有显著优势，尤其适合实时游戏场景。
+> 📊 **结论**：Windows OCR 在速度和内存占用上具有显著优势，尤其适合实时游戏场景。GLM-OCR 提供最高的识别准确率，适合对质量要求高的场景。
+
+## GLM-OCR 性能优化
+
+GLM-OCR 使用 Transformers 框架运行本地 VLM 模型进行 OCR。通过以下优化，在 RTX 3080 上可实现约 0.72s 的单帧识别时间：
+
+### 优化策略
+
+1. **torch.compile 编译优化** (默认启用)
+   - 使用 `reduce-overhead` 模式减少 Python 调用开销
+   - 利用 CUDA Graphs 进行运算图缓存
+   - 环境变量控制：`LUDIGLOT_GLM_COMPILE=0` 可禁用
+
+2. **Triton 加速** (Windows)
+   - 需要安装兼容版本的 triton-windows
+   - 安装命令：`pip install triton-windows==3.1.0.post17`
+   - setup.ps1 会自动安装
+
+3. **Token 数量优化**
+   - 默认 `max_new_tokens=48`，足够识别典型游戏字幕
+   - 可通过 `LUDIGLOT_GLM_OCR_MAX_TOKENS` 环境变量调整
+   - 减少 token 数量可显著提升速度
+
+4. **SDPA 注意力机制**
+   - 模型自动使用 Scaled Dot-Product Attention
+   - 在支持的 GPU 上自动启用 Flash Attention
+
+### 环境变量配置
+
+| 变量名 | 默认值 | 说明 |
+|--------|--------|------|
+| `LUDIGLOT_GLM_COMPILE` | `1` | 是否启用 torch.compile |
+| `LUDIGLOT_GLM_COMPILE_MODE` | `reduce-overhead` | 编译模式 |
+| `LUDIGLOT_GLM_OCR_MAX_TOKENS` | `48` | 最大生成 token 数 |
+| `LUDIGLOT_GLM_MAX_IMAGE_SIZE` | `1024` | 最大图像尺寸 |
+
+### 性能调优建议
+
+- **首次运行较慢**：torch.compile 需要编译内核，首次推理会慢约 50%
+- **稳定性能**：连续运行后性能会稳定在 ~0.72s
+- **长文本**：如需识别更长文本，可增加 `max_new_tokens` 到 64-128
 
 ## 故障排除
 

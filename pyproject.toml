@@ -32,6 +32,7 @@ glm = [
 	"torchvision>=0.17",
 	"sentencepiece>=0.1.99",
 	"accelerate>=1.0",
+	"triton-windows==3.1.0.post17; sys_platform == 'win32'",
 ]
 
 [project.scripts]

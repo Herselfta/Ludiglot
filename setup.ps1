@@ -369,6 +369,13 @@ $glmAvailable = $false
 if ($LASTEXITCODE -eq 0) {
     Write-Host " 已安装" -ForegroundColor Green
     $glmAvailable = $true
+    # Check and install triton-windows for torch.compile optimization
+    Write-Host "    检查 Triton 优化支持..." -ForegroundColor Gray
+    & $venvPython -c "from triton.compiler.compiler import triton_key" 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "    安装 triton-windows (torch.compile 优化)..." -ForegroundColor Yellow
+        & $venvPython -m pip install triton-windows==3.1.0.post17 --quiet 2>$null
+    }
 } else {
     Write-Host " 未安装 (可选)" -ForegroundColor Cyan
     Write-Host "    如需 GLM-OCR 本地推理，请安装: pip install ludiglot[glm]" -ForegroundColor Gray
@@ -379,6 +386,9 @@ if ($LASTEXITCODE -eq 0) {
         if ($LASTEXITCODE -eq 0) {
             Write-Host "    GLM-OCR 依赖安装完成" -ForegroundColor Green
             $glmAvailable = $true
+            # Install triton-windows for torch.compile optimization
+            Write-Host "    安装 triton-windows (torch.compile 优化)..." -ForegroundColor Yellow
+            & $venvPython -m pip install triton-windows==3.1.0.post17 --quiet 2>$null
         } else {
             Write-Host "    GLM-OCR 安装失败，可稍后手动安装" -ForegroundColor Yellow
         }
