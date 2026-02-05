@@ -1,3 +1,6 @@
+from ludiglot.infrastructure.proxy_setup import setup_system_proxy
+setup_system_proxy()
+
 try:
     from .__main__ import main
 except ImportError:

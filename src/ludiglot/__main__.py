@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from ludiglot.infrastructure.proxy_setup import setup_system_proxy
+setup_system_proxy()
+
+
 import argparse
 import json
 import sys

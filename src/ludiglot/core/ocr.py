@@ -11,6 +11,9 @@ import threading
 import urllib.error
 import urllib.request
 from pathlib import Path
+
+from ludiglot.infrastructure.proxy_setup import setup_system_proxy
+setup_system_proxy()
 from typing import Any, Callable, Dict, List, Tuple, Union
 
 import re
@@ -185,6 +188,11 @@ class OCREngine:
         self._glm_generation_kwargs = None
         self._glm_install_attempted = False
         self._glm_repair_attempted = False
+        self._glm_init_lock = threading.Lock()
+        self._glm_init_in_progress = False
+        self._glm_last_error = None
+        self._glm_last_stage = None
+        self._glm_ollama_last_error = None
         self._log_callback: Callable[[str], None] | None = None
         self._status_callback: Callable[[str], None] | None = None
         self._prewarm_lock = threading.Lock()
@@ -198,24 +206,75 @@ class OCREngine:
         self._log_callback = log_callback
         self._status_callback = status_callback
 
-    def _emit_log(self, message: str) -> None:
-        if message:
+    def _atomic_write(self, text: str) -> None:
+        if not text:
+            return
+        msg = text if text.endswith("\n") else text + "\n"
+        
+        # If no callback (CLI), write to stdout
+        if not self._log_callback:
             try:
-                print(message)
+                sys.stdout.write(msg)
+                sys.stdout.flush()
             except Exception:
                 pass
-            if self._log_callback:
-                try:
-                    self._log_callback(message)
-                except Exception:
-                    pass
+        
+        # Always invoke callbacks if available
+        if self._log_callback:
+            try:
+                self._log_callback(text)
+            except Exception:
+                pass
+
+    def _emit_log(self, message: str) -> None:
+        self._atomic_write(message)
 
     def _emit_status(self, message: str) -> None:
-        if self._status_callback and message:
+        if not message:
+            return
+        # Internal status updates for GLM-OCR get the [OCR] prefix in terminal
+        if message.startswith("GLM-OCR"):
+            self._atomic_write(f"[OCR] {message}")
+        
+        if self._status_callback:
             try:
                 self._status_callback(message)
             except Exception:
                 pass
+
+    def _format_exc(self, exc: Exception | None) -> str:
+        if exc is None:
+            return ""
+        msg = str(exc)
+        if msg:
+            return f"{exc.__class__.__name__}: {msg}"
+        return exc.__class__.__name__
+
+    def _format_error(self, stage: str, exc: Exception | None = None) -> str:
+        detail = self._format_exc(exc)
+        return f"{stage}: {detail}" if detail else stage
+
+    def _shorten_error(self, text: str | None, limit: int = 180) -> str | None:
+        if not text:
+            return None
+        cleaned = str(text).replace("\n", " ").strip()
+        if len(cleaned) <= limit:
+            return cleaned
+        return cleaned[: max(0, limit - 1)] + "…"
+
+    def _reset_glm_error(self) -> None:
+        self._glm_last_error = None
+        self._glm_last_stage = None
+
+    def _set_glm_error(self, stage: str, exc: Exception | None = None) -> None:
+        self._glm_last_stage = stage
+        self._glm_last_error = self._format_error(stage, exc)
+
+    def _reset_glm_ollama_error(self) -> None:
+        self._glm_ollama_last_error = None
+
+    def _set_glm_ollama_error(self, stage: str, exc: Exception | None = None) -> None:
+        self._glm_ollama_last_error = self._format_error(stage, exc)
 
     def set_mode(self, mode: str) -> None:
         self.mode = mode.lower()
@@ -229,7 +288,9 @@ class OCREngine:
         return key
 
     def _warmup_glm_ollama(self) -> bool:
+        self._reset_glm_ollama_error()
         if not self.glm_endpoint:
+            self._set_glm_ollama_error("Ollama 地址未设置")
             return False
         url = f"{self.glm_endpoint}/api/tags"
         req = urllib.request.Request(
@@ -238,9 +299,13 @@ class OCREngine:
         )
         try:
             with urllib.request.urlopen(req, timeout=min(self.glm_timeout, 5.0)) as resp:
-                return 200 <= getattr(resp, "status", 200) < 300
+                ok = 200 <= getattr(resp, "status", 200) < 300
+                if not ok:
+                    self._set_glm_ollama_error("预热失败")
+                return ok
         except Exception as exc:
             self._emit_log(f"[OCR] GLM-OCR (Ollama) 预热失败：{exc}")
+            self._set_glm_ollama_error("预热失败", exc)
             return False
 
     def prewarm(self, backend: str | None = None, async_: bool = True) -> None:
@@ -255,10 +320,26 @@ class OCREngine:
         def _worker() -> None:
             if key == "glm":
                 self._emit_log("[OCR] 预热 GLM-OCR (Local)...")
-                self._init_glm_local()
+                ok = self._init_glm_local()
+                if ok:
+                    self._emit_log("[OCR] GLM-OCR (Local) 预热完成")
+                else:
+                    reason = self._shorten_error(self._glm_last_error)
+                    if reason:
+                        self._emit_log(f"[OCR] GLM-OCR (Local) 预热失败：{reason}")
+                    else:
+                        self._emit_log("[OCR] GLM-OCR (Local) 预热失败")
             elif key == "glm_ollama":
                 self._emit_log("[OCR] 预热 GLM-OCR (Ollama)...")
-                self._warmup_glm_ollama()
+                ok = self._warmup_glm_ollama()
+                if ok:
+                    self._emit_log("[OCR] GLM-OCR (Ollama) 预热完成")
+                else:
+                    reason = self._shorten_error(self._glm_ollama_last_error)
+                    if reason:
+                        self._emit_log(f"[OCR] GLM-OCR (Ollama) 预热失败：{reason}")
+                    else:
+                        self._emit_log("[OCR] GLM-OCR (Ollama) 预热失败")
             elif key == "paddle":
                 self.initialize(force_paddle=True, allow_paddle=True)
             elif key == "auto":
@@ -465,13 +546,13 @@ class OCREngine:
             from winrt.windows.globalization import Language
             from winrt.windows.media.ocr import OcrEngine
         except ImportError as e:
-            print(f"[OCR] Windows OCR 不可用：WinRT 依赖缺失 ({e.__class__.__name__})")
-            print("[OCR] 提示：可通过 'pip install winrt-Windows.Media.Ocr winrt-Windows.Globalization' 安装")
+            self._emit_log(f"[OCR] Windows OCR 不可用：WinRT 依赖缺失 ({e.__class__.__name__})")
+            self._emit_log("[OCR] 提示：可通过 'pip install winrt-Windows.Media.Ocr winrt-Windows.Globalization' 安装")
             self._windows_ready = True
             self._windows_ocr = None
             return
         except Exception as e:
-            print(f"[OCR] Windows OCR 导入失败：{e.__class__.__name__}: {e}")
+            self._emit_log(f"[OCR] Windows OCR 导入失败：{e.__class__.__name__}: {e}")
             self._windows_ready = True
             self._windows_ocr = None
             return
@@ -480,56 +561,56 @@ class OCREngine:
         try:
             available_langs = OcrEngine.available_recognizer_languages
             available_lang_codes = [lang.language_tag for lang in available_langs]
-            print(f"[OCR] Windows OCR 可用语言包: {', '.join(available_lang_codes) if available_lang_codes else '无'}")
+            self._emit_log(f"[OCR] Windows OCR 可用语言包: {', '.join(available_lang_codes) if available_lang_codes else '无'}")
         except Exception as e:
-            print(f"[OCR] 无法检查语言包：{e}")
+            self._emit_log(f"[OCR] 无法检查语言包：{e}")
             available_lang_codes = []
         
         # 尝试创建 OCR 引擎实例
         try:
-            print(f"[OCR Config] Requesting Lang: {self.lang}")
+            self._emit_log(f"[OCR Config] Requesting Lang: {self.lang}")
             if self.lang.startswith("en"):
                 # Try specific US English first
                 lang = Language("en-US")
                 if not OcrEngine.is_language_supported(lang):
-                     print("[OCR Config] en-US not supported, checking others...")
+                     self._emit_log("[OCR Config] en-US not supported, checking others...")
                 
                 self._windows_ocr = OcrEngine.try_create_from_language(lang)
                 if self._windows_ocr is None:
                     # Fallback to en-GB if en-US missing (common in some regions)
-                    print("[OCR] Windows OCR: en-US failed, trying en-GB")
+                    self._emit_log("[OCR] Windows OCR: en-US failed, trying en-GB")
                     lang_gb = Language("en-GB")
                     self._windows_ocr = OcrEngine.try_create_from_language(lang_gb)
 
                 if self._windows_ocr is None:
-                    print("[OCR] Windows OCR：en-US 语言包未安装")
+                    self._emit_log("[OCR] Windows OCR：en-US 语言包未安装")
                     if "en-US" not in available_lang_codes and "en" not in available_lang_codes:
-                        print("[OCR] 提示：请安装英语语言包")
-                        print("[OCR]   设置 -> 时间和语言 -> 语言 -> 添加语言 -> English (United States)")
-                    print("[OCR] 尝试使用系统默认语言包...")
+                        self._emit_log("[OCR] 提示：请安装英语语言包")
+                        self._emit_log("[OCR]   设置 -> 时间和语言 -> 语言 -> 添加语言 -> English (United States)")
+                    self._emit_log("[OCR] 尝试使用系统默认语言包...")
                     self._windows_ocr = OcrEngine.try_create_from_user_profile_languages()
             elif self.lang.startswith("zh"):
                 lang = Language("zh-CN")
                 self._windows_ocr = OcrEngine.try_create_from_language(lang)
                 if self._windows_ocr is None:
-                    print("[OCR] Windows OCR：zh-CN 语言包未安装")
+                    self._emit_log("[OCR] Windows OCR：zh-CN 语言包未安装")
                     if "zh-CN" not in available_lang_codes and "zh" not in available_lang_codes:
-                        print("[OCR] 提示：请安装中文语言包")
-                        print("[OCR]   设置 -> 时间和语言 -> 语言 -> 添加语言 -> 中文(简体，中国)")
-                    print("[OCR] 尝试使用系统默认语言包...")
+                        self._emit_log("[OCR] 提示：请安装中文语言包")
+                        self._emit_log("[OCR]   设置 -> 时间和语言 -> 语言 -> 添加语言 -> 中文(简体，中国)")
+                    self._emit_log("[OCR] 尝试使用系统默认语言包...")
                     self._windows_ocr = OcrEngine.try_create_from_user_profile_languages()
             else:
                 self._windows_ocr = OcrEngine.try_create_from_user_profile_languages()
             
             if self._windows_ocr is None:
-                print("[OCR] Windows OCR 不可用：系统未安装任何 OCR 语言包")
-                print("[OCR] 请在 Windows 设置中安装语言包：")
-                print("[OCR]   设置 -> 时间和语言 -> 语言 -> 添加语言")
+                self._emit_log("[OCR] Windows OCR 不可用：系统未安装任何 OCR 语言包")
+                self._emit_log("[OCR] 请在 Windows 设置中安装语言包：")
+                self._emit_log("[OCR]   设置 -> 时间和语言 -> 语言 -> 添加语言")
             else:
                 lang_tag = self._windows_ocr.recognizer_language.language_tag if self._windows_ocr.recognizer_language else "unknown"
-                print(f"[OCR] Windows OCR 初始化成功 (使用语言: {lang_tag})")
+                self._emit_log(f"[OCR] Windows OCR 初始化成功 (使用语言: {lang_tag})")
         except Exception as e:
-            print(f"[OCR] Windows OCR 初始化失败：{e.__class__.__name__}: {e}")
+            self._emit_log(f"[OCR] Windows OCR 初始化失败：{e.__class__.__name__}: {e}")
             self._windows_ocr = None
         
         self._windows_ready = True
@@ -952,229 +1033,313 @@ class OCREngine:
         return False
 
     def _init_glm_local(self) -> bool:
-        if self._glm_ready:
-            return self._glm_model_obj is not None and self._glm_processor is not None
-        self._glm_ready = True
+        with self._glm_init_lock:
+            if self._glm_init_in_progress:
+                if not self._glm_last_error:
+                    self._set_glm_error("初始化进行中")
+                return False
+            if self._glm_ready:
+                ready = self._glm_model_obj is not None and self._glm_processor is not None
+                if not ready and not self._glm_last_error:
+                    self._set_glm_error("初始化未完成或已失败")
+                return ready
+            self._glm_init_in_progress = True
+            self._reset_glm_error()
+            self._glm_ready = True
+            self._set_glm_error("初始化进行中")
         self._emit_status("GLM-OCR: 初始化中…")
+        success = False
         try:
-            import torch
-            from transformers import AutoModelForImageTextToText, AutoProcessor
-        except Exception as exc:
-            self._emit_log(f"[OCR] GLM-OCR 本地依赖未安装：{exc.__class__.__name__}")
-            if self._attempt_install_glm_deps():
-                try:
-                    import torch
-                    from transformers import AutoModelForImageTextToText, AutoProcessor
-                except Exception as exc2:
-                    self._emit_log(f"[OCR] GLM-OCR 依赖安装后仍不可用：{exc2.__class__.__name__}")
+            try:
+                import torch
+                from transformers import AutoModelForImageTextToText, AutoProcessor
+            except Exception as exc:
+                self._emit_log(f"[OCR] GLM-OCR 本地依赖未安装：{exc.__class__.__name__}")
+                self._set_glm_error("本地依赖未安装", exc)
+                if self._attempt_install_glm_deps():
+                    try:
+                        import torch
+                        from transformers import AutoModelForImageTextToText, AutoProcessor
+                    except Exception as exc2:
+                        self._emit_log(f"[OCR] GLM-OCR 依赖安装后仍不可用：{exc2.__class__.__name__}")
+                        self._set_glm_error("依赖安装后仍不可用", exc2)
+                        return False
+                else:
+                    self._set_glm_error("依赖自动安装失败")
                     return False
-            else:
-                return False
 
-        device = "cpu"
-        if self.mode in {"gpu", "auto"}:
-            try:
-                if torch.cuda.is_available():
-                    device = "cuda"
-            except Exception:
-                device = "cpu"
-
-        dtype = torch.float16 if device == "cuda" else torch.float32
-        self._glm_device = device
-        self._glm_dtype = dtype
-
-        if device == "cuda":
-            try:
-                torch.backends.cuda.matmul.allow_tf32 = True
-                torch.backends.cudnn.allow_tf32 = True
-                torch.backends.cudnn.benchmark = True
-                if hasattr(torch, "set_float32_matmul_precision"):
-                    torch.set_float32_matmul_precision("high")
-                if hasattr(torch.backends, "cuda"):
-                    if hasattr(torch.backends.cuda, "enable_flash_sdp"):
-                        torch.backends.cuda.enable_flash_sdp(True)
-                    if hasattr(torch.backends.cuda, "enable_mem_efficient_sdp"):
-                        torch.backends.cuda.enable_mem_efficient_sdp(True)
-            except Exception:
-                pass
-
-        # Ensure vision deps for processor
-        try:
-            import importlib.util as _importlib_util
-            if _importlib_util.find_spec("torchvision") is None:
-                self._attempt_install_glm_vision_deps()
-        except Exception:
-            pass
-
-        def _need_repair_from_error(err: Exception) -> bool:
-            msg = str(err).lower()
-            if isinstance(err, (TypeError, ValueError)):
-                return True
-            if "video_processor_class_from_name" in msg:
-                return True
-            if "nonetype" in msg or "none type" in msg:
-                return True
-            if "glm_ocr" in msg:
-                return True
-            if "unrecognized processing class" in msg:
-                return True
-            if "does not recognize this architecture" in msg:
-                return True
-            return False
-
-        def _hf_cache_has_model(model_id: str) -> bool:
-            if not model_id or "/" not in model_id:
-                return False
-            try:
-                if Path(model_id).exists():
-                    return True
-            except Exception:
-                pass
-            org, name = model_id.split("/", 1)
-            hub_cache = os.getenv("HUGGINGFACE_HUB_CACHE") or os.getenv("HF_HUB_CACHE")
-            if not hub_cache:
-                return False
-            model_dir = Path(hub_cache) / f"models--{org}--{name}"
-            snapshots = model_dir / "snapshots"
-            if not snapshots.exists():
-                return False
-            try:
-                return any(snapshots.iterdir())
-            except Exception:
-                return False
-
-        local_files_only = _hf_cache_has_model(self.glm_local_model)
-
-        def _load_processor_auto() -> Any:
-            kwargs = {"trust_remote_code": True}
-            if local_files_only:
-                kwargs["local_files_only"] = True
-            return AutoProcessor.from_pretrained(self.glm_local_model, **kwargs)
-
-        def _load_processor_manual() -> Any:
-            from transformers import AutoTokenizer, Glm46VImageProcessor, Glm46VProcessor, BaseVideoProcessor
-            from transformers.models.glm46v.video_processing_glm46v import Glm46VVideoProcessor
-
-            if "dummy_torchvision_objects" in BaseVideoProcessor.__module__:
-                self._emit_log("[OCR] torchvision 未安装或未生效，无法构建 GLM-OCR 处理器")
-                self._emit_status("GLM-OCR: 视觉依赖缺失")
-                return None
-
-            img_proc = Glm46VImageProcessor.from_pretrained(self.glm_local_model, local_files_only=local_files_only)
-            vid_proc = Glm46VVideoProcessor.from_pretrained(self.glm_local_model, local_files_only=local_files_only)
-            tokenizer = AutoTokenizer.from_pretrained(
-                self.glm_local_model, trust_remote_code=True, local_files_only=local_files_only
-            )
-            return Glm46VProcessor(image_processor=img_proc, tokenizer=tokenizer, video_processor=vid_proc)
-
-        processor = None
-        try:
-            self._emit_status("GLM-OCR: 加载处理器…")
-            processor = _load_processor_auto()
-        except Exception as exc:
-            err_msg = f"{exc.__class__.__name__}: {exc}"
-            self._emit_log(f"[OCR] GLM-OCR 处理器加载失败：{err_msg}")
-            if _need_repair_from_error(exc) and self._attempt_repair_glm_transformers(reason=err_msg):
+            device = "cpu"
+            if self.mode in {"gpu", "auto"}:
                 try:
-                    self._emit_status("GLM-OCR: 重新加载处理器…")
-                    processor = _load_processor_auto()
-                except Exception as exc2:
-                    err_msg2 = f"{exc2.__class__.__name__}: {exc2}"
-                    self._emit_log(f"[OCR] GLM-OCR 修复后处理器仍失败：{err_msg2}")
-                    processor = None
-            if processor is None:
-                try:
-                    self._emit_status("GLM-OCR: 构建处理器…")
-                    processor = _load_processor_manual()
-                except Exception as exc3:
-                    err_msg3 = f"{exc3.__class__.__name__}: {exc3}"
-                    self._emit_log(f"[OCR] GLM-OCR 处理器构建失败：{err_msg3}")
-                    processor = None
+                    if torch.cuda.is_available():
+                        device = "cuda"
+                except Exception:
+                    device = "cpu"
 
-        if processor is None:
-            self._emit_status("GLM-OCR: 处理器不可用")
-            return False
+            dtype = torch.float16 if device == "cuda" else torch.float32
+            self._glm_device = device
+            self._glm_dtype = dtype
 
-        self._glm_processor = processor
-        self._glm_prompt_text = None
-        try:
-            if hasattr(processor, "apply_chat_template"):
-                messages = [
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": self.glm_prompt},
-                            {"type": "image"},
-                        ],
-                    }
-                ]
-                try:
-                    self._glm_prompt_text = processor.apply_chat_template(
-                        messages, add_generation_prompt=True, tokenize=False
-                    )
-                except TypeError:
-                    self._glm_prompt_text = processor.apply_chat_template(
-                        messages, add_generation_prompt=True
-                    )
-        except Exception:
-            self._glm_prompt_text = None
-
-        gen_kwargs: Dict[str, Any] = {
-            "max_new_tokens": int(self.glm_max_tokens),
-            "do_sample": False,
-            "num_beams": 1,
-            "use_cache": True,
-        }
-        try:
-            tokenizer = getattr(processor, "tokenizer", None)
-            pad_id = getattr(tokenizer, "pad_token_id", None)
-            eos_id = getattr(tokenizer, "eos_token_id", None)
-            if pad_id is not None:
-                gen_kwargs["pad_token_id"] = int(pad_id)
-            if eos_id is not None:
-                gen_kwargs["eos_token_id"] = int(eos_id)
-        except Exception:
-            pass
-        self._glm_generation_kwargs = gen_kwargs
-
-        try:
-            self._emit_status("GLM-OCR: 加载模型中…")
-            model_kwargs = {"torch_dtype": dtype, "trust_remote_code": True}
-            if local_files_only:
-                model_kwargs["local_files_only"] = True
             if device == "cuda":
-                model_kwargs["device_map"] = "auto"
-            self._glm_model_obj = AutoModelForImageTextToText.from_pretrained(self.glm_local_model, **model_kwargs)
-            if device == "cpu":
-                self._glm_model_obj = self._glm_model_obj.to(device)
-            self._glm_model_obj.eval()
-        except Exception as exc:
-            err_msg = f"{exc.__class__.__name__}: {exc}"
-            self._emit_log(f"[OCR] GLM-OCR 本地模型加载失败：{err_msg}")
-            if _need_repair_from_error(exc) and self._attempt_repair_glm_transformers(reason=err_msg):
                 try:
-                    self._emit_status("GLM-OCR: 重新加载模型中…")
-                    model_kwargs = {"torch_dtype": dtype, "trust_remote_code": True}
-                    if local_files_only:
-                        model_kwargs["local_files_only"] = True
-                    if device == "cuda":
-                        model_kwargs["device_map"] = "auto"
-                    self._glm_model_obj = AutoModelForImageTextToText.from_pretrained(self.glm_local_model, **model_kwargs)
-                    if device == "cpu":
-                        self._glm_model_obj = self._glm_model_obj.to(device)
-                    self._glm_model_obj.eval()
-                except Exception as exc2:
-                    err_msg2 = f"{exc2.__class__.__name__}: {exc2}"
-                    self._emit_log(f"[OCR] GLM-OCR 修复后仍加载失败：{err_msg2}")
+                    torch.backends.cuda.matmul.allow_tf32 = True
+                    torch.backends.cudnn.allow_tf32 = True
+                    torch.backends.cudnn.benchmark = True
+                    if hasattr(torch, "set_float32_matmul_precision"):
+                        torch.set_float32_matmul_precision("high")
+                    if hasattr(torch.backends, "cuda"):
+                        if hasattr(torch.backends.cuda, "enable_flash_sdp"):
+                            torch.backends.cuda.enable_flash_sdp(True)
+                        if hasattr(torch.backends.cuda, "enable_mem_efficient_sdp"):
+                            torch.backends.cuda.enable_mem_efficient_sdp(True)
+                except Exception:
+                    pass
+
+            # Ensure vision deps for processor
+            try:
+                import importlib.util as _importlib_util
+                if _importlib_util.find_spec("torchvision") is None:
+                    self._attempt_install_glm_vision_deps()
+            except Exception:
+                pass
+
+            def _need_repair_from_error(err: Exception) -> bool:
+                msg = str(err).lower()
+                if isinstance(err, (TypeError, ValueError)):
+                    return True
+                if "video_processor_class_from_name" in msg:
+                    return True
+                if "nonetype" in msg or "none type" in msg:
+                    return True
+                if "glm_ocr" in msg:
+                    return True
+                if "unrecognized processing class" in msg:
+                    return True
+                if "does not recognize this architecture" in msg:
+                    return True
+                return False
+
+            def _hf_cache_has_model(model_id: str) -> bool:
+                if not model_id:
+                    return False
+                # If it's a local path, always return True
+                try:
+                    if Path(model_id).exists() and Path(model_id).is_dir():
+                        return True
+                except Exception:
+                    pass
+                
+                if "/" not in model_id:
+                    return False
+                    
+                org, name = model_id.split("/", 1)
+                hub_cache = os.getenv("HUGGINGFACE_HUB_CACHE") or os.getenv("HF_HUB_CACHE")
+                
+                # Fallback detection if env var is missing
+                if not hub_cache:
+                    try:
+                        project_root = Path(__file__).resolve().parents[3]
+                        hub_cache = project_root / "cache" / "hf" / "hub"
+                    except Exception:
+                        return False
+                
+                if not hub_cache or not Path(hub_cache).exists():
+                    return False
+                    
+                model_dir = Path(hub_cache) / f"models--{org}--{name}"
+                snapshots = model_dir / "snapshots"
+                if not snapshots.exists():
+                    return False
+                try:
+                    # Check if there are any non-empty snapshot directories
+                    for snap in snapshots.iterdir():
+                        if snap.is_dir() and any(snap.iterdir()):
+                            return True
+                    return False
+                except Exception:
+                    return False
+
+            local_files_only = _hf_cache_has_model(self.glm_local_model)
+            
+            if local_files_only:
+                # Strictly set offline mode environment variables before loading any components
+                os.environ["HF_HUB_OFFLINE"] = "1"
+                os.environ["TRANSFORMERS_OFFLINE"] = "1"
+            else:
+                os.environ.pop("HF_HUB_OFFLINE", None)
+                os.environ.pop("TRANSFORMERS_OFFLINE", None)
+
+            def _load_processor_auto() -> Any:
+                kwargs = {"trust_remote_code": True}
+                if local_files_only:
+                    kwargs["local_files_only"] = True
+                return AutoProcessor.from_pretrained(self.glm_local_model, **kwargs)
+
+            def _load_processor_manual() -> Any:
+                from transformers import AutoTokenizer, Glm46VImageProcessor, Glm46VProcessor, BaseVideoProcessor
+                from transformers.models.glm46v.video_processing_glm46v import Glm46VVideoProcessor
+
+                if "dummy_torchvision_objects" in BaseVideoProcessor.__module__:
+                    self._emit_log("[OCR] torchvision 未安装或未生效，无法构建 GLM-OCR 处理器")
+                    self._emit_status("GLM-OCR: 视觉依赖缺失")
+                    self._set_glm_error("视觉依赖缺失")
+                    return None
+
+                img_proc = Glm46VImageProcessor.from_pretrained(self.glm_local_model, local_files_only=local_files_only)
+                vid_proc = Glm46VVideoProcessor.from_pretrained(self.glm_local_model, local_files_only=local_files_only)
+                tokenizer = AutoTokenizer.from_pretrained(
+                    self.glm_local_model, trust_remote_code=True, local_files_only=local_files_only
+                )
+                return Glm46VProcessor(image_processor=img_proc, tokenizer=tokenizer, video_processor=vid_proc)
+
+            processor = None
+            try:
+                if local_files_only:
+                    self._emit_log(f"[OCR] 检测到本地缓存，启用离线加载: {self.glm_local_model}")
+                    self._emit_log("[OCR] 提示：若需检查更新，请删除 cache/hf 或设置 HF_HUB_OFFLINE=0")
+                
+                self._emit_status("GLM-OCR: 加载处理器…")
+                processor = _load_processor_auto()
+            except Exception as exc:
+                err_msg = f"{exc.__class__.__name__}: {exc}"
+                self._emit_log(f"[OCR] GLM-OCR 处理器加载失败：{err_msg}")
+                self._set_glm_error("处理器加载失败", exc)
+                if _need_repair_from_error(exc) and self._attempt_repair_glm_transformers(reason=err_msg):
+                    try:
+                        self._emit_status("GLM-OCR: 重新加载处理器…")
+                        processor = _load_processor_auto()
+                    except Exception as exc2:
+                        err_msg2 = f"{exc2.__class__.__name__}: {exc2}"
+                        self._emit_log(f"[OCR] GLM-OCR 修复后处理器仍失败：{err_msg2}")
+                        self._set_glm_error("修复后处理器仍失败", exc2)
+                        processor = None
+                if processor is None:
+                    try:
+                        self._emit_status("GLM-OCR: 构建处理器…")
+                        processor = _load_processor_manual()
+                    except Exception as exc3:
+                        err_msg3 = f"{exc3.__class__.__name__}: {exc3}"
+                        self._emit_log(f"[OCR] GLM-OCR 处理器构建失败：{err_msg3}")
+                        self._set_glm_error("处理器构建失败", exc3)
+                        processor = None
+
+            if processor is None:
+                self._emit_status("GLM-OCR: 处理器不可用")
+                if not self._glm_last_error:
+                    self._set_glm_error("处理器不可用")
+                return False
+
+            self._glm_processor = processor
+            self._glm_prompt_text = None
+            try:
+                if hasattr(processor, "apply_chat_template"):
+                    messages = [
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": self.glm_prompt},
+                                {"type": "image"},
+                            ],
+                        }
+                    ]
+                    try:
+                        self._glm_prompt_text = processor.apply_chat_template(
+                            messages, add_generation_prompt=True, tokenize=False
+                        )
+                    except TypeError:
+                        self._glm_prompt_text = processor.apply_chat_template(
+                            messages, add_generation_prompt=True
+                        )
+            except Exception:
+                self._glm_prompt_text = None
+
+            gen_kwargs: Dict[str, Any] = {
+                "max_new_tokens": int(self.glm_max_tokens),
+                "do_sample": False,
+                "num_beams": 1,
+                "use_cache": True,
+            }
+            try:
+                tokenizer = getattr(processor, "tokenizer", None)
+                pad_id = getattr(tokenizer, "pad_token_id", None)
+                eos_id = getattr(tokenizer, "eos_token_id", None)
+                if pad_id is not None:
+                    gen_kwargs["pad_token_id"] = int(pad_id)
+                if eos_id is not None:
+                    gen_kwargs["eos_token_id"] = int(eos_id)
+            except Exception:
+                pass
+            self._glm_generation_kwargs = gen_kwargs
+
+            try:
+                self._emit_status("GLM-OCR: 加载模型中…")
+                # Detect quantization support
+                has_bnb = False
+                try:
+                    import bitsandbytes
+                    has_bnb = True
+                except Exception:
+                    pass
+
+                model_kwargs = {
+                    "torch_dtype": dtype, 
+                    "trust_remote_code": True,
+                    "low_cpu_mem_usage": True  # Optimize memory usage during loading
+                }
+                if local_files_only:
+                    model_kwargs["local_files_only"] = True
+                
+                if device == "cuda":
+                    model_kwargs["device_map"] = "auto"
+                    if has_bnb:
+                        self._emit_log("[OCR] 检测到 bitsandbytes，启用 4-bit 量化加载以优化性能")
+                        model_kwargs["load_in_4bit"] = True
+                    else:
+                        self._emit_log("[OCR] 提示：安装 bitsandbytes 可开启 4-bit 量化，大幅提升 0.9B 模型识别速度")
+                
+                self._glm_model_obj = AutoModelForImageTextToText.from_pretrained(self.glm_local_model, **model_kwargs)
+                if device == "cpu":
+                    self._glm_model_obj = self._glm_model_obj.to(device)
+                self._glm_model_obj.eval()
+            except Exception as exc:
+                err_msg = f"{exc.__class__.__name__}: {exc}"
+                self._emit_log(f"[OCR] GLM-OCR 本地模型加载失败：{err_msg}")
+                self._set_glm_error("本地模型加载失败", exc)
+                if _need_repair_from_error(exc) and self._attempt_repair_glm_transformers(reason=err_msg):
+                    try:
+                        self._emit_status("GLM-OCR: 重新加载模型中…")
+                        model_kwargs = {"torch_dtype": dtype, "trust_remote_code": True}
+                        if local_files_only:
+                            model_kwargs["local_files_only"] = True
+                        if device == "cuda":
+                            model_kwargs["device_map"] = "auto"
+                            # In repair mode, we prefer stability, so no force 4bit unless already there
+                        self._glm_model_obj = AutoModelForImageTextToText.from_pretrained(self.glm_local_model, **model_kwargs)
+                        if device == "cpu":
+                            self._glm_model_obj = self._glm_model_obj.to(device)
+                        self._glm_model_obj.eval()
+                    except Exception as exc2:
+                        err_msg2 = f"{exc2.__class__.__name__}: {exc2}"
+                        self._emit_log(f"[OCR] GLM-OCR 修复后仍加载失败：{err_msg2}")
+                        self._set_glm_error("修复后模型仍加载失败", exc2)
+                        self._emit_status("GLM-OCR: 模型加载失败")
+                        self._glm_model_obj = None
+                        return False
+                else:
                     self._emit_status("GLM-OCR: 模型加载失败")
+                    if not self._glm_last_error:
+                        self._set_glm_error("模型加载失败")
                     self._glm_model_obj = None
                     return False
-            else:
-                self._emit_status("GLM-OCR: 模型加载失败")
-                self._glm_model_obj = None
-                return False
-        self._emit_status("GLM-OCR: 就绪")
-        return True
+            self._emit_status("GLM-OCR: 就绪")
+            self._reset_glm_error()
+            success = True
+            return True
+        finally:
+            with self._glm_init_lock:
+                self._glm_init_in_progress = False
+                if not success:
+                    self._glm_ready = False
 
     def _glm_decode_output(self, generated) -> str:
         if generated is None or self._glm_processor is None:
@@ -1200,15 +1365,18 @@ class OCREngine:
             return []
         image_bytes = self._glm_image_to_bytes(image_input)
         if not image_bytes:
-            print("[OCR] GLM-OCR 输入转换失败")
+            self._emit_log("[OCR] GLM-OCR 输入转换失败")
+            self._set_glm_error("输入转换失败")
             return []
         if not HAS_PIL or Image is None:
-            print("[OCR] GLM-OCR 需要 Pillow")
+            self._emit_log("[OCR] GLM-OCR 需要 Pillow")
+            self._set_glm_error("缺少 Pillow")
             return []
         try:
             image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
         except Exception as exc:
             print(f"[OCR] GLM-OCR 读取图片失败：{exc}")
+            self._set_glm_error("读取图片失败", exc)
             return []
 
         processor = self._glm_processor
@@ -1252,6 +1420,7 @@ class OCREngine:
                 inputs = processor(text=self.glm_prompt, images=image, return_tensors="pt")
             except Exception as exc:
                 print(f"[OCR] GLM-OCR 处理输入失败：{exc}")
+                self._set_glm_error("处理输入失败", exc)
                 return []
 
         try:
@@ -1286,20 +1455,25 @@ class OCREngine:
                     pass
         except Exception as exc:
             print(f"[OCR] GLM-OCR 本地推理失败：{exc}")
+            self._set_glm_error("本地推理失败", exc)
             return []
 
         text = self._glm_decode_output(generated)
         lines = self._glm_extract_lines(text)
         if not lines:
+            self._set_glm_error("输出解析为空")
             return []
         return self._glm_build_boxes(lines)
 
     def _glm_ollama_recognize_boxes(self, image_input: Union[str, Path, Any, tuple]) -> List[Dict[str, object]]:
+        self._reset_glm_ollama_error()
         if not self.glm_endpoint:
+            self._set_glm_ollama_error("Ollama 地址未设置")
             return []
         image_bytes = self._glm_image_to_bytes(image_input)
         if not image_bytes:
             print("[OCR] GLM-OCR 输入转换失败")
+            self._set_glm_ollama_error("输入转换失败")
             return []
 
         payload = {
@@ -1319,9 +1493,11 @@ class OCREngine:
                 raw = resp.read().decode("utf-8", errors="ignore")
         except urllib.error.URLError as exc:
             print(f"[OCR] GLM-OCR 请求失败：{exc}")
+            self._set_glm_ollama_error("请求失败", exc)
             return []
         except Exception as exc:
             print(f"[OCR] GLM-OCR 请求失败：{exc}")
+            self._set_glm_ollama_error("请求失败", exc)
             return []
 
         response_obj = None
@@ -1337,7 +1513,8 @@ class OCREngine:
 
         if isinstance(response_obj, dict):
             if response_obj.get("error"):
-                print(f"[OCR] GLM-OCR 错误：{response_obj.get('error')}")
+                self._emit_log(f"[OCR] GLM-OCR 错误：{response_obj.get('error')}")
+                self._set_glm_ollama_error("响应错误", Exception(str(response_obj.get("error"))))
                 return []
             text = response_obj.get("response") or response_obj.get("message") or ""
         else:
@@ -1345,6 +1522,7 @@ class OCREngine:
 
         lines = self._glm_extract_lines(text)
         if not lines:
+            self._set_glm_ollama_error("输出解析为空")
             return []
         return self._glm_build_boxes(lines)
 
@@ -1370,7 +1548,7 @@ class OCREngine:
             data = Path(image_path).read_bytes()
             return self._windows_ocr_recognize_from_bytes(data)
         except Exception as e:
-            print(f"[OCR] 读取文件失败：{e}")
+            self._emit_log(f"[OCR] 读取文件失败：{e}")
             return []
 
     def _preprocess_windows_input(self, image_input: Union[str, Path, Any, tuple]) -> bytes | None:
@@ -1411,7 +1589,7 @@ class OCREngine:
             lang = "en-US" if str(self.lang).startswith("en") else str(self.lang)
             self._words_segmenter = WordsSegmenter(lang)
         except Exception as e:
-            print(f"[OCR] WordsSegmenter unavailable: {e.__class__.__name__}: {e}")
+            self._emit_log(f"[OCR] WordsSegmenter unavailable: {e.__class__.__name__}: {e}")
             self._words_segmenter = None
         return self._words_segmenter
 
@@ -1648,7 +1826,7 @@ class OCREngine:
                         result = self._windows_ocr.recognize_async(bitmap).get()
                         lines = self._parse_winrt_result(result)
                     except Exception as e:
-                        print(f"[OCR] RecognizeAsync failed: {e}", flush=True)
+                        self._emit_log(f"[OCR] RecognizeAsync failed: {e}")
                         return []
                     
                     # print(f"[OCR Debug] Normal Pass Lines: {len(lines)}", flush=True)
@@ -1768,8 +1946,9 @@ class OCREngine:
                     return lines
                 except Exception as e:
                     import traceback
-                    traceback.print_exc()
-                    print(f"[OCR] Internal Error in _recognize_bytes: {e}")
+                    # Only print full traceback to terminal if absolutely needed for debugging
+                    # traceback.print_exc()
+                    self._emit_log(f"[OCR] Internal Error in _recognize_bytes: {e}")
                     return []
 
             def _text_score(text: str) -> float:
@@ -2371,7 +2550,11 @@ class OCREngine:
             if glm_lines:
                 self.last_backend = "glm_ollama"
                 return glm_lines
-            print("[OCR] GLM-OCR (Ollama) 不可用，回退到 Windows/Paddle/Tesseract")
+            ollama_reason = self._shorten_error(self._glm_ollama_last_error)
+            if ollama_reason:
+                print(f"[OCR] GLM-OCR (Ollama) 不可用，回退到 Windows/Paddle/Tesseract（原因：{ollama_reason}）")
+            else:
+                print("[OCR] GLM-OCR (Ollama) 不可用，回退到 Windows/Paddle/Tesseract")
             backend_key = "auto"
 
         # 策略0: GLM-OCR (Ollama) - 显式指定优先
@@ -2381,7 +2564,11 @@ class OCREngine:
             if glm_lines:
                 self.last_backend = "glm"
                 return glm_lines
-            print("[OCR] GLM-OCR 不可用，回退到 Windows/Paddle/Tesseract")
+            glm_reason = self._shorten_error(self._glm_last_error)
+            if glm_reason:
+                print(f"[OCR] GLM-OCR 不可用，回退到 Windows/Paddle/Tesseract（原因：{glm_reason}）")
+            else:
+                print("[OCR] GLM-OCR 不可用，回退到 Windows/Paddle/Tesseract")
             backend_key = "auto"
 
         # 策略1: 如果明确要求 Tesseract，直接使用

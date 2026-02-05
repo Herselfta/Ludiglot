@@ -200,6 +200,9 @@ class OverlayWindow(QMainWindow):
         if hasattr(sys.stdout, "_ludiglot_tee"):
             return
 
+        import threading
+        stream_lock = threading.Lock()
+
         class _TeeStream:
             def __init__(self, stream, log_path: Path) -> None:
                 self._stream = stream
@@ -207,22 +210,26 @@ class OverlayWindow(QMainWindow):
                 self._ludiglot_tee = True
 
             def write(self, data):
-                try:
-                    self._stream.write(data)
-                except Exception:
-                    pass
-                try:
-                    self._log_path.parent.mkdir(parents=True, exist_ok=True)
-                    with self._log_path.open("a", encoding="utf-8") as f:
-                        f.write(data)
-                except Exception:
-                    pass
+                if not data:
+                    return
+                with stream_lock:
+                    try:
+                        self._stream.write(data)
+                    except Exception:
+                        pass
+                    try:
+                        self._log_path.parent.mkdir(parents=True, exist_ok=True)
+                        with self._log_path.open("a", encoding="utf-8") as f:
+                            f.write(data)
+                    except Exception:
+                        pass
 
             def flush(self):
-                try:
-                    self._stream.flush()
-                except Exception:
-                    pass
+                with stream_lock:
+                    try:
+                        self._stream.flush()
+                    except Exception:
+                        pass
 
         sys.stdout = _TeeStream(sys.stdout, self.log_path)
         sys.stderr = _TeeStream(sys.stderr, self.log_path)
@@ -1712,7 +1719,7 @@ class OverlayWindow(QMainWindow):
             self.signals.log.emit("[OCR] 未找到有效匹配 (Score too low)")
             return
         
-        print(f"[DEBUG] _capture_and_process: Got result. Keys: {list(result.keys())}", flush=True)
+        self.signals.log.emit(f"[DEBUG] _capture_and_process: Got result. Keys: {list(result.keys())}")
         
         # 5. 结果传递
         t_emit_start = time.time()
@@ -1720,11 +1727,11 @@ class OverlayWindow(QMainWindow):
         try:
              import copy
              safe_result = copy.deepcopy(result)
-             print("[DEBUG] _capture_and_process: Emitting safe_result...", flush=True)
+             self.signals.log.emit("[DEBUG] _capture_and_process: Emitting safe_result...")
              self.signals.result.emit(safe_result)
-             print("[DEBUG] _capture_and_process: Result emitted.", flush=True)
+             self.signals.log.emit("[DEBUG] _capture_and_process: Result emitted.")
         except Exception as e:
-             print(f"[ERROR] CRITICAL: Failed to emit result signal: {e}", flush=True)
+             self.signals.log.emit(f"[ERROR] CRITICAL: Failed to emit result signal: {e}")
              self.signals.error.emit(f"Internal Error: Signal Emission Failed: {e}")
              return
         t_emit_end = time.time()
@@ -1733,7 +1740,7 @@ class OverlayWindow(QMainWindow):
         t_total_end = time.time()
         self.signals.log.emit(f"[PERF] ===== 总耗时: {(t_total_end - t_total_start):.3f}s =====")
         self.signals.status.emit("就绪")
-        print("[DEBUG] _capture_and_process: Status emitted. Done.", flush=True)
+        self.signals.log.emit("[DEBUG] _capture_and_process: Status emitted. Done.")
 
 
     def _capture_image(self, selected_region: CaptureRegion | None) -> None:
@@ -2654,7 +2661,7 @@ class OverlayWindow(QMainWindow):
     def _show_result(self, result: Dict[str, Any]) -> None:
         import time
         t_show_start = time.time()
-        print("[DEBUG] _show_result called", flush=True)
+        self.signals.log.emit("[DEBUG] _show_result called")
         self.signals.log.emit(f"[PERF] _show_result 开始")
         
         try:
@@ -2967,15 +2974,24 @@ class OverlayWindow(QMainWindow):
         self._append_log(f"[ERROR] {message}")
 
     def _append_log(self, message: str) -> None:
-        print(message, flush=True)  # 直接输出到终端，满足用户需求
+        # 确保单次 sys.stdout.write 减少多线程交错导致的信息粘连
+        msg_with_newline = message if message.endswith("\n") else message + "\n"
+        try:
+            sys.stdout.write(msg_with_newline)
+            sys.stdout.flush()
+        except Exception:
+            pass
+
         self.log_box.append(message)
-        # 若 stdout 已被 Tee，避免重复写入文件
+        
+        # 若 stdout 已被 Tee，_TeeStream 已经处理过写入文件了
         if hasattr(sys.stdout, "_ludiglot_tee"):
             return
+            
         try:
             self.log_path.parent.mkdir(parents=True, exist_ok=True)
             with self.log_path.open("a", encoding="utf-8") as f:
-                f.write(message + "\n")
+                f.write(msg_with_newline)
         except Exception:
             pass
 
