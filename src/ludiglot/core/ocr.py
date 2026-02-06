@@ -812,21 +812,46 @@ class OCREngine:
                 if m:
                     match_body = m.group(1)
                 target = match_body if match_body is not None else raw_str
-                matches = re.findall(r"\"((?:\\.|[^\"\\])*)\"", target, flags=re.S)
-                if not matches:
-                    matches = re.findall(r"'((?:\\.|[^'\\])*)'", target, flags=re.S)
-                if matches:
-                    out: list[str] = []
-                    for m in matches:
-                        if m.lower() in ("lines", "text"):
-                            continue
-                        try:
-                            # unescape JSON string content
-                            decoded = json.loads(f"\"{m.replace('\"', '\\\"')}\"")
-                        except Exception:
-                            decoded = m
-                        out.extend(_split_text_value(decoded))
-                    _push(out)
+                recovered_direct: list[str] = []
+                if match_body is not None:
+                    # 先尝试将 lines 数组严格反序列化；失败再进行容错恢复
+                    try:
+                        parsed_lines = json.loads(f"[{match_body}]")
+                    except Exception:
+                        parsed_lines = None
+                    if isinstance(parsed_lines, list):
+                        for item in parsed_lines:
+                            if isinstance(item, str):
+                                recovered_direct.extend(_split_text_value(item))
+                            elif isinstance(item, dict) and item.get("text"):
+                                recovered_direct.extend(_split_text_value(item.get("text")))
+                    else:
+                        body = match_body.strip()
+                        # 单条字符串容错：处理未转义内嵌引号，避免丢失引号中的内容
+                        if len(body) >= 2 and body[0] == body[-1] and body[0] in {"\"", "'"}:
+                            inner = body[1:-1]
+                            inner = inner.replace("\\r\\n", "\n").replace("\\n", "\n").replace("\\r", "\n")
+                            inner = inner.replace("\\\"", "\"").replace("\\'", "'")
+                            inner = inner.replace("\\\\", "\\")
+                            recovered_direct.extend(_split_text_value(inner))
+                if recovered_direct:
+                    _push(recovered_direct)
+                else:
+                    matches = re.findall(r"\"((?:\\.|[^\"\\])*)\"", target, flags=re.S)
+                    if not matches:
+                        matches = re.findall(r"'((?:\\.|[^'\\])*)'", target, flags=re.S)
+                    if matches:
+                        out: list[str] = []
+                        for m in matches:
+                            if m.lower() in ("lines", "text"):
+                                continue
+                            try:
+                                # unescape JSON string content
+                                decoded = json.loads(f"\"{m.replace('\"', '\\\"')}\"")
+                            except Exception:
+                                decoded = m
+                            out.extend(_split_text_value(decoded))
+                        _push(out)
             if candidates:
                 candidates.sort(key=_score, reverse=True)
                 return candidates[0]
