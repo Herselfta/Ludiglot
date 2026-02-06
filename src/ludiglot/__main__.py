@@ -845,16 +845,16 @@ def cmd_run(args: argparse.Namespace) -> None:
         engine.prewarm(getattr(cfg, "ocr_backend", "auto"), async_=True)
     except Exception:
         # Pre-warming OCR is optional; ignore errors and continue with lazy initialization
-        pass
+    except Exception as exc:
+        print(f"预热 OCR 引擎失败（已忽略）：{exc}", file=sys.stderr)
     try:
         engine.win_ocr_adaptive = bool(getattr(cfg, "ocr_adaptive", True))
         engine.win_ocr_preprocess = bool(getattr(cfg, "ocr_preprocess", False))
         engine.win_ocr_line_refine = bool(getattr(cfg, "ocr_line_refine", False))
         engine.win_ocr_segment = bool(getattr(cfg, "ocr_word_segment", False))
         engine.win_ocr_multiscale = bool(getattr(cfg, "ocr_multiscale", False))
-    except Exception:
-        # OCR configuration flags are optional; on any error we fall back to the engine's defaults
-        pass
+    except Exception as exc:
+        print(f"OCR 配置失败（已忽略）：{exc}", file=sys.stderr)
     cache_index = None
     if cfg.audio_cache_path and cfg.scan_audio_on_start:
         cache_index = AudioCacheIndex(
