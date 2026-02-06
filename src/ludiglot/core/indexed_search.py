@@ -169,6 +169,7 @@ class IndexedSearchEngine:
             sys.stdout.write(m)
             sys.stdout.flush()
         except Exception:
+            # Best-effort logging: ignore any stdout write/flush errors
             pass
     
     def _init_cache(self):
