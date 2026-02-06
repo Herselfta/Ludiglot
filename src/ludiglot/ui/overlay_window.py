@@ -56,7 +56,7 @@ from ludiglot.core.text_builder import (
     normalize_en,
     save_text_db,
 )
-from ludiglot.core.voice_map import build_voice_map_from_configdb, _resolve_events_for_text_key, collect_all_voice_event_names
+from ludiglot.core.voice_map import build_voice_map_from_configdb, collect_all_voice_event_names
 from ludiglot.core.voice_event_index import VoiceEventIndex
 from ludiglot.core.matcher import TextMatcher
 from ludiglot.core.audio_resolver import resolve_external_wem_root
@@ -111,22 +111,27 @@ class OverlayWindow(QMainWindow):
         try:
             self.engine.win_ocr_line_refine = bool(getattr(config, "ocr_line_refine", False))
         except Exception:
+            # OCR configuration flag is optional; on any error we fall back to the engine's default
             pass
         try:
             self.engine.win_ocr_preprocess = bool(getattr(config, "ocr_preprocess", False))
         except Exception:
+            # OCR configuration flag is optional; on any error we fall back to the engine's default
             pass
         try:
             self.engine.win_ocr_segment = bool(getattr(config, "ocr_word_segment", False))
         except Exception:
+            # OCR configuration flag is optional; on any error we fall back to the engine's default
             pass
         try:
             self.engine.win_ocr_multiscale = bool(getattr(config, "ocr_multiscale", False))
         except Exception:
+            # OCR configuration flag is optional; on any error we fall back to the engine's default
             pass
         try:
             self.engine.win_ocr_adaptive = bool(getattr(config, "ocr_adaptive", True))
         except Exception:
+            # OCR configuration flag is optional; on any error we fall back to the engine's default
             pass
         self.db: Dict[str, Any] = {}
         self.voice_map: Dict[str, list[str]] = {}
@@ -198,7 +203,6 @@ class OverlayWindow(QMainWindow):
         if hasattr(sys.stdout, "_ludiglot_tee"):
             return
 
-        import threading
         stream_lock = threading.Lock()
 
         class _TeeStream:
@@ -214,12 +218,14 @@ class OverlayWindow(QMainWindow):
                     try:
                         self._stream.write(data)
                     except Exception:
+                        # Best-effort output; ignore stream write errors
                         pass
                     try:
                         self._log_path.parent.mkdir(parents=True, exist_ok=True)
                         with self._log_path.open("a", encoding="utf-8") as f:
                             f.write(data)
                     except Exception:
+                        # Best-effort file logging; ignore write errors
                         pass
 
             def flush(self):
@@ -227,6 +233,7 @@ class OverlayWindow(QMainWindow):
                     try:
                         self._stream.flush()
                     except Exception:
+                        # Best-effort flush; ignore stream flush errors
                         pass
 
         sys.stdout = _TeeStream(sys.stdout, self.log_path)
@@ -1572,6 +1579,7 @@ class OverlayWindow(QMainWindow):
         try:
             self.engine.allow_paddle = backend == "paddle"
         except Exception:
+            # OCR backend configuration is optional; on any error we fall back to the engine's default
             pass
         self.signals.status.emit(f"OCR 后端: {backend}")
         self._persist_window_position()
@@ -1927,10 +1935,6 @@ class OverlayWindow(QMainWindow):
             return capture_fullscreen_to_raw() if (bool(getattr(self.config, "ocr_raw_capture", False)) and self.config.ocr_backend in {"windows", "auto"}) else capture_fullscreen_to_image()
         except Exception as e:
             raise e
-
-    def _capture_image(self, selected_region: CaptureRegion | None) -> None:
-        # Legacy method kept only for compatibility if needed, but updated logic uses _capture_image_to_memory
-        pass
             
     def _validate_capture(self, image_path: Path) -> None:
        # No longer used in memory pipeline
@@ -2976,6 +2980,7 @@ class OverlayWindow(QMainWindow):
             sys.stdout.write(msg_with_newline)
             sys.stdout.flush()
         except Exception:
+            # Best-effort console output; ignore stdout write/flush errors
             pass
 
         self.log_box.append(message)
@@ -3457,6 +3462,7 @@ class OverlayWindow(QMainWindow):
             try:
                 dpr = float(dpr_override)
             except Exception:
+                # Invalid capture_force_dpr value; fall back to the screen's devicePixelRatio
                 pass
             print(f"[框选] 命中屏幕: {target_screen.name()} (Index {target_index}), DPR: {dpr} (override)")
         else:

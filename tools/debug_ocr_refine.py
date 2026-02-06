@@ -2,7 +2,7 @@
 import sys
 import io
 from pathlib import Path
-from PIL import Image, ImageOps, ImageFilter
+from PIL import Image, ImageOps
 import numpy as np
 
 # Add src to path

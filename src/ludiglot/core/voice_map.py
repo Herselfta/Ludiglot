@@ -271,6 +271,7 @@ def collect_all_voice_event_names(data_root: Path | None, voice_map: Dict[str, l
              plot_audio = load_plot_audio_map(data_root)
              events.extend([str(v) for v in plot_audio.values() if v])
         except Exception:
+             # Plot audio map is optional; if it fails to load, continue without it
              pass
     
     for items in voice_map.values():

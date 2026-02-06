@@ -5,7 +5,6 @@ import io
 import json
 import os
 import shutil
-import subprocess
 import sys
 import threading
 import urllib.error
@@ -141,6 +140,7 @@ class OCREngine:
                 sys.stdout.write(msg)
                 sys.stdout.flush()
             except Exception:
+                # Best-effort output; ignore stdout write/flush errors
                 pass
         
         # Always invoke callbacks if available
@@ -148,6 +148,7 @@ class OCREngine:
             try:
                 self._log_callback(text)
             except Exception:
+                # Log callback errors should not interrupt OCR; ignore them
                 pass
 
     def _emit_log(self, message: str) -> None:
@@ -164,6 +165,7 @@ class OCREngine:
             try:
                 self._status_callback(message)
             except Exception:
+                # Status callback errors should not interrupt OCR; ignore them
                 pass
 
     def _format_exc(self, exc: Exception | None) -> str:
@@ -752,6 +754,7 @@ class OCREngine:
             try:
                 _try_obj(json.loads(raw_str))
             except Exception:
+                # Attempt full JSON parse; if this fails, continue with incremental decoding
                 pass
 
             decoder = json.JSONDecoder()
@@ -795,6 +798,7 @@ class OCREngine:
                     try:
                         _try_obj(json.loads(unescaped))
                     except Exception:
+                        # Attempt JSON parse on unescaped payload; if this fails, continue with regex extraction
                         pass
                     # try regex extraction on unescaped payload
                     raw_str = unescaped
@@ -958,6 +962,7 @@ class OCREngine:
                 from PIL import ImageOps
                 pil_img = ImageOps.autocontrast(pil_img)
             except Exception:
+                # Autocontrast is an optional enhancement; if it fails, continue with the original image
                 pass
             buf = io.BytesIO()
             pil_img.save(buf, format="PNG")
@@ -1567,6 +1572,7 @@ class OCREngine:
                     try:
                         crop = crop.filter(ImageFilter.UnsharpMask(radius=1, percent=150, threshold=3))
                     except Exception:
+                        # Sharpening is an optional enhancement; if it fails, continue with the unsharpened crop
                         pass
                     cw, ch = crop.size
                     if cw > 0 and ch > 0 and ch < 80:
@@ -1627,6 +1633,7 @@ class OCREngine:
                     try:
                         crop = crop.filter(ImageFilter.UnsharpMask(radius=1, percent=140, threshold=2))
                     except Exception:
+                        # Sharpening is an optional enhancement; if it fails, continue with the unsharpened crop
                         pass
                     cw, ch = crop.size
                     if cw > 0 and ch > 0 and ch < 90:

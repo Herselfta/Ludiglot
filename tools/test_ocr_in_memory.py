@@ -1,7 +1,6 @@
 import sys
 from pathlib import Path
 from PIL import Image
-import numpy as np
 
 # Mocking the environment to run the test
 project_root = Path(__file__).parent.parent / "src"
