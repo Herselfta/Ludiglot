@@ -468,6 +468,28 @@ class TextMatcher:
                      items.append({"ocr": cleaned, "query_key": normalize_en(cleaned), "score": round(score, 3), "text_key": match.get("text_key"), "official_cn": match.get("official_cn")})
                  return {"_multi": True, "items": items, "_query_key": "list", "_ocr_text": "list"}
 
+        # Single-line high-confidence fast path:
+        # 避免短剧情句在 smart-candidate 的后置过滤阶段被误丢弃。
+        if len(line_info) == 1:
+            line = line_info[0]
+            matched_key = line['result'].get('_matched_key', '')
+            key_len = len(line['key'])
+            matched_len = len(matched_key)
+            if (
+                line['score'] >= 0.95
+                and key_len >= 12
+                and matched_len >= max(10, int(key_len * 0.75))
+                and matched_len <= key_len * 2
+            ):
+                self.log(f"[MATCH] 单行高置信快速命中: score={line['score']:.3f}, len={key_len}")
+                result = line['result']
+                result['_score'] = round(line['score'], 3)
+                result['_query_key'] = line['key']
+                result['_ocr_text'] = line['cleaned']
+                result['_ocr_conf'] = round(float(line.get('conf', 0.0)), 3)
+                result['_weighted'] = round(float(line['score']), 3)
+                return result
+
         # Smart Candidates
         smart_result = build_smart_candidates(lines)
         candidates = smart_result.get('candidates', [])
@@ -489,7 +511,8 @@ class TextMatcher:
              if not key: continue
 
              # Filter short garbage
-             if (context_words and len(context_words) >= 6) or (context_len >= 40):
+             # 仅在长上下文中启用，避免误杀“短但完整”的剧情句。
+             if context_len >= 40:
                  if len(text.split()) <= 3: continue
                  if len(key) < 20: continue
 
