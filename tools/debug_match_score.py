@@ -1,6 +1,5 @@
 import sys
 import os
-from pathlib import Path
 
 # Add src to sys.path
 sys.path.append(os.path.abspath("src"))
