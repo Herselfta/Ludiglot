@@ -66,11 +66,13 @@ def setup_system_proxy():
                         no_proxy = no_proxy.replace("<local>", "localhost,127.0.0.1")
                         os.environ["NO_PROXY"] = no_proxy
                 except FileNotFoundError:
+                    # 未配置 ProxyOverride 时不设置 NO_PROXY，保持现有环境配置
                     pass
         except FileNotFoundError:
+            # 找不到 Internet Settings 注册表项时，视为未配置代理，直接跳过
             pass
     except Exception as e:
-        # 静默失败，不影响程序主逻辑
+        # 读取系统代理配置出错时静默失败，不影响程序主逻辑
         pass
 
 if __name__ == "__main__":
