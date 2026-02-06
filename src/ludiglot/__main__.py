@@ -114,24 +114,55 @@ def _check_and_setup_game_data(config_path: Path) -> bool:
         print("❌ 无效输入，请输入 Y、N 或 C")
 
     try:
-        # 重新加载配置（此时可能抛异常，但我们需要它的值）
-        try:
-            cfg = load_config(config_path)
-        except FileNotFoundError:
-            # 如果 load_config 因为 data_root 不存在而失败，尝试创建数据目录
-            project_root = Path(__file__).resolve().parents[2]
-            data_root_str = raw.get("data_root", "data")
-            data_root = Path(data_root_str)
-            if not data_root.is_absolute():
-                data_root = (project_root / data_root).resolve()
+        # 直接从 raw 配置构建最小配置，绕过 load_config 的数据验证
+        # 因为此时数据还未构建，load_config 会因为 find_multitext_paths 失败
+        project_root = Path(__file__).resolve().parents[2]
+        
+        def resolve_path(p: str | None) -> Path | None:
+            if not p: return None
+            pp = Path(p)
+            if pp.is_absolute(): return pp
+            return (project_root / pp).resolve()
+        
+        data_root = resolve_path(raw.get("data_root", "data"))
+        db_path = resolve_path(raw.get("db_path", "game_text_db.json")) or project_root / "game_text_db.json"
+        
+        # 确保数据目录存在
+        if data_root:
             data_root.mkdir(parents=True, exist_ok=True)
-            # 重试加载
-            cfg = load_config(config_path)
+        
+        # 创建最小配置对象
+        from ludiglot.core.config import AppConfig
+        minimal_cfg = AppConfig(
+            data_root=data_root,
+            en_json=None,  # 构建前不需要
+            zh_json=None,  # 构建前不需要
+            db_path=db_path,
+            image_path=project_root / "cache" / "capture.png",
+            use_game_paks=bool(raw.get("use_game_paks")),
+            game_install_root=resolve_path(raw.get("game_install_root")),
+            game_pak_root=resolve_path(raw.get("game_pak_root")),
+            game_data_root=resolve_path(raw.get("game_data_root")) or (data_root / "GameData" if data_root else None),
+            game_audio_root=resolve_path(raw.get("game_audio_root")) or (data_root / "WwiseAudio_Generated" if data_root else None),
+            game_platform=raw.get("game_platform"),
+            game_server=raw.get("game_server"),
+            game_version=raw.get("game_version"),
+            game_languages=raw.get("game_languages"),
+            game_audio_languages=raw.get("game_audio_languages"),
+            aes_archive_url=raw.get("aes_archive_url"),
+            extract_audio=raw.get("extract_audio") if raw.get("extract_audio") is not None else raw.get("extract_game_audio"),
+        )
             
-        update_from_game_paks(cfg, config_path, cfg.db_path, progress=lambda m: print(m))
+        update_from_game_paks(minimal_cfg, config_path, db_path, progress=lambda m: print(m))
+        print("\n✅ 数据库构建成功！")
         return True
     except GamePakUpdateError as exc:
         print(f"\n❌ Pak 更新失败: {exc}")
+        return False
+    except Exception as exc:
+        print(f"\n❌ 构建失败: {exc}")
+        import traceback
+        traceback.print_exc()
         return False
 
 
