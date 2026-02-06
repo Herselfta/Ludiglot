@@ -1933,7 +1933,7 @@ class OverlayWindow(QMainWindow):
         pass
             
     def _validate_capture(self, image_path: Path) -> None:
-       # No loconger used in memory pipeline
+       # No longer used in memory pipeline
        pass
 
 
