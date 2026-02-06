@@ -35,6 +35,15 @@ from ludiglot.core.capture import (
     capture_fullscreen,
     capture_region,
     capture_window,
+    capture_fullscreen_to_raw,
+    capture_region_to_image,
+    capture_region_to_raw,
+    capture_fullscreen_to_image,
+    capture_fullscreen_to_image_native,
+    capture_window_to_raw,
+    capture_window_to_image,
+    capture_window_to_image_native,
+    capture_region_to_image_native,
 )
 from ludiglot.core.config import AppConfig, load_config
 from ludiglot.core.ocr import OCREngine, group_ocr_lines
@@ -47,9 +56,10 @@ from ludiglot.core.text_builder import (
     normalize_en,
     save_text_db,
 )
-from ludiglot.core.voice_map import build_voice_map_from_configdb, _resolve_events_for_text_key
+from ludiglot.core.voice_map import build_voice_map_from_configdb, collect_all_voice_event_names
 from ludiglot.core.voice_event_index import VoiceEventIndex
 from ludiglot.core.matcher import TextMatcher
+from ludiglot.core.audio_resolver import resolve_external_wem_root
 
 
 class PersistentMenu(QMenu):
@@ -91,7 +101,38 @@ class OverlayWindow(QMainWindow):
             lang=config.ocr_lang,
             use_gpu=config.ocr_gpu,
             mode=config.ocr_mode,
+            glm_endpoint=getattr(config, "ocr_glm_endpoint", None),
+            glm_ollama_model=getattr(config, "ocr_glm_ollama_model", None),
+            glm_max_tokens=getattr(config, "ocr_glm_max_tokens", None),
+            glm_timeout=getattr(config, "ocr_glm_timeout", None),
+            allow_paddle=(getattr(config, "ocr_backend", "auto") == "paddle"),
         )
+        self.engine.set_logger(self.signals.log.emit, self.signals.status.emit)
+        try:
+            self.engine.win_ocr_line_refine = bool(getattr(config, "ocr_line_refine", False))
+        except Exception:
+            # OCR configuration flag is optional; on any error we fall back to the engine's default
+            pass
+        try:
+            self.engine.win_ocr_preprocess = bool(getattr(config, "ocr_preprocess", False))
+        except Exception:
+            # OCR configuration flag is optional; on any error we fall back to the engine's default
+            pass
+        try:
+            self.engine.win_ocr_segment = bool(getattr(config, "ocr_word_segment", False))
+        except Exception:
+            # OCR configuration flag is optional; on any error we fall back to the engine's default
+            pass
+        try:
+            self.engine.win_ocr_multiscale = bool(getattr(config, "ocr_multiscale", False))
+        except Exception:
+            # OCR configuration flag is optional; on any error we fall back to the engine's default
+            pass
+        try:
+            self.engine.win_ocr_adaptive = bool(getattr(config, "ocr_adaptive", True))
+        except Exception:
+            # OCR configuration flag is optional; on any error we fall back to the engine's default
+            pass
         self.db: Dict[str, Any] = {}
         self.voice_map: Dict[str, list[str]] = {}
         self.voice_event_index: VoiceEventIndex | None = None
@@ -162,6 +203,8 @@ class OverlayWindow(QMainWindow):
         if hasattr(sys.stdout, "_ludiglot_tee"):
             return
 
+        stream_lock = threading.Lock()
+
         class _TeeStream:
             def __init__(self, stream, log_path: Path) -> None:
                 self._stream = stream
@@ -169,22 +212,29 @@ class OverlayWindow(QMainWindow):
                 self._ludiglot_tee = True
 
             def write(self, data):
-                try:
-                    self._stream.write(data)
-                except Exception:
-                    pass
-                try:
-                    self._log_path.parent.mkdir(parents=True, exist_ok=True)
-                    with self._log_path.open("a", encoding="utf-8") as f:
-                        f.write(data)
-                except Exception:
-                    pass
+                if not data:
+                    return
+                with stream_lock:
+                    try:
+                        self._stream.write(data)
+                    except Exception:
+                        # Best-effort output; ignore stream write errors
+                        pass
+                    try:
+                        self._log_path.parent.mkdir(parents=True, exist_ok=True)
+                        with self._log_path.open("a", encoding="utf-8") as f:
+                            f.write(data)
+                    except Exception:
+                        # Best-effort file logging; ignore write errors
+                        pass
 
             def flush(self):
-                try:
-                    self._stream.flush()
-                except Exception:
-                    pass
+                with stream_lock:
+                    try:
+                        self._stream.flush()
+                    except Exception:
+                        # Best-effort flush; ignore stream flush errors
+                        pass
 
         sys.stdout = _TeeStream(sys.stdout, self.log_path)
         sys.stderr = _TeeStream(sys.stderr, self.log_path)
@@ -419,9 +469,10 @@ class OverlayWindow(QMainWindow):
 
         self.ocr_backend_group = QActionGroup(self)
         self.ocr_backend_group.setExclusive(True)
-        for backend in ["auto", "paddle", "tesseract"]:
+        for backend in ["auto", "glm_ollama", "paddle", "tesseract"]:
             display_name = {
                 "auto": "Auto (Prefer WinOCR)",
+                "glm_ollama": "GLM-OCR (Ollama)",
                 "paddle": "Paddle",
                 "tesseract": "Tesseract"
             }.get(backend, backend)
@@ -1234,6 +1285,7 @@ class OverlayWindow(QMainWindow):
         try:
             self.signals.status.emit("预加载 OCR 模型…")
             self.engine.initialize()
+            self.engine.prewarm(self.config.ocr_backend, async_=True)
             self.signals.log.emit("[OCR] 模型已预加载")
         except Exception as exc:
             self.signals.log.emit(f"[OCR] 预加载失败: {exc}")
@@ -1252,47 +1304,12 @@ class OverlayWindow(QMainWindow):
             except Exception as exc:
                 self.signals.error.emit(f"音频缓存扫描失败: {exc}")
 
-        self._external_wem_root = self._resolve_external_wem_root()
+        self._external_wem_root = resolve_external_wem_root(self.config)
 
         self._init_matcher()
 
         self.signals.status.emit("就绪")
         self.resources_loaded.emit()
-
-    def _resolve_external_wem_root(self) -> Path | None:
-        if not self.config.audio_wem_root:
-            return None
-        try:
-            base = self.config.audio_wem_root.parents[1]  # Media/zh -> WwiseAudio_Generated
-            candidate = base / "WwiseExternalSource"
-            if candidate.exists():
-                return candidate
-            candidate = base / "WwiseExternalSource" / "zh"
-            if candidate.exists():
-                return candidate
-        except Exception:
-            return None
-        return None
-
-    def _collect_voice_event_names(self) -> list[str]:
-        events: list[str] = []
-        if self.config.data_root:
-            try:
-                plot_audio = load_plot_audio_map(self.config.data_root)
-                events.extend([str(v) for v in plot_audio.values() if v])
-            except Exception:
-                pass
-        for items in self.voice_map.values():
-            if isinstance(items, list):
-                events.extend([str(v) for v in items if v])
-        dedup: list[str] = []
-        seen = set()
-        for ev in events:
-            if ev in seen:
-                continue
-            seen.add(ev)
-            dedup.append(ev)
-        return dedup
 
     def _build_voice_event_index(self) -> None:
         if not self.config.audio_bnk_root and not self.config.audio_txtp_cache:
@@ -1300,7 +1317,9 @@ class OverlayWindow(QMainWindow):
         cache_path = None
         if self.config.audio_cache_path:
             cache_path = self.config.audio_cache_path / "voice_event_index.json"
-        extra_names = self._collect_voice_event_names()
+        
+        extra_names = collect_all_voice_event_names(self.config.data_root, self.voice_map)
+        
         index = VoiceEventIndex(
             bnk_root=self.config.audio_bnk_root,
             txtp_root=self.config.audio_txtp_cache,
@@ -1557,6 +1576,11 @@ class OverlayWindow(QMainWindow):
 
     def _on_backend_changed(self, backend: str) -> None:
         self.config.ocr_backend = backend
+        try:
+            self.engine.allow_paddle = backend == "paddle"
+        except Exception:
+            # OCR backend configuration is optional; on any error we fall back to the engine's default
+            pass
         self.signals.status.emit(f"OCR 后端: {backend}")
         self._persist_window_position()
 
@@ -1591,44 +1615,68 @@ class OverlayWindow(QMainWindow):
         
         self.signals.status.emit("捕获中…")
         
-        # 1. 截图
+        # 1. 截图 (In-Memory)
         t_capture_start = time.time()
+        img_obj = None
         try:
-            self._capture_image(selected_region)
+            img_obj = self._capture_image_to_memory(selected_region)
         except Exception as exc:
             self.signals.error.emit(f"截图失败: {exc}")
             return
         t_capture_end = time.time()
         self.signals.log.emit(f"[PERF] 截图耗时: {(t_capture_end - t_capture_start):.3f}s")
 
-        # 过小截图会触发 OCR 底层异常，直接跳过并提示
-        try:
-            from PIL import Image
-
-            img = Image.open(self.config.image_path)
-            if img.width < 8 or img.height < 8:
+        # 过小截图检查
+        if img_obj:
+            if isinstance(img_obj, tuple) and len(img_obj) == 3:
+                _, img_w, img_h = img_obj
+            else:
+                img_w = img_obj.width
+                img_h = img_obj.height
+            if img_w < 8 or img_h < 8:
                 self.signals.log.emit(
-                    f"[CAPTURE] 选区过小({img.width}x{img.height})，已跳过"
+                    f"[CAPTURE] 选区过小({img_w}x{img_h})，已跳过"
                 )
                 self.signals.status.emit("选区过小，已取消")
                 return
-        except Exception:
-            pass
 
-        # 2. OCR识别
+        # 2. OCR识别 (In-Memory Pipeline)
         t_ocr_start = time.time()
         try:
-            image_path = self._preprocess_image(self.config.image_path)
-            if self.config.ocr_backend == "windows":
-                box_lines = self.engine.recognize_with_boxes(image_path)
-            elif self.config.ocr_backend == "tesseract":
-                tess_path = getattr(self, "_tesseract_image_path", image_path)
-                box_lines = self.engine.recognize_with_boxes(tess_path, prefer_tesseract=True)
+            # Skip disk-based preprocessing
+            # image_path = self._preprocess_image(self.config.image_path)
+
+            if getattr(self.config, "ocr_debug_dump_input", False):
+                try:
+                    debug_dir = self.config.image_path.parent if getattr(self.config, "image_path", None) else Path.cwd()
+                    debug_dir.mkdir(parents=True, exist_ok=True)
+                    debug_path = debug_dir / "last_ocr_input.png"
+                    if isinstance(img_obj, tuple) and len(img_obj) == 3:
+                        raw_bytes, w, h = img_obj
+                        from PIL import Image
+                        img = Image.frombytes("RGBA", (int(w), int(h)), raw_bytes, "raw", "BGRA")
+                        img.save(debug_path)
+                    else:
+                        img_obj.save(debug_path)
+                    self.signals.log.emit(f"[OCR] 输入已保存: {debug_path}")
+                except Exception as exc:
+                    self.signals.log.emit(f"[OCR] 保存输入失败: {exc}")
+            
+            # Pass PIL Image directly
+            if self.config.ocr_backend == "tesseract":
+                # Tesseract usually prefers path, but our updated engine handles object
+                box_lines = self.engine.recognize_with_boxes(
+                    img_obj, prefer_tesseract=True, backend=self.config.ocr_backend
+                )
             else:
-                box_lines = self.engine.recognize_with_boxes(image_path)
+                box_lines = self.engine.recognize_with_boxes(
+                    img_obj, backend=self.config.ocr_backend
+                )
+                
             backend = getattr(self.engine, "last_backend", None) or "paddle"
             backend_label = {
                 "windows": "WindowsOCR",
+                "glm_ollama": "GLM-OCR (Ollama)",
                 "tesseract": "Tesseract",
                 "paddle": "PaddleOCR",
             }.get(backend, backend)
@@ -1637,6 +1685,8 @@ class OverlayWindow(QMainWindow):
             self.signals.log.emit(f"[PERF] OCR识别耗时: {(t_ocr_end - t_ocr_start):.3f}s")
         except Exception as exc:
             self.signals.error.emit(f"OCR 失败: {exc}")
+            import traceback
+            traceback.print_exc()
             return
 
         if not box_lines:
@@ -1649,8 +1699,7 @@ class OverlayWindow(QMainWindow):
         lines = group_ocr_lines(box_lines, lang=self.engine.lang)
         if self.config.ocr_backend == "auto" and self._needs_tesseract(lines):
             self.signals.log.emit("[OCR] 质量较差，切换 Tesseract")
-            tess_path = getattr(self, "_tesseract_image_path", image_path)
-            box_lines = self.engine.recognize_with_boxes(tess_path, prefer_tesseract=True)
+            box_lines = self.engine.recognize_with_boxes(img_obj, prefer_tesseract=True)
             lines = group_ocr_lines(box_lines, lang=self.engine.lang)
         t_group_end = time.time()
         self.signals.log.emit(f"[PERF] 文本分组耗时: {(t_group_end - t_group_start):.3f}s")
@@ -1671,10 +1720,10 @@ class OverlayWindow(QMainWindow):
         
         if result is None:
             self.signals.status.emit("未提取到可用文本")
-            self.signals.log.emit("[OCR] 归一化后为空，跳过")
+            self.signals.log.emit("[OCR] 未找到有效匹配 (Score too low)")
             return
         
-        print(f"[DEBUG] _capture_and_process: Got result. Keys: {list(result.keys())}", flush=True)
+        self.signals.log.emit(f"[DEBUG] _capture_and_process: Got result. Keys: {list(result.keys())}")
         
         # 5. 结果传递
         t_emit_start = time.time()
@@ -1682,11 +1731,11 @@ class OverlayWindow(QMainWindow):
         try:
              import copy
              safe_result = copy.deepcopy(result)
-             print("[DEBUG] _capture_and_process: Emitting safe_result...", flush=True)
+             self.signals.log.emit("[DEBUG] _capture_and_process: Emitting safe_result...")
              self.signals.result.emit(safe_result)
-             print("[DEBUG] _capture_and_process: Result emitted.", flush=True)
+             self.signals.log.emit("[DEBUG] _capture_and_process: Result emitted.")
         except Exception as e:
-             print(f"[ERROR] CRITICAL: Failed to emit result signal: {e}", flush=True)
+             self.signals.log.emit(f"[ERROR] CRITICAL: Failed to emit result signal: {e}")
              self.signals.error.emit(f"Internal Error: Signal Emission Failed: {e}")
              return
         t_emit_end = time.time()
@@ -1695,7 +1744,7 @@ class OverlayWindow(QMainWindow):
         t_total_end = time.time()
         self.signals.log.emit(f"[PERF] ===== 总耗时: {(t_total_end - t_total_start):.3f}s =====")
         self.signals.status.emit("就绪")
-        print("[DEBUG] _capture_and_process: Status emitted. Done.", flush=True)
+        self.signals.log.emit("[DEBUG] _capture_and_process: Status emitted. Done.")
 
 
     def _capture_image(self, selected_region: CaptureRegion | None) -> None:
@@ -1798,23 +1847,98 @@ class OverlayWindow(QMainWindow):
             self.signals.log.emit(f"[PRE] 预处理失败: {e}")
             return image_path
 
+    def _capture_image_to_memory(self, selected_region: CaptureRegion | None) -> Any:
+        try:
+            win_input = str(getattr(self.config, "ocr_windows_input", "auto")).lower()
+            use_raw = (
+                bool(getattr(self.config, "ocr_raw_capture", False))
+                and self.config.ocr_backend in {"windows", "auto"}
+                and win_input != "png"
+            )
+            backend = str(getattr(self.config, "capture_backend", "mss")).lower()
+
+            def _to_raw(img_obj):
+                try:
+                    from PIL import Image
+                    if isinstance(img_obj, tuple) and len(img_obj) == 3:
+                        return img_obj
+                    if isinstance(img_obj, Image.Image):
+                        if img_obj.mode != "RGBA":
+                            img_obj = img_obj.convert("RGBA")
+                        raw = img_obj.tobytes("raw", "BGRA")
+                        return (raw, img_obj.width, img_obj.height)
+                except Exception:
+                    return img_obj
+                return img_obj
+            if selected_region is not None:
+                if backend == "winrt":
+                    img = capture_region_to_image_native(selected_region)
+                    return _to_raw(img) if use_raw else img
+                return capture_region_to_raw(selected_region) if use_raw else capture_region_to_image(selected_region)
+                
+            if self.config.capture_mode == "window":
+                if not self.config.window_title:
+                     raise RuntimeError("capture_mode=window 需要 window_title")
+                if backend == "winrt":
+                    img = capture_window_to_image_native(self.config.window_title)
+                    return _to_raw(img) if use_raw else img
+                return capture_window_to_raw(self.config.window_title) if use_raw else capture_window_to_image(self.config.window_title)
+                
+            if self.config.capture_mode == "region":
+                if not self.config.capture_region:
+                    raise RuntimeError("capture_mode=region 需要 capture_region")
+                region = CaptureRegion(
+                    left=int(self.config.capture_region["left"]),
+                    top=int(self.config.capture_region["top"]),
+                    width=int(self.config.capture_region["width"]),
+                    height=int(self.config.capture_region["height"]),
+                )
+                if backend == "winrt":
+                    img = capture_region_to_image_native(region)
+                    return _to_raw(img) if use_raw else img
+                return capture_region_to_raw(region) if use_raw else capture_region_to_image(region)
+                
+            if self.config.capture_mode == "image":
+                # For replay mode, read from disk
+                if self.config.image_path.exists():
+                    from PIL import Image
+                    img = Image.open(self.config.image_path)
+                    if use_raw:
+                        try:
+                            if img.mode != "RGBA":
+                                img = img.convert("RGBA")
+                            raw = img.tobytes("raw", "BGRA")
+                            return (raw, img.width, img.height)
+                        except Exception:
+                            return img
+                    return img
+                # Fallback if file missing
+                if backend == "winrt":
+                    img = capture_fullscreen_to_image_native()
+                    return _to_raw(img) if use_raw else img
+                return capture_fullscreen_to_raw() if use_raw else capture_fullscreen_to_image()
+                
+            if self.config.capture_mode == "select":
+                region = self._select_region()
+                if region is None:
+                    raise RuntimeError("未选择区域")
+                if backend == "winrt":
+                    img = capture_region_to_image_native(region)
+                    return _to_raw(img) if use_raw else img
+                return capture_region_to_raw(region) if use_raw else capture_region_to_image(region)
+                
+            raise RuntimeError(f"未知 capture_mode: {self.config.capture_mode}")
+        except CaptureError:
+            if backend == "winrt":
+                img = capture_fullscreen_to_image_native()
+                return _to_raw(img) if use_raw else img
+            return capture_fullscreen_to_raw() if (bool(getattr(self.config, "ocr_raw_capture", False)) and self.config.ocr_backend in {"windows", "auto"}) else capture_fullscreen_to_image()
+        except Exception as e:
+            raise e
+            
     def _validate_capture(self, image_path: Path) -> None:
-        try:
-            from PIL import Image
-        except Exception:
-            return
-        try:
-            if not image_path.exists():
-                return
-            if image_path.stat().st_size < 20000:
-                self.signals.log.emit("[CAPTURE] 图片过小，回退全屏截图")
-                capture_fullscreen(image_path)
-            img = Image.open(image_path)
-            if img.width < 300 or img.height < 60:
-                self.signals.log.emit("[CAPTURE] 尺寸异常，回退全屏截图")
-                capture_fullscreen(image_path)
-        except Exception as exc:
-            self.signals.log.emit(f"[CAPTURE] 校验失败: {exc}")
+       # No longer used in memory pipeline
+       pass
 
 
     def _build_candidates(self, lines: list[tuple[str, float]]) -> list[tuple[str, float]]:
@@ -2537,7 +2661,7 @@ class OverlayWindow(QMainWindow):
     def _show_result(self, result: Dict[str, Any]) -> None:
         import time
         t_show_start = time.time()
-        print("[DEBUG] _show_result called", flush=True)
+        self.signals.log.emit("[DEBUG] _show_result called")
         self.signals.log.emit(f"[PERF] _show_result 开始")
         
         try:
@@ -2850,15 +2974,25 @@ class OverlayWindow(QMainWindow):
         self._append_log(f"[ERROR] {message}")
 
     def _append_log(self, message: str) -> None:
-        print(message, flush=True)  # 直接输出到终端，满足用户需求
+        # 确保单次 sys.stdout.write 减少多线程交错导致的信息粘连
+        msg_with_newline = message if message.endswith("\n") else message + "\n"
+        try:
+            sys.stdout.write(msg_with_newline)
+            sys.stdout.flush()
+        except Exception:
+            # Best-effort console output; ignore stdout write/flush errors
+            pass
+
         self.log_box.append(message)
-        # 若 stdout 已被 Tee，避免重复写入文件
+        
+        # 若 stdout 已被 Tee，_TeeStream 已经处理过写入文件了
         if hasattr(sys.stdout, "_ludiglot_tee"):
             return
+            
         try:
             self.log_path.parent.mkdir(parents=True, exist_ok=True)
             with self.log_path.open("a", encoding="utf-8") as f:
-                f.write(message + "\n")
+                f.write(msg_with_newline)
         except Exception:
             pass
 
@@ -3261,6 +3395,10 @@ class OverlayWindow(QMainWindow):
                 "font_cn": self.current_font_cn
             }
             
+            # 持久化 OCR 选择（避免 UI 与配置脱节）
+            raw["ocr_backend"] = getattr(self.config, "ocr_backend", "auto")
+            raw["ocr_mode"] = getattr(self.config, "ocr_mode", "auto")
+            
             # 同时也更新顶层字段以保持兼容性
             raw["font_en"] = self.current_font_en
             raw["font_cn"] = self.current_font_cn
@@ -3319,7 +3457,16 @@ class OverlayWindow(QMainWindow):
                 break
         
         dpr = target_screen.devicePixelRatio()
-        print(f"[框选] 命中屏幕: {target_screen.name()} (Index {target_index}), DPR: {dpr}")
+        dpr_override = getattr(self.config, "capture_force_dpr", None)
+        if dpr_override is not None:
+            try:
+                dpr = float(dpr_override)
+            except Exception:
+                # Invalid capture_force_dpr value; fall back to the screen's devicePixelRatio
+                pass
+            print(f"[框选] 命中屏幕: {target_screen.name()} (Index {target_index}), DPR: {dpr} (override)")
+        else:
+            print(f"[框选] 命中屏幕: {target_screen.name()} (Index {target_index}), DPR: {dpr}")
 
         # 2. 计算相对于该屏幕左上角的**逻辑偏移**
         screen_geo = target_screen.geometry()

@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from ludiglot.infrastructure.proxy_setup import setup_system_proxy
+setup_system_proxy()
+
+
 import argparse
 import json
 import sys
@@ -827,7 +831,30 @@ def cmd_run(args: argparse.Namespace) -> None:
         capture_fullscreen(cfg.image_path)
 
     db = _load_db(cfg.db_path)
-    engine = OCREngine(lang=cfg.ocr_lang, use_gpu=cfg.ocr_gpu, mode=cfg.ocr_mode)
+    engine = OCREngine(
+        lang=cfg.ocr_lang,
+        use_gpu=cfg.ocr_gpu,
+        mode=cfg.ocr_mode,
+        glm_endpoint=getattr(cfg, "ocr_glm_endpoint", None),
+        glm_ollama_model=getattr(cfg, "ocr_glm_ollama_model", None),
+        glm_max_tokens=getattr(cfg, "ocr_glm_max_tokens", None),
+        glm_timeout=getattr(cfg, "ocr_glm_timeout", None),
+        allow_paddle=(getattr(cfg, "ocr_backend", "auto") == "paddle"),
+    )
+    try:
+        engine.prewarm(getattr(cfg, "ocr_backend", "auto"), async_=True)
+    except Exception:
+        # Pre-warming OCR is optional; ignore errors and continue with lazy initialization
+    except Exception as exc:
+        print(f"预热 OCR 引擎失败（已忽略）：{exc}", file=sys.stderr)
+    try:
+        engine.win_ocr_adaptive = bool(getattr(cfg, "ocr_adaptive", True))
+        engine.win_ocr_preprocess = bool(getattr(cfg, "ocr_preprocess", False))
+        engine.win_ocr_line_refine = bool(getattr(cfg, "ocr_line_refine", False))
+        engine.win_ocr_segment = bool(getattr(cfg, "ocr_word_segment", False))
+        engine.win_ocr_multiscale = bool(getattr(cfg, "ocr_multiscale", False))
+    except Exception as exc:
+        print(f"OCR 配置失败（已忽略）：{exc}", file=sys.stderr)
     cache_index = None
     if cfg.audio_cache_path and cfg.scan_audio_on_start:
         cache_index = AudioCacheIndex(
@@ -838,7 +865,7 @@ def cmd_run(args: argparse.Namespace) -> None:
         cache_index.load()
         cache_index.scan()
     wwiser_path = cfg.wwiser_path or default_wwiser_path()
-    lines = engine.recognize_with_confidence(cfg.image_path)
+    lines = engine.recognize_with_confidence(cfg.image_path, backend=cfg.ocr_backend)
 
     if not lines:
         print("OCR 未识别到文本")

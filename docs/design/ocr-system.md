@@ -31,6 +31,9 @@ Ludiglot 使用以下后端优先级策略（`ocr_backend: "auto"` 模式）：
 3. Tesseract (兜底)   → 开源方案，最大兼容性
 ```
 
+如果指定 `ocr_backend: "glm"`，将优先调用 **GLM-OCR (本地 Transformers)**，失败后回退到 Windows/Paddle/Tesseract。
+
+
 ### 自动回退机制
 
 - 如果 Windows OCR 不可用（依赖缺失或无语言包）→ 自动使用 PaddleOCR
@@ -56,6 +59,7 @@ pip install winrt-Windows.Foundation.Collections
 pip install -e .
 ```
 
+
 ### 系统要求
 
 - **操作系统**：Windows 10 (1809+) 或 Windows 11
@@ -79,7 +83,10 @@ pip install -e .
 {
   "ocr_lang": "en",           // OCR 语言（en/zh/ja等）
   "ocr_mode": "auto",         // OCR 模式：auto/gpu/cpu
-  "ocr_backend": "auto"       // 后端选择：auto/paddle/tesseract
+  "ocr_backend": "glm_ollama",// 后端选择：auto/paddle/tesseract/glm_ollama
+  "ocr_glm_ollama_model": "glm-ocr:latest",
+  "ocr_glm_timeout": 30,
+  "ocr_glm_endpoint": "http://127.0.0.1:11434"
 }
 ```
 
@@ -88,6 +95,14 @@ pip install -e .
 - `"auto"` (推荐)：Windows OCR → PaddleOCR → Tesseract
 - `"paddle"`：仅使用 PaddleOCR（需要 GPU 或 CPU 推理）
 - `"tesseract"`：仅使用 Tesseract（开源方案）
+- `"glm_ollama"`：使用 GLM-OCR（通过 Ollama 服务），失败自动回退
+
+### GLM-OCR (Ollama) 快速启用
+
+1. 安装 Ollama
+2. 拉取模型：`ollama pull glm-ocr`
+3. 确保服务可访问（默认 `http://127.0.0.1:11434`）
+4. 配置 `ocr_backend: "glm_ollama"`
 
 ## 日志示例
 
@@ -125,8 +140,18 @@ pip install -e .
 | **Windows OCR** | < 0.1s | ~0.05s | ~50 MB | 95%+ |
 | PaddleOCR (CPU) | ~2s | ~0.3s | ~500 MB | 90%+ |
 | Tesseract | ~0.5s | ~0.2s | ~100 MB | 85%+ |
+| **GLM-OCR (Ollama)** | ~2s | ~1-2s | 取决于 Ollama | 98%+ |
 
-> 📊 **结论**：Windows OCR 在速度和内存占用上具有显著优势，尤其适合实时游戏场景。
+> 📊 **结论**：Windows OCR 在速度和内存占用上具有显著优势，尤其适合实时游戏场景。GLM-OCR (Ollama) 提供最高的识别准确率，适合对质量要求高的场景。
+
+### GLM-OCR 环境变量
+
+| 变量名 | 默认值 | 说明 |
+|--------|--------|------|
+| `LUDIGLOT_GLM_OCR_MAX_TOKENS` | `128` | 最大生成 token 数 |
+| `LUDIGLOT_GLM_OCR_ENDPOINT` | - | Ollama 服务地址 |
+| `LUDIGLOT_GLM_OCR_OLLAMA_MODEL` | `glm-ocr:latest` | Ollama 模型标签 |
+| `LUDIGLOT_GLM_OCR_TIMEOUT` | `30` | 请求超时（秒） |
 
 ## 故障排除
 

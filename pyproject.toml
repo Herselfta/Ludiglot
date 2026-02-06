@@ -23,8 +23,8 @@ dependencies = [
 
 [project.optional-dependencies]
 paddle = [
-	"paddleocr>=2.7.0.3",
-	"paddlepaddle>=3.0",
+	"paddleocr>=3.4.0",
+	"paddlepaddle>=3.2,<3.3",
 ]
 
 [project.scripts]

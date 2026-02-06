@@ -150,7 +150,7 @@ class IndexedSearchEngine:
         self.key_set = set(db_keys)  # 快速精确匹配
         
         # 构建各类索引
-        print(f"[INDEX] 正在构建搜索索引... (总键数: {len(db_keys)})")
+        self._atomic_print(f"[INDEX] 正在构建搜索索引... (总键数: {len(db_keys)})")
         
         self.length_index = LengthBucketIndex(db_keys)
         self.prefix_index = PrefixIndex(db_keys)
@@ -160,7 +160,17 @@ class IndexedSearchEngine:
         self._search_cache_size = 1000
         self._init_cache()
         
-        print(f"[INDEX] 索引构建完成")
+        self._atomic_print(f"[INDEX] 索引构建完成")
+
+    def _atomic_print(self, msg: str) -> None:
+        import sys
+        try:
+            m = msg if msg.endswith("\n") else msg + "\n"
+            sys.stdout.write(m)
+            sys.stdout.flush()
+        except Exception:
+            # Best-effort logging: ignore any stdout write/flush errors
+            pass
     
     def _init_cache(self):
         """初始化缓存（使用装饰器会有问题，手动管理）"""
