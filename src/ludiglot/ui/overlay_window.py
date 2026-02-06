@@ -4,11 +4,12 @@ import json
 import shutil
 import sys
 import threading
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 from PyQt6.QtCore import Qt, pyqtSignal, QObject, QTimer, QPoint, QRect, QSize, QAbstractNativeEventFilter, QEvent, QEventLoop
-from PyQt6.QtGui import QFont, QTextOption, QColor, QPalette, QAction, QActionGroup, QCursor, QPainter, QPixmap, QGuiApplication
+from PyQt6.QtGui import QFont, QTextOption, QColor, QPalette, QAction, QActionGroup, QCursor, QPainter, QPixmap, QGuiApplication, QImage
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
     QLabel, QPushButton, QTextEdit, QMenu, QComboBox, QSizePolicy,
@@ -79,6 +80,15 @@ class UiSignals(QObject):
     result = pyqtSignal(dict)
     error = pyqtSignal(str)
     log = pyqtSignal(str)
+
+
+@dataclass
+class DesktopSnapshot:
+    image: Any
+    left: int
+    top: int
+    monitors: list[dict]
+    screen_pixmaps: list[QPixmap]
 
 
 class OverlayWindow(QMainWindow):
@@ -1588,11 +1598,22 @@ class OverlayWindow(QMainWindow):
         import time
         t_start = time.time()
         selected_region: CaptureRegion | None = None
+        snapshot: DesktopSnapshot | None = None
         self.signals.log.emit("[HOTKEY] 触发捕获")
         if force_select or self.config.capture_mode == "select":
+            self.signals.status.emit("冻结屏幕…")
+            t_snap_start = time.time()
+            try:
+                snapshot = self._capture_desktop_snapshot()
+            except Exception as exc:
+                snapshot = None
+                self.signals.log.emit(f"[CAPTURE] 预截图失败，回退实时框选: {exc}")
+            t_snap_end = time.time()
+            if snapshot is not None:
+                self.signals.log.emit(f"[PERF] 屏幕快照耗时: {(t_snap_end - t_snap_start):.3f}s")
             self.signals.status.emit("请选择 OCR 区域…")
             t_select_start = time.time()
-            selected_region = self._select_region()
+            selected_region = self._select_region(snapshot)
             t_select_end = time.time()
             self.signals.log.emit(f"[PERF] 区域选择耗时: {(t_select_end - t_select_start):.3f}s")
             if selected_region is None:
@@ -1600,12 +1621,12 @@ class OverlayWindow(QMainWindow):
                 return
         threading.Thread(
             target=self._capture_and_process,
-            args=(selected_region,),
+            args=(selected_region, snapshot),
             daemon=True,
         ).start()
         self.signals.log.emit(f"[PERF] 异步调用总耗时: {(time.time() - t_start):.3f}s")
 
-    def _capture_and_process(self, selected_region: CaptureRegion | None) -> None:
+    def _capture_and_process(self, selected_region: CaptureRegion | None, snapshot: DesktopSnapshot | None) -> None:
         import time
         t_total_start = time.time()
         
@@ -1615,7 +1636,7 @@ class OverlayWindow(QMainWindow):
         t_capture_start = time.time()
         img_obj = None
         try:
-            img_obj = self._capture_image_to_memory(selected_region)
+            img_obj = self._capture_image_to_memory(selected_region, snapshot)
         except Exception as exc:
             self.signals.error.emit(f"截图失败: {exc}")
             return
@@ -1771,6 +1792,18 @@ class OverlayWindow(QMainWindow):
                 capture_fullscreen(self.config.image_path)
                 return
             if self.config.capture_mode == "select":
+                snapshot = None
+                try:
+                    snapshot = self._capture_desktop_snapshot()
+                except Exception:
+                    snapshot = None
+                if snapshot is not None:
+                    region = self._select_region(snapshot)
+                    if region is None:
+                        raise RuntimeError("未选择区域")
+                    img = self._crop_snapshot(snapshot, region)
+                    img.save(self.config.image_path)
+                    return
                 region = self._select_region()
                 if region is None:
                     raise RuntimeError("未选择区域")
@@ -1843,7 +1876,7 @@ class OverlayWindow(QMainWindow):
             self.signals.log.emit(f"[PRE] 预处理失败: {e}")
             return image_path
 
-    def _capture_image_to_memory(self, selected_region: CaptureRegion | None) -> Any:
+    def _capture_image_to_memory(self, selected_region: CaptureRegion | None, snapshot: DesktopSnapshot | None = None) -> Any:
         try:
             win_input = str(getattr(self.config, "ocr_windows_input", "auto")).lower()
             use_raw = (
@@ -1867,6 +1900,9 @@ class OverlayWindow(QMainWindow):
                     return img_obj
                 return img_obj
             if selected_region is not None:
+                if snapshot is not None:
+                    img = self._crop_snapshot(snapshot, selected_region)
+                    return _to_raw(img) if use_raw else img
                 if backend == "winrt":
                     img = capture_region_to_image_native(selected_region)
                     return _to_raw(img) if use_raw else img
@@ -1915,6 +1951,17 @@ class OverlayWindow(QMainWindow):
                 return capture_fullscreen_to_raw() if use_raw else capture_fullscreen_to_image()
                 
             if self.config.capture_mode == "select":
+                if snapshot is None:
+                    try:
+                        snapshot = self._capture_desktop_snapshot()
+                    except Exception:
+                        snapshot = None
+                if snapshot is not None:
+                    region = self._select_region(snapshot)
+                    if region is None:
+                        raise RuntimeError("未选择区域")
+                    img = self._crop_snapshot(snapshot, region)
+                    return _to_raw(img) if use_raw else img
                 region = self._select_region()
                 if region is None:
                     raise RuntimeError("未选择区域")
@@ -3430,9 +3477,117 @@ class OverlayWindow(QMainWindow):
                 pass
         self._win_hotkey_ids = []
 
-    def _select_region(self) -> CaptureRegion | None:
+    def _pil_to_pixmap(self, img, target_size: QSize | None = None) -> QPixmap:
+        try:
+            from PIL import Image
+        except Exception as exc:
+            raise RuntimeError("缺少 Pillow，无法生成截图背景") from exc
+        if not isinstance(img, Image.Image):
+            raise RuntimeError("无效截图对象，无法生成截图背景")
+        if img.mode != "RGBA":
+            img = img.convert("RGBA")
+        data = img.tobytes("raw", "RGBA")
+        qimage = QImage(data, img.width, img.height, QImage.Format.Format_RGBA8888)
+        qimage = qimage.copy()
+        pixmap = QPixmap.fromImage(qimage)
+        if target_size and (pixmap.width() != target_size.width() or pixmap.height() != target_size.height()):
+            pixmap = pixmap.scaled(
+                target_size,
+                Qt.AspectRatioMode.IgnoreAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+        return pixmap
+
+    def _build_screen_pixmaps(self, desktop_img, monitors: list[dict]) -> list[QPixmap]:
+        screens = QGuiApplication.screens()
+        if not monitors:
+            return []
+        all_mon = monitors[0]
+        pixmaps: list[QPixmap] = []
+        for idx, screen in enumerate(screens):
+            if idx + 1 < len(monitors):
+                mon = monitors[idx + 1]
+                crop_left = mon["left"] - all_mon["left"]
+                crop_top = mon["top"] - all_mon["top"]
+                crop_right = crop_left + mon["width"]
+                crop_bottom = crop_top + mon["height"]
+                crop = desktop_img.crop((crop_left, crop_top, crop_right, crop_bottom))
+            else:
+                crop = desktop_img
+            pixmaps.append(self._pil_to_pixmap(crop, screen.geometry().size()))
+        return pixmaps
+
+    def _capture_desktop_snapshot(self) -> DesktopSnapshot:
+        backend = str(getattr(self.config, "capture_backend", "mss")).lower()
+        try:
+            import mss
+        except Exception as exc:
+            raise RuntimeError("缺少 mss，无法截图") from exc
+        try:
+            from PIL import Image, ImageGrab
+        except Exception as exc:
+            raise RuntimeError("缺少 Pillow，无法截图") from exc
+
+        with mss.mss() as sct:
+            monitors = sct.monitors
+            if not monitors:
+                raise RuntimeError("未检测到屏幕")
+            all_mon = monitors[0]
+            if backend == "winrt":
+                bbox = (
+                    all_mon["left"],
+                    all_mon["top"],
+                    all_mon["left"] + all_mon["width"],
+                    all_mon["top"] + all_mon["height"],
+                )
+                img = ImageGrab.grab(bbox=bbox, all_screens=True)
+            else:
+                sct_img = sct.grab(all_mon)
+                img = Image.frombytes("RGB", sct_img.size, sct_img.bgra, "raw", "BGRX")
+
+        # If capture backend scales differently, normalize monitor coords to image space
+        scale_x = img.width / max(all_mon["width"], 1)
+        scale_y = img.height / max(all_mon["height"], 1)
+        if abs(scale_x - 1.0) > 0.01 or abs(scale_y - 1.0) > 0.01:
+            scaled_monitors: list[dict] = []
+            for mon in monitors:
+                scaled_monitors.append(
+                    {
+                        "left": int(mon["left"] * scale_x),
+                        "top": int(mon["top"] * scale_y),
+                        "width": int(mon["width"] * scale_x),
+                        "height": int(mon["height"] * scale_y),
+                    }
+                )
+            monitors = scaled_monitors
+            all_mon = monitors[0]
+
+        screen_pixmaps = self._build_screen_pixmaps(img, monitors)
+        return DesktopSnapshot(
+            image=img,
+            left=int(all_mon["left"]),
+            top=int(all_mon["top"]),
+            monitors=monitors,
+            screen_pixmaps=screen_pixmaps,
+        )
+
+    def _crop_snapshot(self, snapshot: DesktopSnapshot, region: CaptureRegion):
+        img = snapshot.image
+        left = region.left - snapshot.left
+        top = region.top - snapshot.top
+        right = left + region.width
+        bottom = top + region.height
+
+        # Clamp to desktop bounds to avoid errors
+        left = max(0, min(left, img.width))
+        top = max(0, min(top, img.height))
+        right = max(left, min(right, img.width))
+        bottom = max(top, min(bottom, img.height))
+        return img.crop((left, top, right, bottom))
+
+    def _select_region(self, snapshot: DesktopSnapshot | None = None) -> CaptureRegion | None:
         """选择屏幕区域并转换为物理像素坐标（适配多屏不同DPI）。"""
-        selector = ScreenSelector()
+        selector = ScreenSelector(snapshot.screen_pixmaps if snapshot else None)
         rect = selector.get_region()
         
         if rect is None or rect.width() <= 0 or rect.height() <= 0:
@@ -3451,7 +3606,38 @@ class OverlayWindow(QMainWindow):
                 target_screen = screen
                 target_index = idx
                 break
-        
+
+        if snapshot is not None:
+            try:
+                if snapshot.monitors and target_index + 1 < len(snapshot.monitors):
+                    mss_mon = snapshot.monitors[target_index + 1]
+                    screen_geo = target_screen.geometry()
+                    scale_x = mss_mon["width"] / max(screen_geo.width(), 1)
+                    scale_y = mss_mon["height"] / max(screen_geo.height(), 1)
+
+                    rel_x = rect.x() - screen_geo.x()
+                    rel_y = rect.y() - screen_geo.y()
+
+                    phy_x_local = int(rel_x * scale_x)
+                    phy_y_local = int(rel_y * scale_y)
+                    phy_w = int(rect.width() * scale_x)
+                    phy_h = int(rect.height() * scale_y)
+
+                    final_x = int(mss_mon["left"] + phy_x_local)
+                    final_y = int(mss_mon["top"] + phy_y_local)
+
+                    print(f"[框选] 快照映射: MSS Monitor[{target_index+1}]={mss_mon}")
+                    print(f"[框选] 快照缩放: sx={scale_x:.3f}, sy={scale_y:.3f}")
+                    print(f"[框选] 最终物理坐标: ({final_x}, {final_y}, {phy_w}, {phy_h})")
+                    return CaptureRegion(
+                        left=final_x,
+                        top=final_y,
+                        width=phy_w,
+                        height=phy_h,
+                    )
+            except Exception as e:
+                print(f"[框选] 快照映射失败: {e}，回退到实时坐标映射")
+
         dpr = target_screen.devicePixelRatio()
         dpr_override = getattr(self.config, "capture_force_dpr", None)
         if dpr_override is not None:
@@ -3577,9 +3763,10 @@ class ScreenOverlay(QWidget):
     """单屏幕覆盖窗口"""
     region_selected = pyqtSignal(QRect)
 
-    def __init__(self, screen, parent=None):
+    def __init__(self, screen, background: QPixmap | None = None, parent=None):
         super().__init__(parent)
         self._screen = screen
+        self._background = background
         self.setGeometry(screen.geometry()) # 逻辑坐标
         
         self.setWindowFlags(
@@ -3598,6 +3785,8 @@ class ScreenOverlay(QWidget):
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
         if not painter.isActive(): return
+        if self._background is not None:
+            painter.drawPixmap(self.rect(), self._background)
         painter.fillRect(self.rect(), QColor(0, 0, 0, 80)) # 半透明遮罩
         painter.end()
 
@@ -3634,7 +3823,7 @@ class ScreenSelector(QObject):
     """全屏选区控制器，管理多屏覆盖窗口。"""
     region_selected_signal = pyqtSignal(QRect)
 
-    def __init__(self) -> None:
+    def __init__(self, backgrounds: list[QPixmap] | None = None) -> None:
         super().__init__()
         self._overlays: list[ScreenOverlay] = []
         self._selected_rect: QRect | None = None
@@ -3642,8 +3831,9 @@ class ScreenSelector(QObject):
 
         # 为每个屏幕创建一个覆盖窗口
         screens = QGuiApplication.screens()
-        for screen in screens:
-            overlay = ScreenOverlay(screen)
+        for idx, screen in enumerate(screens):
+            bg = backgrounds[idx] if backgrounds and idx < len(backgrounds) else None
+            overlay = ScreenOverlay(screen, bg)
             overlay.region_selected.connect(self._on_region_selected)
             self._overlays.append(overlay)
             
