@@ -833,7 +833,7 @@ class OCREngine:
         lines = [line.strip() for line in cleaned.splitlines() if line.strip()]
         cleaned_lines: list[str] = []
         for line in lines:
-            normalized = re.sub(r"^([-*•]\\s+|\\d+[\\.)]\\s+)", "", line).strip()
+            normalized = re.sub(r"^([-*•]\s+|\d+[.)]\s+)", "", line).strip()
             if normalized:
                 cleaned_lines.append(normalized)
         cleaned_lines = _filter_prompt_lines(cleaned_lines)
