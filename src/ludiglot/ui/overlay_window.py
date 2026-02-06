@@ -2766,10 +2766,40 @@ class OverlayWindow(QMainWindow):
                 self.signals.log.emit(f"[MATCH] 官方原文: {official_en}")
                 self.signals.log.emit(f"[MATCH] 官方译文: {official_cn}")
                 self.signals.log.emit(f"[QUERY] OCR识别: {result.get('_ocr_text')} -> {result.get('_query_key')}")
-                self.signals.log.emit("[WINDOW] 禁用音频控件（多条目模式）")
-                # 多条目模式不支持音频播放
-                self.play_pause_btn.setEnabled(False)
-                self.audio_slider.setEnabled(False)
+                # 检查是否有高置信度音频
+                has_audio = result.get('_has_audio', False)
+                if has_audio:
+                    # 查找第一个有音频的条目
+                    audio_item = None
+                    for item in items:
+                        if item.get('score', 0) >= 0.85 and item.get('text_key'):
+                            # 尝试查找音频
+                            text_key = item['text_key']
+                            event_name = f"vo_{text_key}"
+                            if self.voice_map and event_name in self.voice_map:
+                                audio_item = item
+                                break
+                            elif self.voice_event_index:
+                                events = self.voice_event_index.find_candidates(text_key=text_key, voice_event=event_name, limit=1)
+                                if events:
+                                    audio_item = item
+                                    break
+                    
+                    if audio_item:
+                        self.signals.log.emit(f"[WINDOW] 多条目模式：检测到高置信度音频，启用音频控件")
+                        self.play_pause_btn.setEnabled(True)
+                        self.audio_slider.setEnabled(True)
+                        # 尝试播放音频
+                        self._play_audio_for_key(audio_item['text_key'])
+                    else:
+                        self.signals.log.emit("[WINDOW] 禁用音频控件（多条目模式，无可用音频）")
+                        self.play_pause_btn.setEnabled(False)
+                        self.audio_slider.setEnabled(False)
+                else:
+                    self.signals.log.emit("[WINDOW] 禁用音频控件（多条目模式）")
+                    # 多条目模式默认不支持音频播放
+                    self.play_pause_btn.setEnabled(False)
+                    self.audio_slider.setEnabled(False)
                 self.signals.log.emit("[WINDOW] 准备显示多条目结果")
                 
                 t5 = time.time()

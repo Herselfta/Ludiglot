@@ -282,29 +282,88 @@ class TextMatcher:
                 self.log(f"[FILTER] 保留条目: {cleaned} (score={line['score']:.3f}, len={key_len})")
         
         if len(multi_items) >= 3:
-            # Construct multi result
-            self.log(f"[MATCH] 检测到 {len(multi_items)} 个独立条目")
-            items = []
+            # 去重：合并匹配到同一个 text_key 的多个 OCR 行
+            text_key_map = {}  # text_key -> list of line info
             for line in multi_items:
                 matches = line['result'].get("matches")
                 match = matches[0] if matches else {}
+                text_key = match.get("text_key")
+                if not text_key:
+                    continue
+                if text_key not in text_key_map:
+                    text_key_map[text_key] = []
+                text_key_map[text_key].append(line)
+            
+            # 构建去重后的条目列表
+            self.log(f"[MATCH] 检测到 {len(multi_items)} 个匹配，去重后 {len(text_key_map)} 个独立条目")
+            
+            # 如果去重后只剩1-2个条目，说明是同一条长文本被OCR拆分了
+            if len(text_key_map) <= 2:
+                # 合并为单条目处理
+                merged_lines = []
+                for text_key, lines in text_key_map.items():
+                    # 合并所有OCR文本
+                    merged_ocr = " ".join(l['cleaned'] for l in lines)
+                    merged_key = normalize_en(merged_ocr)
+                    # 使用第一个匹配结果（它们都指向同一个条目）
+                    first_line = lines[0]
+                    merged_lines.append({
+                        'cleaned': merged_ocr,
+                        'key': merged_key,
+                        'score': max(l['score'] for l in lines),  # 使用最高分
+                        'result': first_line['result'],
+                        'conf': max(l['conf'] for l in lines),
+                    })
+                
+                # 如果只有一个条目，返回单条目结果
+                if len(merged_lines) == 1:
+                    line = merged_lines[0]
+                    self.log(f"[MATCH] OCR拆分检测：多行匹配同一条目，合并为单条目")
+                    result = line['result']
+                    result['_score'] = round(line['score'], 3)
+                    result['_query_key'] = line['key']
+                    result['_ocr_text'] = line['cleaned']
+                    return result
+            
+            # 构建多条目结果
+            items = []
+            has_high_confidence_audio = False
+            
+            for text_key, lines in text_key_map.items():
+                # 合并同一条目的多个OCR行
+                merged_ocr = " ".join(l['cleaned'] for l in lines)
+                merged_key = normalize_en(merged_ocr)
+                max_score = max(l['score'] for l in lines)
+                
+                first_line = lines[0]
+                matches = first_line['result'].get("matches")
+                match = matches[0] if matches else {}
                 official_en = match.get("official_en") or ""
                 official_cn = match.get("official_cn") or ""
-                time_suffix = line.get('time_suffix')
+                
+                # 处理时间后缀
+                time_suffix = first_line.get('time_suffix')
                 if time_suffix:
                     official_en = f"{official_en} {time_suffix}" if official_en and not official_en.rstrip().endswith(':') else f"{official_en}: {time_suffix}" if official_en else ""
                     official_cn = f"{official_cn} {time_suffix}" if official_cn and not official_cn.rstrip().endswith('：') else f"{official_cn}：{time_suffix}" if official_cn else ""
                 
+                # 检测是否有高置信度音频
+                if max_score >= 0.85 and self._has_voice_match(first_line['result']):
+                    has_high_confidence_audio = True
+                
                 items.append({
-                    "ocr": line['cleaned'],
-                    "query_key": line['key'],
-                    "score": round(line['score'], 3),
-                    "text_key": match.get("text_key"),
+                    "ocr": merged_ocr,
+                    "query_key": merged_key,
+                    "score": round(max_score, 3),
+                    "text_key": text_key,
                     "official_en": official_en,
                     "official_cn": official_cn,
                 })
+            
             return {
-                "_multi": True, "items": items,
+                "_multi": True, 
+                "items": items,
+                "_has_audio": has_high_confidence_audio,  # 新增标记
                 "_official_en": " / ".join([i.get("official_en") or i.get("ocr") or "" for i in items if i.get("official_en") or i.get("ocr")]),
                 "_official_cn": " / ".join([i.get("official_cn") or "" for i in items if i.get("official_cn")]),
                 "_query_key": " / ".join([i["query_key"] for i in items if i.get("query_key")]),
