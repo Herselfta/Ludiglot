@@ -448,10 +448,23 @@ if (Test-Path $fmodelCliPath) {
         Write-Host " 已从本地开发环境复制" -ForegroundColor Green
     } else {
         Write-Host " 未找到" -ForegroundColor Yellow
-        Write-Host "    为了安全起见，需要手动下载 FModelCLI.exe" -ForegroundColor Cyan
-        Write-Host "    请访问: https://github.com/Herselfta/FModelCLI/releases" -ForegroundColor Cyan
-        Write-Host "    下载最新版本的 FModelCLI.exe 到 tools/ 目录" -ForegroundColor Cyan
-        Write-Host "    验证文件签名/校验和后再使用" -ForegroundColor Cyan
+        $answer = Read-Host "    是否从 GitHub Releases 下载 FModelCLI.exe? (y/N)"
+        if ($answer -eq "y" -or $answer -eq "Y") {
+            try {
+                $url = "https://github.com/Herselfta/FModelCLI/releases/latest/download/FModelCLI.exe"
+                New-Item -ItemType Directory -Force -Path "tools" | Out-Null
+                & curl.exe -L $url -o $fmodelCliPath
+                if (Test-Path $fmodelCliPath) {
+                    Write-Host "    下载完成: $fmodelCliPath" -ForegroundColor Green
+                } else {
+                    Write-Host "    下载失败，请手动下载" -ForegroundColor Yellow
+                }
+            } catch {
+                Write-Host "    下载失败，请手动下载" -ForegroundColor Yellow
+            }
+        } else {
+            Write-Host "    已跳过下载 (可稍后在工具菜单触发或手动下载)" -ForegroundColor Gray
+        }
     }
 }
 Write-Host "    说明：FModelCLI 会自动下载 vgmstream 等依赖到 tools/.data/" -ForegroundColor Gray
