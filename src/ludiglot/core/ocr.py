@@ -806,9 +806,9 @@ class OCREngine:
                 if m:
                     match_body = m.group(1)
                 target = match_body if match_body is not None else raw_str
-                matches = re.findall(r"\"((?:\\\\.|[^\"\\\\])*)\"", target, flags=re.S)
+                matches = re.findall(r"\"((?:\\.|[^\"\\])*)\"", target, flags=re.S)
                 if not matches:
-                    matches = re.findall(r"'((?:\\\\.|[^'\\\\])*)'", target, flags=re.S)
+                    matches = re.findall(r"'((?:\\.|[^'\\])*)'", target, flags=re.S)
                 if matches:
                     out: list[str] = []
                     for m in matches:
