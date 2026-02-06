@@ -1238,12 +1238,7 @@ class OCREngine:
                             inv_img = ImageOps.invert(pil_img)
                             
                             # Convert back to raw bytes for efficiency if using raw path
-                            arr = None
-                            if HAS_NUMPY and np is not None:
-                                arr = np.array(inv_img)
-                                # Ensure BGRA for consistency with raw path if needed, or just use PNG path
-                                # Windows OCR is fine with SoftwareBitmap from PNG usually
-                            
+                            # (currently we use PNG bytes directly)
                             buf = io.BytesIO()
                             inv_img.save(buf, format='PNG')
                             inv_bytes = buf.getvalue()
