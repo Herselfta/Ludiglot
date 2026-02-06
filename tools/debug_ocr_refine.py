@@ -52,7 +52,7 @@ def main():
     # Darken image to reduce blooming of white text
     # Gamma correction: new = (old/255) ^ gamma * 255
     # Gamma > 1 makess shadows/midtones darker.
-    gamma = 0.5 # Wait. Text is white, BG is dark.
+    # Wait. Text is white, BG is dark.
     # If we want to erode white text, we need to make bright pixels darker?
     # No, usually OCR works on black text on white bg (internally). 
     # Windows OCR handles inversion.
