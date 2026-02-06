@@ -194,10 +194,6 @@ class OverlayWindow(QMainWindow):
         self._sync_config_timer.timeout.connect(self._persist_window_position)
         self._sync_config_timer.start(5000)  # 每 5 秒同步一次
 
-    def closeEvent(self, event) -> None:
-        print("[DEBUG] OverlayWindow closeEvent", flush=True)
-        super().closeEvent(event)
-
     def _install_terminal_logger(self) -> None:
         """将 stdout/stderr/Qt警告 同步写入日志文件。"""
         if hasattr(sys.stdout, "_ludiglot_tee"):

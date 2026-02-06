@@ -251,7 +251,13 @@ class AudioResolver:
                 try:
                     # 调用 wwiser
                     wwiser_path = default_wwiser_path() 
-                    txtp_file = generate_txtp_for_bnk(bnk_file, event_name or str(hash_value), txtp_cache)
+                    txtp_file = generate_txtp_for_bnk(
+                        bnk_file,
+                        wem_root,
+                        txtp_cache,
+                        wwiser_path,
+                        event_name or str(hash_value)
+                    )
                 except Exception as e:
                     log(f"[ERROR] BNK 处理失败: {e}")
             
@@ -261,7 +267,7 @@ class AudioResolver:
                     wav_path = convert_txtp_to_wav(
                         txtp_file,
                         self.config.vgmstream_path,
-                        self.config.audio_cache_path
+                        self.config.audio_cache_path / f"{hash_value}.wav"
                     )
                     if wav_path:
                         # 重命名为 hash.wav
