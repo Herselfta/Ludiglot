@@ -149,17 +149,27 @@ class AudioResolver:
                     return AudioResolution(h, name, 'wem')
         
         # === 第三优先级：使用数据库提供的hash（跳过慢速扫描） ===
-        if db_hash:
+        if db_hash is not None:
+            try:
+                db_hash_int = int(db_hash)
+            except (TypeError, ValueError):
+                db_hash_int = None
+
+            fallback_event = self.strategy._parse_event_name(db_event) if db_event else None
+            if not fallback_event:
+                fallback_event = final_candidates[0][0] if final_candidates else "unknown_from_db"
+
             # 检查缓存中是否有这个hash
-            if index and index.find(int(db_hash)):
-                return AudioResolution(int(db_hash), final_candidates[0][0] if final_candidates else "unknown", 'cache')
+            if db_hash_int is not None and index and index.find(db_hash_int):
+                return AudioResolution(db_hash_int, fallback_event, 'cache')
             # 检查直接路径
-            if wem_root:
-                direct = wem_root / f"{db_hash}.wem"
+            if db_hash_int is not None and wem_root:
+                direct = wem_root / f"{db_hash_int}.wem"
                 if direct.exists():
-                    return AudioResolution(int(db_hash), final_candidates[0][0] if final_candidates else "unknown", 'wem')
+                    return AudioResolution(db_hash_int, fallback_event, 'wem')
             # 返回db_hash作为后备，让播放器尝试
-            return AudioResolution(int(db_hash), final_candidates[0][0] if final_candidates else "unknown_from_db", "db_fallback")
+            if db_hash_int is not None:
+                return AudioResolution(db_hash_int, fallback_event, "db_fallback")
         
         # === 最后：返回计算的hash（跳过BNK扫描，太慢） ===
         if final_candidates:
@@ -243,21 +253,27 @@ class AudioResolver:
                 bnk_file = find_bnk_for_event(bnk_root, event_name)
             
             # 如果没找到 BNK 但有 event_name，或许可以直接搜现有的 txtp?
-            txtp_file = None
-            if event_name:
-                 txtp_file = find_txtp_for_event(txtp_cache, event_name)
+            txtp_file: Path | None = None
+            if event_name and txtp_cache:
+                txtp_file = find_txtp_for_event(txtp_cache, event_name, hash_value)
             
-            if not txtp_file and bnk_file and txtp_cache:
+            if not txtp_file and bnk_file and txtp_cache and wem_root:
                 try:
                     # 调用 wwiser
                     wwiser_path = default_wwiser_path() 
-                    txtp_file = generate_txtp_for_bnk(
+                    generated_txtp = generate_txtp_for_bnk(
                         bnk_file,
                         wem_root,
                         txtp_cache,
                         wwiser_path,
-                        event_name or str(hash_value)
+                        log_callback=log,
                     )
+                    if generated_txtp:
+                        # 优先按 event/hash 精确匹配，否则取第一个可用 TXTP。
+                        if event_name:
+                            txtp_file = find_txtp_for_event(txtp_cache, event_name, hash_value)
+                        if not txtp_file:
+                            txtp_file = generated_txtp[0]
                 except Exception as e:
                     log(f"[ERROR] BNK 处理失败: {e}")
             
