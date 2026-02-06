@@ -50,7 +50,6 @@ def main():
 
     # 3. 2.0x Bicubic + Gamma 1.5 (Thinning)
     # Darken image to reduce blooming of white text
-    arr = np.array(img_bc.convert('RGB'))
     # Gamma correction: new = (old/255) ^ gamma * 255
     # Gamma > 1 makess shadows/midtones darker.
     gamma = 0.5 # Wait. Text is white, BG is dark.
