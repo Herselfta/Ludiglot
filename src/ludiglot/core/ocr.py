@@ -1926,7 +1926,6 @@ class OCREngine:
         if isinstance(image_input, tuple) and len(image_input) == 3:
             raw_tuple = image_input
             # Keep a lazy fallback for non-Windows backends
-            image_input = image_input  # preserve for now
 
         # 策略0: GLM-OCR (Ollama) - 显式指定
         if backend_key == "glm_ollama":
