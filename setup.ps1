@@ -99,7 +99,15 @@ if ($pyLauncher) {
     } catch {}
 }
 if (-not $systemPython) {
-    $knownPython = "C:\\Users\\Administrator\\AppData\\Local\\Programs\\Python\\Python312\\python.exe"
+    # 使用 PATH 中的 python 作为兜底
+    $pythonCmd = Get-Command python -ErrorAction SilentlyContinue
+    if ($pythonCmd) {
+        $systemPython = $pythonCmd.Source
+    }
+}
+if (-not $systemPython) {
+    # 使用当前用户的本地安装路径作为最终兜底
+    $knownPython = Join-Path $env:LOCALAPPDATA "Programs\\Python\\Python312\\python.exe"
     if (Test-Path $knownPython) {
         $systemPython = $knownPython
     }
