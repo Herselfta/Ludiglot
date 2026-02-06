@@ -207,8 +207,9 @@ class AudioResolver:
             try:
                 wav_path = convert_single_wem_to_wav(
                     wem_file, 
+                    self.config.vgmstream_path,
                     self.config.audio_cache_path,
-                    self.config.vgmstream_path
+                    output_name=str(hash_value),
                 )
                 if wav_path:
                     # 为了兼容 AudioCacheIndex (只识别数字文件名)，重命名为 hash.wav

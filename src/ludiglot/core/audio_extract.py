@@ -194,9 +194,11 @@ def find_bnk_for_event(bnk_root: Path, event_name: str | None) -> Path | None:
 
 def convert_single_wem_to_wav(
     wem_path: Path,
-    vgmstream_path: Path,
+    vgmstream_path: Path | None,
     output_dir: Path,
     output_name: str | None = None,
+    *,
+    skip_existing: bool = True,
 ) -> Path:
     """Convert a single WEM file to WAV format.
     
@@ -206,14 +208,17 @@ def convert_single_wem_to_wav(
         output_dir: Directory to save the output WAV file
         output_name: Optional custom output filename (without extension).
                      If not provided, uses wem_path.stem
+        skip_existing: If True, reuse a non-empty existing WAV.
     """
     if not wem_path.exists():
         raise FileNotFoundError(f"WEM 不存在: {wem_path}")
-    if not vgmstream_path.exists():
+    if vgmstream_path is None or not vgmstream_path.exists():
         raise FileNotFoundError(f"vgmstream-cli.exe 不存在: {vgmstream_path}")
     output_dir.mkdir(parents=True, exist_ok=True)
     stem = output_name if output_name else wem_path.stem
     out_path = output_dir / f"{stem}.wav"
+    if skip_existing and out_path.exists() and out_path.stat().st_size > 0:
+        return out_path
     cmd = [str(vgmstream_path), "-o", str(out_path), str(wem_path)]
     subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     return out_path
@@ -320,30 +325,6 @@ def convert_txtp_to_wav(
     cmd = [str(vgmstream_path), "-o", str(output_path), str(txtp_path)]
     subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     return output_path
-
-
-def convert_single_wem_to_wav(
-    wem_file: Path, 
-    output_dir: Path, 
-    vgmstream_path: Path | None = None
-) -> Path | None:
-    if not vgmstream_path or not vgmstream_path.exists():
-        return None
-        
-    output_dir.mkdir(parents=True, exist_ok=True)
-    out_path = output_dir / f"{wem_file.stem}.wav"
-    
-    if out_path.exists() and out_path.stat().st_size > 0:
-        return out_path
-        
-    cmd = [str(vgmstream_path), "-o", str(out_path), str(wem_file)]
-    try:
-        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        if out_path.exists():
-            return out_path
-    except subprocess.CalledProcessError:
-        pass
-    return None
 
 
 def convert_wem_to_wav(
