@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import time
 from pathlib import Path
 from typing import NamedTuple, Any, List
@@ -274,14 +275,49 @@ class AudioResolver:
                 txtp_cache.mkdir(exist_ok=True)
             
             # 使用 wwiser 生成 txtp
+            active_event = event_name
             bnk_file = None
-            if event_name:
-                bnk_file = find_bnk_for_event(bnk_root, event_name)
+            if active_event:
+                bnk_file = find_bnk_for_event(bnk_root, active_event)
             
             # 如果没找到 BNK 但有 event_name，或许可以直接搜现有的 txtp?
             txtp_file: Path | None = None
-            if event_name and txtp_cache:
-                txtp_file = find_txtp_for_event(txtp_cache, event_name, hash_value)
+            if active_event and txtp_cache:
+                txtp_file = find_txtp_for_event(txtp_cache, active_event, hash_value)
+
+            # 兜底：当数据库给出的 event 无法直接命中资源时，尝试从索引做低阈值候选回退。
+            if not txtp_file and not bnk_file and text_key and self._voice_event_index:
+                for min_score in (0.45, 0.40, 0.35):
+                    fallback_events = self._voice_event_index.find_candidates(
+                        text_key=text_key,
+                        voice_event=active_event,
+                        limit=12,
+                        min_score=min_score,
+                    )
+                    key_nums = set(re.findall(r"\d+", f"{text_key or ''} {active_event or ''}"))
+                    if key_nums:
+                        fallback_events = sorted(
+                            fallback_events,
+                            key=lambda ev: 0 if key_nums.intersection(re.findall(r"\d+", ev)) else 1,
+                        )
+                    for candidate_event in fallback_events:
+                        if candidate_event == active_event:
+                            continue
+                        candidate_bnk = find_bnk_for_event(bnk_root, candidate_event)
+                        candidate_txtp = (
+                            find_txtp_for_event(txtp_cache, candidate_event, hash_value)
+                            if txtp_cache
+                            else None
+                        )
+                        if not candidate_bnk and not candidate_txtp:
+                            continue
+                        active_event = candidate_event
+                        bnk_file = candidate_bnk
+                        txtp_file = candidate_txtp
+                        log(f"[AUDIO] 事件回退命中: {active_event} (min_score={min_score:.2f})")
+                        break
+                    if bnk_file or txtp_file:
+                        break
             
             if not txtp_file and bnk_file and txtp_cache and wem_root:
                 try:
@@ -296,8 +332,8 @@ class AudioResolver:
                     )
                     if generated_txtp:
                         # 优先按 event/hash 精确匹配，否则取第一个可用 TXTP。
-                        if event_name:
-                            txtp_file = find_txtp_for_event(txtp_cache, event_name, hash_value)
+                        if active_event:
+                            txtp_file = find_txtp_for_event(txtp_cache, active_event, hash_value)
                         if not txtp_file:
                             txtp_file = generated_txtp[0]
                 except Exception as e:
