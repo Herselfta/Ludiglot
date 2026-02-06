@@ -1048,59 +1048,85 @@ class OverlayWindow(QMainWindow):
         }
         return weight_map.get(self.current_font_weight, "600")
     
-    def _apply_font_settings(self):
-        """应用字体设置到所有UI元素"""
-        from PyQt6.QtGui import QFont, QTextCursor
-        
-        # 内容字体（原文和翻译）
-        en_font = QFont()
-        en_font.setFamily(self.current_font_en)
+    def _build_content_fonts(self) -> tuple[QFont, QFont]:
+        """构造英文/中文内容字体对象。"""
         # 确保字号合法（避免Qt警告）- 处理所有边界情况
         try:
             size_val = int(self.current_font_size) if self.current_font_size else 13
         except (ValueError, TypeError):
             size_val = 13
         valid_size = max(8, min(72, size_val))
-        en_font.setPointSize(valid_size)
-        
-        # 设置字重
+
         weight_map = {
             "Light": QFont.Weight.Light,
             "Normal": QFont.Weight.Normal,
             "SemiBold": QFont.Weight.DemiBold,
             "Bold": QFont.Weight.Bold,
-            "Heavy": QFont.Weight.Black
+            "Heavy": QFont.Weight.Black,
         }
-        en_font.setWeight(weight_map.get(self.current_font_weight, QFont.Weight.DemiBold))
-        
-        # 设置字距
+        weight_val = weight_map.get(self.current_font_weight, QFont.Weight.DemiBold)
+
+        en_font = QFont()
+        en_font.setFamily(self.current_font_en)
+        en_font.setPointSize(valid_size)
+        en_font.setWeight(weight_val)
         en_font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, self.current_letter_spacing)
-        
-        # 中文字体
+
         cn_font = QFont()
         cn_font.setFamily(self.current_font_cn)
         cn_font.setPointSize(valid_size)
-        cn_font.setWeight(weight_map.get(self.current_font_weight, QFont.Weight.DemiBold))
+        cn_font.setWeight(weight_val)
         cn_font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, self.current_letter_spacing)
-        
-        # 应用到标签
+        return en_font, cn_font
+
+    def _apply_text_document_style(self, editor: QTextEdit, font: QFont, force_char_style: bool) -> None:
+        """对 QTextEdit 文档应用实时字体/行距设置。"""
+        from PyQt6.QtGui import QTextCursor, QTextBlockFormat, QTextCharFormat
+
+        doc = editor.document()
+        doc.setDefaultFont(font)
+
+        cursor = QTextCursor(doc)
+        cursor.select(QTextCursor.SelectionType.Document)
+
+        # 纯文本模式下强制覆盖字符格式，避免被 QSS 固定字号/字重锁死
+        if force_char_style:
+            char_fmt = QTextCharFormat()
+            char_fmt.setFont(font)
+            cursor.mergeCharFormat(char_fmt)
+
+        # Qt 对 QTextEdit 的 QSS line-height 支持有限，改用文档块格式保证实时生效
+        try:
+            line_height_ratio = float(self.current_line_spacing)
+        except (TypeError, ValueError):
+            line_height_ratio = 1.2
+        line_height_percent = int(max(50, min(400, line_height_ratio * 100)))
+        block_fmt = QTextBlockFormat()
+        try:
+            # PyQt6 expects int for heightType; enum object may raise TypeError.
+            height_type = int(QTextBlockFormat.LineHeightTypes.ProportionalHeight.value)
+        except Exception:
+            height_type = int(getattr(QTextBlockFormat, "ProportionalHeight", 1))
+        block_fmt.setLineHeight(float(line_height_percent), height_type)
+        cursor.mergeBlockFormat(block_fmt)
+
+    def _apply_font_settings(self):
+        """应用字体设置到所有UI元素"""
+        en_font, cn_font = self._build_content_fonts()
+
+        # 应用到控件默认字体
         self.source_label.setFont(en_font)
         self.cn_label.setFont(cn_font)
-        
-        # 设置行距（通过CSS）
-        line_height_percent = int(self.current_line_spacing * 100)
-        text_edit_style = f"""
-            QTextEdit {{
-                line-height: {line_height_percent}%;
-            }}
-        """
-        self.source_label.setStyleSheet(text_edit_style)
-        self.cn_label.setStyleSheet(text_edit_style)
 
-        # 重新渲染富文本以应用字号/字重/行距
+        # 重新渲染文本，并对文档层强制应用字体/行距
         self._refresh_text_display()
-        
-        self.signals.log.emit(f"[UI] 字体设置：{self.current_font_size}pt, {self.current_font_weight}, 字距{self.current_letter_spacing}px, 行距{self.current_line_spacing:.1f}x")
+        self._apply_text_document_style(self.source_label, en_font, force_char_style=not self._last_en_is_html)
+        self._apply_text_document_style(self.cn_label, cn_font, force_char_style=not self._last_cn_is_html)
+
+        self.signals.log.emit(
+            f"[UI] 字体设置：{self.current_font_size}pt, {self.current_font_weight}, "
+            f"字距{self.current_letter_spacing}px, 行距{self.current_line_spacing:.1f}x"
+        )
 
     def _refresh_text_display(self) -> None:
         if self._last_en_raw is not None:
@@ -1604,6 +1630,11 @@ class OverlayWindow(QMainWindow):
         t_start = time.time()
         selected_region: CaptureRegion | None = None
         snapshot: DesktopSnapshot | None = None
+        # 新一轮 OCR 前先停止当前播放，避免旧音频与新结果串音
+        self.stop_audio(emit_status=False)
+        self.last_text_key = None
+        self.last_hash = None
+        self.last_event_name = None
         self.signals.log.emit("[HOTKEY] 触发捕获")
         if force_select or self.config.capture_mode == "select":
             self.signals.status.emit("冻结屏幕…")
@@ -2714,6 +2745,8 @@ class OverlayWindow(QMainWindow):
         
         try:
             t1 = time.time()
+            # 进入新结果渲染前停止旧播放，保证后续播放状态与当前结果一致
+            self.stop_audio(emit_status=False)
             self.last_match = result
             self.last_hash = None
             self.last_event_name = None
@@ -2919,6 +2952,11 @@ class OverlayWindow(QMainWindow):
             self.cn_label.setPlainText("（未找到中文匹配）")
             self._last_cn_raw = "（未找到中文匹配）"
             self._last_cn_is_html = False
+
+        # 每次渲染结果后立刻同步文档级字体/行距，确保所有设置实时生效
+        en_font, cn_font = self._build_content_fonts()
+        self._apply_text_document_style(self.source_label, en_font, force_char_style=not self._last_en_is_html)
+        self._apply_text_document_style(self.cn_label, cn_font, force_char_style=not self._last_cn_is_html)
         self.signals.log.emit(f"[PERF] 设置中文显示: {(time.time()-t9)*1000:.1f}ms")
         
         # 设置音频控件状态
@@ -3017,7 +3055,7 @@ class OverlayWindow(QMainWindow):
         font_family = self.current_font_en if lang == "en" else self.current_font_cn
         # 包装为完整HTML文档
         font_size_pt = int(self.current_font_size) if self.current_font_size else 13
-        line_height = float(self.current_line_spacing) if self.current_line_spacing else 1.2
+        line_height_percent = int((float(self.current_line_spacing) if self.current_line_spacing else 1.2) * 100)
         letter_spacing = float(self.current_letter_spacing) if self.current_letter_spacing else 0.0
         font_weight = self._font_weight_css()
 
@@ -3030,7 +3068,7 @@ class OverlayWindow(QMainWindow):
         body {{
             font-family: "{font_family}";
             color: #e2e8f0;
-            line-height: {line_height};
+            line-height: {line_height_percent}%;
             margin: 8px;
             padding: 0;
             font-size: {font_size_pt}pt;
@@ -3085,10 +3123,11 @@ class OverlayWindow(QMainWindow):
         self.setWindowState(self.windowState() & ~Qt.WindowState.WindowMinimized | Qt.WindowState.WindowActive)
         QApplication.processEvents()  # 立即处理事件
 
-    def stop_audio(self) -> None:
+    def stop_audio(self, emit_status: bool = True) -> None:
         if hasattr(self, "player"):
             self.player.stop()
-            self.signals.status.emit("已停止播放")
+            if emit_status:
+                self.signals.status.emit("已停止播放")
             
             # 重置音频控制UI
             if hasattr(self, 'audio_timer'):
@@ -3148,6 +3187,8 @@ class OverlayWindow(QMainWindow):
                 )
             
             if path is None:
+                # 没有新音频时，确保旧音频不继续播放
+                self.stop_audio(emit_status=False)
                 self.signals.status.emit("未找到对应音频文件")
                 print("[DEBUG] play_audio: path not found", flush=True)
                 return
