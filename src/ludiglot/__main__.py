@@ -843,8 +843,6 @@ def cmd_run(args: argparse.Namespace) -> None:
     )
     try:
         engine.prewarm(getattr(cfg, "ocr_backend", "auto"), async_=True)
-    except Exception:
-        # Pre-warming OCR is optional; ignore errors and continue with lazy initialization
     except Exception as exc:
         print(f"预热 OCR 引擎失败（已忽略）：{exc}", file=sys.stderr)
     try:

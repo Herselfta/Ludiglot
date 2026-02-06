@@ -66,7 +66,6 @@ def setup_system_proxy():
                         no_proxy = no_proxy.replace("<local>", "localhost,127.0.0.1")
                         os.environ["NO_PROXY"] = no_proxy
                 except FileNotFoundError:
-                except FileNotFoundError:
                     # Proxy override list is not configured; no NO_PROXY value to apply.
                     pass
         except FileNotFoundError:
