@@ -754,6 +754,8 @@ class OCREngine:
             try:
                 _try_obj(json.loads(raw_str))
             except Exception:
+                # Best-effort attempt to parse the entire payload as JSON; if this fails,
+                # continue with incremental JSON fragment decoding below.
                 # Attempt full JSON parse; if this fails, continue with incremental decoding
                 pass
 
