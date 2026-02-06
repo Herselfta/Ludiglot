@@ -33,11 +33,19 @@ class MatchResult:
 class TextMatcher:
     """Core logic for matching, extracted from OverlayWindow."""
 
-    def __init__(self, db: Dict[str, Any], voice_map: Dict[str, Any] = None, voice_event_index: VoiceEventIndex = None):
+    def __init__(
+        self,
+        db: Dict[str, Any],
+        voice_map: Dict[str, Any] = None,
+        voice_event_index: VoiceEventIndex = None,
+        gender_preference: str = "female",
+    ):
         self.db = db
         self.voice_map = voice_map or {}
         self.voice_event_index = voice_event_index
         self.searcher = FuzzySearcher()
+        pref = str(gender_preference or "female").strip().lower()
+        self.gender_preference = pref if pref in {"female", "male"} else "female"
         
         # 先初始化 log_callback
         self.log_callback = None
@@ -65,6 +73,65 @@ class TextMatcher:
     def log(self, msg: str):
         if self.log_callback:
             self.log_callback(msg)
+
+    def _prioritize_protagonist_gender(self, result: Dict[str, Any]) -> Dict[str, Any]:
+        """只在主角男女主并存时重排 matches[0]，避免误伤普通语音。"""
+        matches = result.get("matches")
+        if not isinstance(matches, list) or len(matches) < 2:
+            return result
+
+        female_tokens = ("nvzhu", "roverf", "_female")
+        male_tokens = ("nanzhu", "roverm", "_male")
+        target_tokens = female_tokens if self.gender_preference == "female" else male_tokens
+        other_tokens = male_tokens if self.gender_preference == "female" else female_tokens
+        protagonist_tokens = female_tokens + male_tokens
+
+        scored: list[tuple[int, int, Any]] = []
+        has_target = False
+        has_other = False
+
+        for idx, item in enumerate(matches):
+            if not isinstance(item, dict):
+                scored.append((1, idx, item))
+                continue
+            hay = f"{item.get('audio_event', '')} {item.get('text_key', '')}".lower()
+            has_protagonist = any(tok in hay for tok in protagonist_tokens)
+            hit_target = any(tok in hay for tok in target_tokens)
+            hit_other = any(tok in hay for tok in other_tokens)
+            has_target = has_target or hit_target
+            has_other = has_other or hit_other
+
+            if has_protagonist:
+                if hit_target and not hit_other:
+                    pri = 0
+                elif hit_other and not hit_target:
+                    pri = 2
+                else:
+                    pri = 1
+            else:
+                pri = 1
+            scored.append((pri, idx, item))
+
+        # 仅在主角男女两套并存时触发重排
+        if not (has_target and has_other):
+            result["matches"] = [m.copy() if isinstance(m, dict) else m for m in matches]
+            return result
+
+        scored.sort(key=lambda x: (x[0], x[1]))
+        reordered = [item for _, _, item in scored]
+        result["matches"] = reordered
+        top = reordered[0] if reordered else {}
+        if isinstance(top, dict):
+            self.log(
+                f"[MATCH] 主角性别优先: pref={self.gender_preference}, "
+                f"text_key={top.get('text_key')}, event={top.get('audio_event')}"
+            )
+        return result
+
+    def _build_result(self, matched_key: str) -> Dict[str, Any]:
+        result = dict(self.db.get(matched_key, {}))
+        result["_matched_key"] = matched_key
+        return self._prioritize_protagonist_gender(result)
 
     def match(self, lines: List[Tuple[str, float]]) -> Dict[str, Any] | None:
         """Main entry point: find best DB entry for OCR lines."""
@@ -140,8 +207,7 @@ class TextMatcher:
         """
         # 1. 精确匹配（最快）
         if self.indexed_searcher.exact_match(key):
-            result = dict(self.db[key])
-            result["_matched_key"] = key
+            result = self._build_result(key)
             return result, 1.0
 
         key_len = len(key)
@@ -151,8 +217,7 @@ class TextMatcher:
             prefix_hits = self.indexed_searcher.prefix_search(key, max_results=1)
             if prefix_hits:
                 best_prefix = prefix_hits[0]
-                result = dict(self.db.get(best_prefix, {}))
-                result["_matched_key"] = best_prefix
+                result = self._build_result(best_prefix)
                 return result, 0.99
         
         # 3. 子串匹配优化
@@ -165,8 +230,7 @@ class TextMatcher:
                 length_ratio = len(best_k) / len(key)
                 
                 if length_ratio >= 0.82: # Revert to safer high
-                    result = dict(self.db.get(best_k, {}))
-                    result["_matched_key"] = best_k
+                    result = self._build_result(best_k)
                     self.log(f"[MATCH] 高覆盖子串匹配：ratio={length_ratio:.2f}")
                     return result, 0.95
                 elif length_ratio >= 0.6: # Revert to safer medium
@@ -183,9 +247,8 @@ class TextMatcher:
                     # If direction='contains' means "DB Key is in Query" (which seems to be the case based on logs),
                     # we must ensure we aren't matching a tiny generic word inside a long sentence.
                     if len(best_contain) > key_len * 0.7 or (len(best_contain) >= 20 and len(best_contain) > key_len * 0.4):
-                         if len(best_contain) <= key_len * 3: # Keep original safety check
-                            result = dict(self.db.get(best_contain, {}))
-                            result["_matched_key"] = best_contain
+                        if len(best_contain) <= key_len * 3: # Keep original safety check
+                            result = self._build_result(best_contain)
                             self.log(f"[MATCH] 部分截屏匹配成功：query_len={key_len}, matched_len={len(best_contain)}")
                             return result, 0.98
         
@@ -194,8 +257,7 @@ class TextMatcher:
             fuzzy_results = self.indexed_searcher.fuzzy_search(key, top_k=1, score_threshold=0.85)
             if fuzzy_results:
                 best_item, score = fuzzy_results[0]
-                result = dict(self.db.get(best_item, {}))
-                result["_matched_key"] = best_item
+                result = self._build_result(best_item)
                 self.log(f"[MATCH] 短查询精确匹配：query_len={key_len}, matched_len={len(best_item)}, score={score:.3f}")
                 return result, score
         
@@ -203,8 +265,7 @@ class TextMatcher:
         fuzzy_results = self.indexed_searcher.fuzzy_search(key, top_k=3, score_threshold=0.4)
         if fuzzy_results:
             best_item, score = fuzzy_results[0]
-            result = dict(self.db.get(best_item, {}))
-            result["_matched_key"] = best_item
+            result = self._build_result(best_item)
             return result, score
         
         # 6. 未找到任何匹配

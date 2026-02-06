@@ -263,6 +263,10 @@ def load_config(path: Path) -> AppConfig:
     capture_backend = str(raw.get("capture_backend", "mss")).lower()
     if capture_backend not in {"mss", "winrt"}:
         capture_backend = "mss"
+    
+    gender_preference = str(raw.get("gender_preference", "female")).strip().lower()
+    if gender_preference not in {"female", "male"}:
+        gender_preference = "female"
 
     return AppConfig(
         data_root=data_root,
@@ -313,6 +317,7 @@ def load_config(path: Path) -> AppConfig:
         audio_cache_max_mb=int(raw.get("audio_cache_max_mb", 2048)),
         scan_audio_on_start=bool(raw.get("scan_audio_on_start", True)),
         play_audio=bool(raw.get("play_audio", False)),
+        gender_preference=gender_preference,
         capture_mode=raw.get("capture_mode", "image"),
         capture_backend=capture_backend,
         window_title=raw.get("window_title"),

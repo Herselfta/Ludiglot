@@ -148,6 +148,16 @@ class AudioResolver:
                 if direct.exists():
                     return AudioResolution(h, name, 'wem')
         
+        def _gender_tag(name: str | None) -> str | None:
+            if not name:
+                return None
+            nl = name.lower()
+            if any(tok in nl for tok in ("nvzhu", "roverf", "_female")):
+                return "female"
+            if any(tok in nl for tok in ("nanzhu", "roverm", "_male")):
+                return "male"
+            return None
+
         # === 第三优先级：使用数据库提供的hash（跳过慢速扫描） ===
         if db_hash is not None:
             try:
@@ -167,6 +177,22 @@ class AudioResolver:
                 direct = wem_root / f"{db_hash_int}.wem"
                 if direct.exists():
                     return AudioResolution(db_hash_int, fallback_event, 'wem')
+
+            # 主角语音：若数据库事件与性别偏好冲突，优先使用已排序的候选事件。
+            pref_gender = (self.config.gender_preference or "female").lower()
+            preferred_name, preferred_hash = final_candidates[0] if final_candidates else (None, None)
+            preferred_tag = _gender_tag(preferred_name)
+            db_tag = _gender_tag(fallback_event)
+            if (
+                preferred_name
+                and preferred_hash is not None
+                and preferred_tag
+                and db_tag
+                and preferred_tag == pref_gender
+                and db_tag != preferred_tag
+            ):
+                return AudioResolution(preferred_hash, preferred_name, "computed")
+
             # 返回db_hash作为后备，让播放器尝试
             if db_hash_int is not None:
                 return AudioResolution(db_hash_int, fallback_event, "db_fallback")

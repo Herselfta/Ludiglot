@@ -1342,7 +1342,12 @@ class OverlayWindow(QMainWindow):
             from ludiglot.core.matcher import TextMatcher
             from ludiglot.core.audio_resolver import AudioResolver
 
-            self.matcher = TextMatcher(self.db, self.voice_map, self.voice_event_index)
+            self.matcher = TextMatcher(
+                self.db,
+                self.voice_map,
+                self.voice_event_index,
+                gender_preference=self.config.gender_preference,
+            )
             self.matcher.set_logger(self.signals.log.emit)
             self.signals.log.emit("[MATCHER] 匹配服务已初始化")
 
