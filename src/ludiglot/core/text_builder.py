@@ -308,10 +308,9 @@ def find_multitext_paths(data_root: Path) -> Tuple[Path, Path]:
             f"- 英文路径匹配: {candidates_en[0] if candidates_en else 'N/A'}\n"
             f"- 中文路径匹配: {candidates_zh[0] if candidates_zh else 'N/A'}\n\n"
             "建议解决方法:\n"
-            "1. 请确保您已克隆 WutheringData (https://github.com/Dimbreath/WutheringData)\n"
-            "2. 检查 config/settings.json 中的 'data_root' 是否指向正确的路径\n"
-            "3. 如果您是手动下载的，请确保保留了 TextMap/en/MultiText.json 这种目录结构\n"
-            "详情请参阅 docs/DataManagement.md"
+            "1. 运行 'ludiglot pak-update' 从游戏 Pak 解包并构建数据库\n"
+            "2. 确保 config/settings.json 中配置了正确的 game_pak_root 或 game_install_root\n"
+            "3. 详情请参阅 docs/usage/data-management.md"
         )
     return en_path, zh_path
 

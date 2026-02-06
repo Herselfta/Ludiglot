@@ -51,193 +51,55 @@ from ludiglot.core.wwise_hash import WwiseHash
 from ludiglot.ui.overlay_window import run_gui
 
 
-# 已移至 ludiglot.core.git_manager
-
-
-def _is_wuthering_data_valid(data_root: Path) -> bool:
-    """检查WutheringData目录是否包含必要的数据文件"""
-    if not data_root.exists():
-        return False
-    
-    # 检查是否有关键目录（不再检查.git）
-    required_dirs = ["TextMap", "ConfigDB"]
-    for dir_name in required_dirs:
-        dir_path = data_root / dir_name
-        if not dir_path.exists():
-            return False
-        # 检查目录是否为空
-        if not any(dir_path.iterdir()):
-            return False
-    
-    return True
-
-
-def _check_and_setup_wuthering_data(config_path: Path) -> bool:
-    """在终端中检测WutheringData，如不存在则交互式询问是否克隆。
-    
-    Returns:
-        bool: True表示data_root可用或用户选择跳过，False表示用户取消操作
-    """
-    import subprocess
-    
-    # 检查配置文件是否存在
-    if not config_path.exists():
-        return True  # 让load_config处理配置文件缺失的错误
-    
-    try:
-        raw = json.loads(config_path.read_text(encoding="utf-8"))
-    except Exception:
-        return True  # 配置文件解析错误，让后续流程处理
-
-    if raw.get("use_game_paks") or raw.get("game_install_root") or raw.get("game_pak_root"):
-        return True
-    
-    data_root_str = raw.get("data_root")
-    
-    # 如果没有配置data_root，直接返回
-    if not data_root_str:
-        return True
-    
-    # 解析data_root路径
-    data_root = Path(data_root_str)
-    if not data_root.is_absolute():
-        project_root = Path(__file__).resolve().parents[2]
-        data_root = (project_root / data_root).resolve()
-    
-    # 检查目录是否存在且完整
-    if data_root.exists():
-        if _is_wuthering_data_valid(data_root):
-            return True  # 目录存在且完整
-        else:
-            # 目录存在但不完整（可能是上次克隆失败留下的）
-            print("\n" + "="*70)
-            print("⚠️  WutheringData 目录不完整")
-            print("="*70)
-            print(f"\n检测到目录存在但不完整：{data_root}")
-            print("这可能是上次克隆失败留下的空文件夹。\n")
-            print("选项：")
-            print("  [Y] 删除并重新克隆 (推荐)")
-            print("  [N] 跳过（稍后手动处理）")
-            print("  [C] 取消启动")
-            print()
-            
-            while True:
-                choice = input("请选择 [Y/N/C]: ").strip().upper()
-                
-                if choice == 'C':
-                    return False
-                
-                if choice == 'N':
-                    print("\n⚠️  跳过重新克隆。如需手动处理：")
-                    print(f"   1. 删除目录： Remove-Item '{data_root}' -Recurse -Force")
-                    print(f"   2. 重新克隆： git clone https://github.com/Dimbreath/WutheringData.git {data_root}")
-                    return True
-                
-                if choice == 'Y':
-                    # 删除不完整的目录
-                    print(f"\n🗑️  正在删除不完整的目录...")
-                    try:
-                        import shutil
-                        shutil.rmtree(data_root)
-                        print("✅ 已删除\n")
-                    except Exception as e:
-                        print(f"\n❌ 删除失败：{e}")
-                        print("请手动删除后重试。")
-                        return False
-                    break
-                
-                print("❌ 无效输入，请输入 Y、N 或 C")
-    
-    # WutheringData不存在，在终端中询问用户
-    print("\n" + "="*70)
-    print("📂 WutheringData 未找到")
-    print("="*70)
-    print(f"\n配置的数据目录不存在：{data_root}")
-    print("\nWutheringData 是鸣潮游戏的文本和音频数据库。")
-    print("将仅下载必要目录（TextMap, ConfigDB），约 50MB。")
-    print("\n选项：")
-    print("  [Y] 从 GitHub 自动克隆 (推荐)")
-    print("  [N] 跳过（稍后手动设置）")
-    print("  [C] 取消启动")
-    print()
-    
-    while True:
-        choice = input("请选择 [Y/N/C]: ").strip().upper()
-        
-        if choice == 'C':
-            return False
-        
-        if choice == 'N':
-            print("\n⚠️  跳过克隆。如需完整功能，请手动克隆：")
-            print(f"   git clone https://github.com/Dimbreath/WutheringData.git {data_root}")
-            return True
-        
-        if choice == 'Y':
-            break
-        
-        print("❌ 无效输入，请输入 Y、N 或 C")
-    
-    # 用户选择克隆
-    from ludiglot.core.git_manager import GitManager
-    
-    print("\n" + "="*70)
-    print("🔄 开始克隆 WutheringData...")
-    print("="*70)
-    print(f"目标位置: {data_root}\n")
-    
-    success = GitManager.fast_clone_wuthering_data(
-        data_root, 
-        progress_callback=lambda line: print(line)
-    )
-    
-    if success:
-        print("\n" + "="*70)
-        print("✅ 克隆成功！")
-        print("="*70)
-        print(f"位置：{data_root}\n")
-        return True
-    else:
-        print("\n" + "="*70)
-        print("❌ 克隆失败")
-        print("="*70)
-        print("\n请检查网络连接或手动执行：")
-        print(f"git clone https://github.com/Dimbreath/WutheringData.git {data_root}")
-        return False
-        return False
+# 旧的 WutheringData 克隆逻辑已移除
+# 现在统一使用 FModelCLI 从游戏 Pak 构建数据库
 
 
 def _check_and_setup_game_data(config_path: Path) -> bool:
-    """在终端中检测游戏 Pak 解包数据，如不存在则交互式更新。"""
+    """在终端中检测游戏数据，如不存在则交互式构建。"""
     if not config_path.exists():
         return True
     try:
         cfg = load_config(config_path)
+    except FileNotFoundError as e:
+        # load_config 抛出的 FileNotFoundError 说明数据缺失
+        # 需要交互式处理
+        pass
+    except Exception:
+        return True
+    else:
+        # 成功加载配置，检查数据是否存在
+        data_root = cfg.data_root
+        if data_root:
+            data_root = Path(data_root).resolve()
+            configdb = data_root / "ConfigDB"
+            if configdb.exists() and any(configdb.iterdir()):
+                # ConfigDB 存在且非空，数据就绪
+                return True
+
+    # 数据缺失，尝试重新解析原始配置以获取路径信息
+    try:
+        raw = json.loads(config_path.read_text(encoding="utf-8"))
     except Exception:
         return True
 
-    if not (cfg.use_game_paks or cfg.game_install_root or cfg.game_pak_root):
+    game_pak_root = raw.get("game_pak_root") or raw.get("game_install_root")
+    
+    # 如果没有配置游戏路径，直接返回让后续流程报错
+    if not game_pak_root:
         return True
 
-    # 检查 Pak 解包数据是否存在
-    data_root = cfg.data_root
-    if data_root:
-        data_root = Path(data_root).resolve()
-        # 检查关键目录是否存在
-        configdb = data_root / "ConfigDB"
-        if configdb.exists() and any(configdb.iterdir()):
-            # ConfigDB 存在且非空，认为数据就绪
-            return True
-
     if not sys.stdin.isatty():
-        print("\n⚠️  Pak 模式已启用，但数据缺失。请运行 ludiglot pak-update 更新数据。")
+        print("\n⚠️  游戏数据未就绪。请运行 ludiglot pak-update 构建数据库。")
         return False
 
     print("\n" + "=" * 70)
-    print("📦 游戏 Pak 数据未就绪")
+    print("📦 游戏数据未就绪")
     print("=" * 70)
-    print("将从本地游戏 Pak 解包文本/音频资源。")
-    print("选项：")
-    print("  [Y] 立即解包并构建数据库 (推荐)")
+    print(f"\n检测到游戏路径: {game_pak_root}")
+    print("将使用 FModelCLI 从游戏 Pak 解包文本和音频资源。")
+    print("\n选项：")
+    print("  [Y] 立即解包并构建数据库 (推荐，首次运行必选)")
     print("  [N] 跳过 (稍后手动执行 ludiglot pak-update)")
     print("  [C] 取消启动")
 
@@ -252,6 +114,20 @@ def _check_and_setup_game_data(config_path: Path) -> bool:
         print("❌ 无效输入，请输入 Y、N 或 C")
 
     try:
+        # 重新加载配置（此时可能抛异常，但我们需要它的值）
+        try:
+            cfg = load_config(config_path)
+        except FileNotFoundError:
+            # 如果 load_config 因为 data_root 不存在而失败，尝试创建数据目录
+            project_root = Path(__file__).resolve().parents[2]
+            data_root_str = raw.get("data_root", "data")
+            data_root = Path(data_root_str)
+            if not data_root.is_absolute():
+                data_root = (project_root / data_root).resolve()
+            data_root.mkdir(parents=True, exist_ok=True)
+            # 重试加载
+            cfg = load_config(config_path)
+            
         update_from_game_paks(cfg, config_path, cfg.db_path, progress=lambda m: print(m))
         return True
     except GamePakUpdateError as exc:
@@ -909,11 +785,8 @@ def cmd_gui(args: argparse.Namespace) -> None:
         print("="*70 + "\n")
         return
     
-    # 在启动GUI前先在终端中检测和处理WutheringData / Pak 数据
+    # 在启动 GUI 前先在终端中检测并自动构建数据库
     if not _check_and_setup_game_data(config_path):
-        print("\n❌ 启动已取消。")
-        return
-    if not _check_and_setup_wuthering_data(config_path):
         print("\n❌ 启动已取消。")
         return
     

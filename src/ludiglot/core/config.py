@@ -136,7 +136,7 @@ def load_config(path: Path) -> AppConfig:
              else:
                  raise FileNotFoundError(
                      f"数据目录不存在: {data_root}\n"
-                     "请在 settings.json 中设置正确的 'data_root' 指向 WutheringData 目录。"
+                     "建议配置 game_pak_root 或 game_install_root 使用 Pak 解包流程。"
                  )
 
     en_json = raw.get("en_json")

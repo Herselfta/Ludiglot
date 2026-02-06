@@ -455,7 +455,7 @@ class OverlayWindow(QMainWindow):
         
         # Update Database 操作
         update_action = QAction("Update Database", self)
-        update_action.setToolTip("拉取 WutheringData 仓库并重建数据库")
+        update_action.setToolTip("从游戏 Pak 重新解包并构建数据库")
         update_action.triggered.connect(self._update_database)
         self.window_menu.addAction(update_action)
         
@@ -1168,16 +1168,16 @@ class OverlayWindow(QMainWindow):
         self.signals.log.emit(f"[UI] 字体大小调整为 {self.current_font_size}pt")
     
     def _update_database(self) -> None:
-        """更新数据库：拉取 WutheringData 并重建"""
+        """更新数据库：从游戏 Pak 重新解包并构建"""
         from ludiglot.ui.dialogs import StyledDialog, StyledProgressDialog
         from ludiglot.ui.db_updater import DatabaseUpdateThread
         
-        # 检查data_root配置
-        if not self.config.data_root:
+        # 检查 Pak 配置
+        if not (self.config.game_pak_root or self.config.game_install_root):
             StyledDialog.warning(
                 self,
                 "配置错误",
-                "未设置 data_root 路径。\n请在 config/settings.json 中配置 WutheringData 路径。"
+                "未设置游戏路径。\n请在 config/settings.json 中配置 game_pak_root 或 game_install_root。"
             )
             return
         
@@ -1185,8 +1185,8 @@ class OverlayWindow(QMainWindow):
         reply = StyledDialog.question(
             self,
             "更新数据库",
-            f"即将从 GitHub 拉取 WutheringData 并重建数据库。\n\n"
-            f"数据路径: {self.config.data_root}\n"
+            f"即将从游戏 Pak 解包并重建数据库。\n\n"
+            f"游戏路径: {self.config.game_pak_root or self.config.game_install_root}\n"
             f"输出文件: {self.config.db_path}\n\n"
             f"此操作可能需要几分钟。是否继续？"
         )
