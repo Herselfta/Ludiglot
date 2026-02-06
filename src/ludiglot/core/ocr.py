@@ -2148,7 +2148,6 @@ class OCREngine:
 
         best_lines: List[Dict[str, object]] = []
         best_score = -1.0
-        best_score = -1.0
         for cfg in configs:
             try:
                 img_source = image_input
