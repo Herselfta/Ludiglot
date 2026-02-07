@@ -3251,6 +3251,14 @@ class OverlayWindow(QMainWindow):
 
         def _replace_gender_token(m: re.Match[str]) -> str:
             body = m.group(1) or ""
+            body_norm = body.strip().lower()
+
+            # {TA} 是中文文案特有占位符，仅在中文展示时替换
+            if body_norm == "ta":
+                if is_cn:
+                    return "他" if target == "male" else "她"
+                return m.group(0)
+
             parts = [p.strip() for p in body.split(";") if p.strip()]
             kv: dict[str, str] = {}
             for part in parts:
@@ -3259,7 +3267,10 @@ class OverlayWindow(QMainWindow):
                 k, v = part.split("=", 1)
                 kv[k.strip().lower()] = v.strip()
             if "male" in kv and "female" in kv:
-                return kv.get(target, kv.get("female", kv.get("male", m.group(0))))
+                male_val = kv.get("male", "")
+                female_val = kv.get("female", "")
+                if male_val or female_val:
+                    return male_val if target == "male" else female_val
             return m.group(0)
 
         out = re.sub(r"\{([^{}]{1,120})\}", _replace_gender_token, out)
