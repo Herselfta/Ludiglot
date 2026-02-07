@@ -3005,34 +3005,74 @@ class OverlayWindow(QMainWindow):
         """
         import re
         text = self._resolve_display_placeholders(text, lang=lang)
-        
-        # 游戏预设颜色名映射
-        color_names = {
-            "Highlight": "#fbbf24",  # 黄色高亮
-            "Title": "#a79969",      # 暗金色标题（技能名称）
-            "Wind": "#55ffb5",       # 气动-青蓝色
-            "Fire": "#ef4444",       # 热熔-红色
-            "Thunder": "#8b5cf6",    # 导电-紫色
-            "Ice": "#06b6d4",        # 冷凝-青色
-            "Light": "#fbbf24",      # 衍射-黄色
-            "Dark": "#8b5cf6",       # 湮灭-紫色
+
+        # 游戏预设颜色名映射（全部转小写匹配）
+        named_colors = {
+            "highlight": "#fbbf24",
+            "highlightb": "#f59e0b",
+            "title": "#a79969",
+            "wind": "#55ffb5",
+            "fire": "#ef4444",
+            "thunder": "#8b5cf6",
+            "ice": "#06b6d4",
+            "light": "#fbbf24",
+            "dark": "#8b5cf6",
+            "blue": "#60a5fa",
+            "blued": "#3b82f6",
+            "green": "#34d399",
+            "greend": "#10b981",
+            "yellow": "#fbbf24",
+            "yellowd": "#ffd12f",
+            "red": "#ef4444",
+            "redd": "#dc2626",
+            "reda": "#f87171",
+            "white": "#f8fafc",
+            "rare2": "#60a5fa",
+            "rare3": "#a78bfa",
+            "rare4": "#f59e0b",
+            "rare5": "#fbbf24",
+            "threathigh": "#ef4444",
+            "purpled": "#8b5cf6",
         }
-        
-        # 替换 <color=Name>...</color>（预设颜色）
-        for name, hex_color in color_names.items():
-            text = re.sub(
-                rf'<color={name}>(.*?)</color>',
-                rf'<span style="color: {hex_color}">\1</span>',
-                text,
-                flags=re.DOTALL | re.IGNORECASE
-            )
-        
-        # 替换 <color=#RRGGBB>...</color>（十六进制颜色）
+
+        def _resolve_color_token(token: str) -> str:
+            t = str(token or "").strip()
+            if not t:
+                return "#fbbf24"
+            # 支持 #RRGGBB / #RRGGBBAA / RRGGBB / RRGGBBAA
+            m = re.fullmatch(r"#?([0-9a-fA-F]{6}|[0-9a-fA-F]{8})", t)
+            if m:
+                return f"#{m.group(1)}"
+            key = t.lower()
+            if key in named_colors:
+                return named_colors[key]
+            # 常见命名兜底
+            if "yellow" in key:
+                return "#fbbf24"
+            if "red" in key:
+                return "#ef4444"
+            if "blue" in key:
+                return "#60a5fa"
+            if "green" in key:
+                return "#34d399"
+            if "purple" in key:
+                return "#8b5cf6"
+            if "white" in key:
+                return "#f8fafc"
+            return "#fbbf24"
+
+        def _replace_color_tag(m: re.Match[str]) -> str:
+            color_token = m.group(1)
+            content = m.group(2)
+            css_color = _resolve_color_token(color_token)
+            return f'<span style="color: {css_color}">{content}</span>'
+
+        # 统一替换 <color=...>...</color>
         text = re.sub(
-            r'<color=(#[0-9a-fA-F]{6,8})>(.*?)</color>',
-            r'<span style="color: \1">\2</span>',
+            r'<color=([^>]+)>(.*?)</color>',
+            _replace_color_tag,
             text,
-            flags=re.DOTALL
+            flags=re.DOTALL | re.IGNORECASE,
         )
         
         # 替换 <te href=xxx>...</te>（游戏术语链接 → 下划线+黄色）
