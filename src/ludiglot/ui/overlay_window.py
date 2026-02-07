@@ -2771,6 +2771,8 @@ class OverlayWindow(QMainWindow):
                 # 使用换行分隔多个条目，检测是否包含HTML标签
                 en_joined = "\n".join(left)
                 cn_joined = "\n".join(right) if right else "（未找到中文匹配）"
+                en_joined = self._resolve_display_placeholders(en_joined, lang="en")
+                cn_joined = self._resolve_display_placeholders(cn_joined, lang="cn")
                 self.signals.log.emit(f"[PERF] 多条目处理: {(time.time()-t2)*1000:.1f}ms")
                 
                 t3 = time.time()
@@ -2888,6 +2890,8 @@ class OverlayWindow(QMainWindow):
                 en_text = f"<span style='color: #d4af37; font-weight: bold;'>{first_line}</span>\n{en_text}"
                 cn_text = f"<span style='color: #d4af37; font-weight: bold;'>{display_title}</span>\n{cn_text}"
                 self.signals.log.emit(f"[DISPLAY] 标题: {first_line} -> {display_title}, 内容: {text_key}")
+        en_text = self._resolve_display_placeholders(en_text, lang="en")
+        cn_text = self._resolve_display_placeholders(cn_text, lang="cn")
         self.signals.log.emit(f"[PERF] 提取文本内容: {(time.time()-t6)*1000:.1f}ms")
 
         # 音频识别逻辑：委托给 AudioResolver
@@ -2997,6 +3001,7 @@ class OverlayWindow(QMainWindow):
             lang: "en" 或 "cn"，用于选择对应语言的字体
         """
         import re
+        text = self._resolve_display_placeholders(text, lang=lang)
         
         # 游戏预设颜色名映射
         color_names = {
@@ -3083,6 +3088,65 @@ class OverlayWindow(QMainWindow):
 </html>
 '''
         return html
+
+    def _resolve_display_placeholders(self, text: str, lang: str = "en") -> str:
+        """解析游戏文本占位符，输出用于GUI展示的最终文本。"""
+        import re
+        if not isinstance(text, str) or not text:
+            return text
+
+        out = text
+        lang_norm = str(lang or "en").strip().lower()
+        is_cn = lang_norm in {"cn", "zh", "zh-cn", "zh_hans", "zh-hans"}
+        player_name = "漂泊者" if is_cn else "Rover"
+
+        # 主角名字占位符统一替换为 Rover
+        out = out.replace("{PlayerName}", player_name)
+        out = re.sub(
+            r"\{Cus:Var,\s*VarType=Global\s+Key=main_team_name\}",
+            player_name,
+            out,
+            flags=re.IGNORECASE,
+        )
+
+        # 输入提示占位符：优先显示 PC 按键文案，兜底 Press
+        def _replace_input_token(m: re.Match[str]) -> str:
+            body = m.group(1) or ""
+            pc = re.search(r"\bPC=([^,\s;{}]+)", body, flags=re.IGNORECASE)
+            touch = re.search(r"\bTouch=([^,\s;{}]+)", body, flags=re.IGNORECASE)
+            gamepad = re.search(r"\bGamepad=([^,\s;{}]+)", body, flags=re.IGNORECASE)
+            token = (pc.group(1) if pc else "") or (touch.group(1) if touch else "") or (gamepad.group(1) if gamepad else "") or "Press"
+            token = token.strip()
+            if token.islower():
+                token = token.capitalize()
+            return token or "Press"
+
+        out = re.sub(
+            r"\{Cus:Ipt,([^{}]+)\}",
+            _replace_input_token,
+            out,
+            flags=re.IGNORECASE,
+        )
+
+        # 性别占位符：按配置选择 male/female 对应文案
+        pref = str(getattr(self.config, "gender_preference", "female") or "female").strip().lower()
+        target = "male" if pref == "male" else "female"
+
+        def _replace_gender_token(m: re.Match[str]) -> str:
+            body = m.group(1) or ""
+            parts = [p.strip() for p in body.split(";") if p.strip()]
+            kv: dict[str, str] = {}
+            for part in parts:
+                if "=" not in part:
+                    continue
+                k, v = part.split("=", 1)
+                kv[k.strip().lower()] = v.strip()
+            if "male" in kv and "female" in kv:
+                return kv.get(target, kv.get("female", kv.get("male", m.group(0))))
+            return m.group(0)
+
+        out = re.sub(r"\{([^{}]{1,120})\}", _replace_gender_token, out)
+        return out
 
 
     def _show_error(self, message: str) -> None:
