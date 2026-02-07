@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import time
 from pathlib import Path
@@ -28,6 +29,13 @@ class AudioResolver:
         self.strategy = WutheringAudioStrategy()
         self._audio_index: AudioCacheIndex | None = None
         self._voice_event_index = voice_event_index
+        self._cache_meta_loaded = False
+        self._cache_meta: dict[str, dict[str, Any]] = {}
+        self._cache_meta_path: Path | None = (
+            self.config.audio_cache_path / "audio_resolver_cache_meta.json"
+            if self.config.audio_cache_path
+            else None
+        )
         
     @property
     def audio_index(self) -> AudioCacheIndex | None:
@@ -118,6 +126,105 @@ class AudioResolver:
             
         return final_names
 
+    def _load_cache_meta(self) -> None:
+        if self._cache_meta_loaded:
+            return
+        self._cache_meta_loaded = True
+        self._cache_meta = {}
+        if not self._cache_meta_path or not self._cache_meta_path.exists():
+            return
+        try:
+            raw = json.loads(self._cache_meta_path.read_text(encoding="utf-8"))
+        except Exception:
+            return
+        if not isinstance(raw, dict):
+            return
+        entries = raw.get("entries")
+        if not isinstance(entries, dict):
+            return
+        for key, val in entries.items():
+            try:
+                hash_key = str(int(key))
+            except Exception:
+                continue
+            if not isinstance(val, dict):
+                continue
+            event_name = str(val.get("event_name", "")).strip()
+            source_type = str(val.get("source_type", "")).strip()
+            try:
+                updated_at = float(val.get("updated_at", 0.0) or 0.0)
+            except Exception:
+                updated_at = 0.0
+            self._cache_meta[hash_key] = {
+                "event_name": event_name,
+                "source_type": source_type,
+                "updated_at": updated_at,
+            }
+
+    def _save_cache_meta(self) -> None:
+        if not self._cache_meta_path:
+            return
+        payload = {
+            "generated_at": time.time(),
+            "entries": self._cache_meta,
+        }
+        self._cache_meta_path.parent.mkdir(parents=True, exist_ok=True)
+        self._cache_meta_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+    def _normalize_event_name(self, event_name: str | None) -> str:
+        if not event_name:
+            return ""
+        parsed = self.strategy._parse_event_name(event_name)
+        if parsed:
+            return parsed.strip().lower()
+        return str(event_name).strip().lower()
+
+    def _is_cache_trusted(self, hash_value: int, event_name: str | None = None) -> bool:
+        self._load_cache_meta()
+        entry = self._cache_meta.get(str(int(hash_value)))
+        if not entry:
+            return False
+        if not event_name:
+            return True
+        expected = self._normalize_event_name(event_name)
+        if not expected:
+            return True
+        cached_event = self._normalize_event_name(str(entry.get("event_name", "")))
+        return cached_event == expected
+
+    def _mark_cache_trusted(self, hash_value: int, event_name: str | None, source_type: str) -> None:
+        normalized_event = self._normalize_event_name(event_name)
+        if not normalized_event:
+            return
+        self._load_cache_meta()
+        self._cache_meta[str(int(hash_value))] = {
+            "event_name": normalized_event,
+            "source_type": source_type,
+            "updated_at": time.time(),
+        }
+        self._save_cache_meta()
+
+    def get_cached_path(
+        self,
+        hash_value: int,
+        event_name: str | None = None,
+        *,
+        trusted_only: bool = True,
+    ) -> Path | None:
+        """返回缓存文件路径；默认仅返回与事件名一致的可信缓存。"""
+        index = self.audio_index
+        if not index:
+            return None
+        cached = index.find(hash_value)
+        if not cached:
+            return None
+        if trusted_only and event_name and not self._is_cache_trusted(hash_value, event_name):
+            return None
+        return cached
+
     def resolve(self, text_key: str | None, db_event: str | None = None, db_hash: int | None = None) -> AudioResolution | None:
         """全流程解析音频。
         
@@ -129,26 +236,9 @@ class AudioResolver:
         for name in candidates:
             final_candidates.append((name, self.strategy.hash_name(name)))
 
-        if not final_candidates:
-            if db_hash:
-                return AudioResolution(int(db_hash), "unknown_from_db", "unknown")
-            return None
-
         index = self.audio_index
         wem_root = self.config.audio_wem_root
-        
-        # === 第一优先级：缓存查找（O(1)，非常快） ===
-        for name, h in final_candidates:
-            if index and index.find(h):
-                return AudioResolution(h, name, 'cache')
-        
-        # === 第二优先级：直接路径查找（O(1)） ===
-        if wem_root:
-            for name, h in final_candidates:
-                direct = wem_root / f"{h}.wem"
-                if direct.exists():
-                    return AudioResolution(h, name, 'wem')
-        
+
         def _gender_tag(name: str | None) -> str | None:
             if not name:
                 return None
@@ -159,7 +249,7 @@ class AudioResolver:
                 return "male"
             return None
 
-        # === 第三优先级：使用数据库提供的hash（跳过慢速扫描） ===
+        # === 第一优先级：数据库显式 hash/event（最高置信） ===
         if db_hash is not None:
             try:
                 db_hash_int = int(db_hash)
@@ -170,10 +260,13 @@ class AudioResolver:
             if not fallback_event:
                 fallback_event = final_candidates[0][0] if final_candidates else "unknown_from_db"
 
-            # 检查缓存中是否有这个hash
-            if db_hash_int is not None and index and index.find(db_hash_int):
-                return AudioResolution(db_hash_int, fallback_event, 'cache')
-            # 检查直接路径
+            # 对数据库明确给出的事件：仅信任有来源标记的缓存，避免旧缓存错配。
+            if db_hash_int is not None and index and self._is_cache_trusted(db_hash_int, fallback_event):
+                cached = index.find(db_hash_int)
+                if cached:
+                    return AudioResolution(db_hash_int, fallback_event, 'cache')
+
+            # 优先检查直接 WEM（即使有旧缓存，也优先资源直连）
             if db_hash_int is not None and wem_root:
                 direct = wem_root / f"{db_hash_int}.wem"
                 if direct.exists():
@@ -192,24 +285,47 @@ class AudioResolver:
                 and preferred_tag == pref_gender
                 and db_tag != preferred_tag
             ):
+                if index and self._is_cache_trusted(preferred_hash, preferred_name):
+                    cached = index.find(preferred_hash)
+                    if cached:
+                        return AudioResolution(preferred_hash, preferred_name, "cache")
+                if wem_root:
+                    direct = wem_root / f"{preferred_hash}.wem"
+                    if direct.exists():
+                        return AudioResolution(preferred_hash, preferred_name, "wem")
                 return AudioResolution(preferred_hash, preferred_name, "computed")
 
             # 返回db_hash作为后备，让播放器尝试
             if db_hash_int is not None:
                 return AudioResolution(db_hash_int, fallback_event, "db_fallback")
-        
+
+        if not final_candidates:
+            return None
+
+        # === 第二优先级：缓存查找（仅信任有来源标记的条目） ===
+        for name, h in final_candidates:
+            if index and self._is_cache_trusted(h, name):
+                cached = index.find(h)
+                if cached:
+                    return AudioResolution(h, name, 'cache')
+
+        # === 第三优先级：直接路径查找（O(1)） ===
+        if wem_root:
+            for name, h in final_candidates:
+                direct = wem_root / f"{h}.wem"
+                if direct.exists():
+                    return AudioResolution(h, name, 'wem')
+
         # === 最后：返回计算的hash（跳过BNK扫描，太慢） ===
-        if final_candidates:
-            return AudioResolution(final_candidates[0][1], final_candidates[0][0], 'computed')
-        
-        return None
+        return AudioResolution(final_candidates[0][1], final_candidates[0][0], 'computed')
 
     def ensure_playable_audio(
         self, 
         hash_value: int, 
         text_key: str | None, 
         event_name: str | None,
-        log_callback: Any = None
+        log_callback: Any = None,
+        skip_cache: bool = False,
     ) -> Path | None:
         """确保音频可播放（提取WEM/生成TXTP/转码WAV）。"""
         def log(msg):
@@ -217,9 +333,9 @@ class AudioResolver:
         
         index = self.audio_index
         # 1. 再次检查缓存 (可能刚刚被另一个线程生成了)
-        if index:
+        if index and not skip_cache:
             cached = index.find(hash_value)
-            if cached: 
+            if cached and (not event_name or self._is_cache_trusted(hash_value, event_name)):
                 return cached
         
         wem_root = self.config.audio_wem_root
@@ -247,20 +363,24 @@ class AudioResolver:
                     self.config.vgmstream_path,
                     self.config.audio_cache_path,
                     output_name=str(hash_value),
+                    skip_existing=not skip_cache,
                 )
                 if wav_path:
                     # 为了兼容 AudioCacheIndex (只识别数字文件名)，重命名为 hash.wav
                     final_path = wav_path.parent / f"{hash_value}{wav_path.suffix}"
                     if final_path != wav_path:
                          # 如果目标存在且有效，直接使用
-                        if final_path.exists() and final_path.stat().st_size > 0:
+                        if final_path.exists() and final_path.stat().st_size > 0 and not skip_cache:
                             wav_path = final_path
                         else:
+                            if final_path.exists() and skip_cache:
+                                final_path.unlink(missing_ok=True)
                             shutil.move(wav_path, final_path)
                             wav_path = final_path
                     
                     if index:
                         index.add_file(wav_path)
+                    self._mark_cache_trusted(hash_value, event_name, "wem")
                 return wav_path
             except Exception as e:
                 log(f"[ERROR] WEM 转码失败: {e}")
@@ -351,14 +471,17 @@ class AudioResolver:
                         # 重命名为 hash.wav
                         final_path = wav_path.parent / f"{hash_value}{wav_path.suffix}"
                         if final_path != wav_path:
-                            if final_path.exists() and final_path.stat().st_size > 0:
+                            if final_path.exists() and final_path.stat().st_size > 0 and not skip_cache:
                                 wav_path = final_path
                             else:
+                                if final_path.exists() and skip_cache:
+                                    final_path.unlink(missing_ok=True)
                                 shutil.move(wav_path, final_path)
                                 wav_path = final_path
                         
                         if index:
                             index.add_file(wav_path)
+                        self._mark_cache_trusted(hash_value, active_event or event_name, "bnk")
                     return wav_path
                 except Exception as e:
                     log(f"[ERROR] TXTP 转码失败: {e}")

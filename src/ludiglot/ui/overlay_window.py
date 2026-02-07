@@ -3167,23 +3167,43 @@ class OverlayWindow(QMainWindow):
                     
                     # 如果是 cache，直接获取路径
                     if res.source_type == 'cache':
-                        path = self.audio_resolver.audio_index.find(res.hash_value)
+                        path = self.audio_resolver.get_cached_path(
+                            res.hash_value,
+                            res.event_name,
+                            trusted_only=True,
+                        )
+                        if path is None:
+                            print("[DEBUG] play_audio: trusted cache missing, will regenerate", flush=True)
                     elif res.source_type == 'wem' or res.source_type == 'bnk':
                         # 需要触发提取逻辑
                         print("[DEBUG] Triggering ensure_playable_audio (1)...", flush=True)
                         path = self.audio_resolver.ensure_playable_audio(
-                            self.last_hash, self.last_text_key, self.last_event_name, log_callback=self.signals.log.emit
+                            self.last_hash,
+                            self.last_text_key,
+                            self.last_event_name,
+                            log_callback=self.signals.log.emit,
+                            skip_cache=True,
                         )
             
-            # 兜底：如果 resolver 没搞定，尝试原始 index
+            # 兜底：如果 resolver 没搞定，仅允许可信缓存命中
             if path is None and self.last_hash:
-                if self.audio_index:
+                if self.audio_resolver:
+                    path = self.audio_resolver.get_cached_path(
+                        self.last_hash,
+                        self.last_event_name,
+                        trusted_only=True,
+                    )
+                elif self.audio_index:
                     path = self.audio_index.find(self.last_hash)
             
             if path is None and self.audio_resolver:
                 print("[DEBUG] Triggering ensure_playable_audio (fallback)...", flush=True)
                 path = self.audio_resolver.ensure_playable_audio(
-                    self.last_hash, self.last_text_key, self.last_event_name, log_callback=self.signals.log.emit
+                    self.last_hash,
+                    self.last_text_key,
+                    self.last_event_name,
+                    log_callback=self.signals.log.emit,
+                    skip_cache=True,
                 )
             
             if path is None:
