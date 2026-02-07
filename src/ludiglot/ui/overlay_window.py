@@ -2774,7 +2774,7 @@ class OverlayWindow(QMainWindow):
                 # 使用换行分隔多个条目，检测是否包含HTML标签
                 en_joined = "\n".join(left)
                 cn_joined = "\n".join(right) if right else "（未找到中文匹配）"
-                ocr_context = result.get("_ocr_text") if isinstance(result, dict) else None
+                ocr_context = (result.get("_ocr_context") or result.get("_ocr_text")) if isinstance(result, dict) else None
                 en_joined = self._resolve_display_placeholders(en_joined, lang="en", ocr_context=ocr_context)
                 cn_joined = self._resolve_display_placeholders(cn_joined, lang="cn", ocr_context=ocr_context)
                 self.signals.log.emit(f"[PERF] 多条目处理: {(time.time()-t2)*1000:.1f}ms")
@@ -2894,7 +2894,7 @@ class OverlayWindow(QMainWindow):
                 en_text = f"<span style='color: #d4af37; font-weight: bold;'>{first_line}</span>\n{en_text}"
                 cn_text = f"<span style='color: #d4af37; font-weight: bold;'>{display_title}</span>\n{cn_text}"
                 self.signals.log.emit(f"[DISPLAY] 标题: {first_line} -> {display_title}, 内容: {text_key}")
-        ocr_context = result.get("_ocr_text") if isinstance(result, dict) else None
+        ocr_context = (result.get("_ocr_context") or result.get("_ocr_text")) if isinstance(result, dict) else None
         en_text = self._resolve_display_placeholders(en_text, lang="en", ocr_context=ocr_context)
         cn_text = self._resolve_display_placeholders(cn_text, lang="cn", ocr_context=ocr_context)
         self.signals.log.emit(f"[PERF] 提取文本内容: {(time.time()-t6)*1000:.1f}ms")
@@ -2930,16 +2930,14 @@ class OverlayWindow(QMainWindow):
                 self._last_en_raw = en_text
                 self._last_en_is_html = True
             else:
-                score_info = f"\nscore={score}" if score is not None else ""
-                self.source_label.setPlainText(f"{en_text}{score_info}")
-                self._last_en_raw = f"{en_text}{score_info}"
+                self.source_label.setPlainText(en_text)
+                self._last_en_raw = en_text
                 self._last_en_is_html = False
         else:
             # 兜底：使用OCR文本
             ocr_original = result.get('_ocr_text', query_key)
-            score_info = f" score={score}" if score is not None else ""
-            self.source_label.setPlainText(f"{ocr_original}{score_info}")
-            self._last_en_raw = f"{ocr_original}{score_info}"
+            self.source_label.setPlainText(ocr_original)
+            self._last_en_raw = ocr_original
             self._last_en_is_html = False
         self.signals.log.emit(f"[PERF] 设置英文显示: {(time.time()-t8)*1000:.1f}ms")
         
@@ -3100,17 +3098,22 @@ class OverlayWindow(QMainWindow):
             return []
         values: list[str] = []
         pattern = re.compile(
-            r"\d+(?:\.\d+)?\s?(?:kb|mb|gb|tb)"
+            r"\d+\s*[dhms](?:\s+\d+\s*[dhms])*"
+            r"|\d+(?:\.\d+)?\s?(?:kb|mb|gb|tb)"
             r"|\d+(?:\.\d+)?%"
             r"|\d+(?:\.\d+)+"
             r"|\d+",
             flags=re.IGNORECASE,
         )
+        time_pat = re.compile(r"^\d+\s*[dhms](?:\s+\d+\s*[dhms])*$", flags=re.IGNORECASE)
         for m in pattern.finditer(ocr_context):
             token = m.group(0).strip()
             if not token:
                 continue
-            token = re.sub(r"\s+", "", token)
+            if time_pat.fullmatch(token):
+                token = re.sub(r"\s+", " ", token)
+            else:
+                token = re.sub(r"\s+", "", token)
             values.append(token)
         return values
 
@@ -3137,11 +3140,23 @@ class OverlayWindow(QMainWindow):
         # 数值索引占位符：优先用 OCR 文本中的数值按顺序回填
         numeric_values = self._extract_numeric_values_from_context(ocr_context or "")
         template_for_numeric = out
+        time_pat = re.compile(r"^\d+\s*[dhms](?:\s+\d+\s*[dhms])*$", flags=re.IGNORECASE)
+
+        def _render_time_value(token: str) -> str:
+            m = re.findall(r"(\d+)\s*([dhms])", token, flags=re.IGNORECASE)
+            if not m:
+                return token
+            if is_cn:
+                unit_map = {"d": "天", "h": "小时", "m": "分钟", "s": "秒"}
+                return "".join(f"{n}{unit_map.get(u.lower(), u)}" for n, u in m)
+            return " ".join(f"{n}{u.lower()}" for n, u in m)
 
         def _replace_indexed_placeholder(m: re.Match[str]) -> str:
             idx = int(m.group(1))
             if 0 <= idx < len(numeric_values):
                 val = numeric_values[idx]
+                if time_pat.fullmatch(val):
+                    val = _render_time_value(val)
                 # 模板若本身是 "{0}%"，且回填值已带%，避免出现 "%%"
                 if val.endswith("%"):
                     next_ch = template_for_numeric[m.end(): m.end() + 1]

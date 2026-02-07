@@ -133,6 +133,68 @@ class TextMatcher:
         result["_matched_key"] = matched_key
         return self._prioritize_protagonist_gender(result)
 
+    def _has_time_expression(self, text: str) -> bool:
+        if not text:
+            return False
+        return bool(re.search(r"\b\d+\s*[dhms](?:\s+\d+\s*[dhms])*\b", text, flags=re.IGNORECASE))
+
+    def _prioritize_time_context(self, result: Dict[str, Any], ocr_text: str) -> Dict[str, Any]:
+        """当 OCR 明显是时间文本时，优先选择带 Time/时间 语义的同键候选。"""
+        if not isinstance(result, dict) or result.get("_multi"):
+            return result
+        if not self._has_time_expression(ocr_text):
+            return result
+
+        matches = result.get("matches")
+        if not isinstance(matches, list) or len(matches) < 2:
+            return result
+
+        scored: list[tuple[float, int, Any]] = []
+        for idx, item in enumerate(matches):
+            if not isinstance(item, dict):
+                scored.append((-1.0, idx, item))
+                continue
+            text_key = str(item.get("text_key") or "")
+            en = str(item.get("official_en") or "")
+            cn = str(item.get("official_cn") or "")
+
+            tk = text_key.lower()
+            en_l = en.lower()
+            cn_l = cn.lower()
+            s = 0.0
+
+            if "time" in tk:
+                s += 2.2
+            if "time" in en_l:
+                s += 2.0
+            if "remaining time" in en_l:
+                s += 1.2
+            if "时间" in cn:
+                s += 2.0
+            if "剩余时间" in cn:
+                s += 1.2
+            if "{0}" in en or "{0}" in cn:
+                s += 0.3
+            if re.search(r"\bday\(s\)|\bhour|\bminute|\bsecond", en_l):
+                s += 0.4
+
+            scored.append((s, idx, item))
+
+        best_score = max((x[0] for x in scored), default=-1.0)
+        if best_score <= 0:
+            return result
+
+        scored.sort(key=lambda x: (-x[0], x[1]))
+        reordered = [item for _, _, item in scored]
+        result["matches"] = reordered
+        top = reordered[0] if reordered else {}
+        if isinstance(top, dict):
+            self.log(
+                f"[MATCH] 时间语义优先: text_key={top.get('text_key')}, "
+                f"official_en={str(top.get('official_en') or '')[:48]}"
+            )
+        return result
+
     def match(self, lines: List[Tuple[str, float]]) -> Dict[str, Any] | None:
         """Main entry point: find best DB entry for OCR lines."""
         start = time.time()
@@ -145,6 +207,8 @@ class TextMatcher:
             if ocr_text:
                 result.setdefault("_ocr_text", ocr_text)
                 result.setdefault("_query_key", normalize_en(ocr_text))
+                result["_ocr_context"] = ocr_text
+                result = self._prioritize_time_context(result, ocr_text)
         
         # 性能监控日志
         if elapsed > 1.0:

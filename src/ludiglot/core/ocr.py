@@ -35,15 +35,20 @@ except ImportError:
 
 PaddleOCR = None
 GLM_OCR_OUTPUT_SCHEMA = (
-    '{"lines":["<line1>","<line2>"]}'
+    '{"segments":[{"type":"title","text":"<title>"},{"type":"content","text":"<paragraph>"}]}'
 )
 
 DEFAULT_GLM_OCR_PROMPT = (
     "You are an OCR engine. Extract all readable text from the image.\n"
     "Rules:\n"
-    "- Return only the recognized text.\n"
-    "- Preserve line breaks as in the image.\n"
-    "- Do not add any commentary or formatting.\n"
+    "- Return only JSON, no markdown, no commentary.\n"
+    "- Segment text into logical blocks.\n"
+    "- Merge wrapped lines that belong to the same paragraph into one content block.\n"
+    "- Keep short headings/titles as separate title blocks.\n"
+    "- Keep section labels and timer lines (e.g. Remaining: 38d 11h) as standalone blocks.\n"
+    "- Never mix title text into content block text.\n"
+    "- Preserve original wording; do not paraphrase.\n"
+    "- Keep placeholders/tokens as-is (e.g. {0}, {PlayerName}, <color=...>).\n"
     "Output ONLY the following JSON, do not include any other text:\n"
     + GLM_OCR_OUTPUT_SCHEMA
     + "\n"
@@ -656,6 +661,10 @@ class OCREngine:
                     return True
                 if "lines" in low and "<line" in low and "[" in low and "]" in low:
                     return True
+                if "\"segments\"" in low and ("<title>" in low or "<paragraph>" in low):
+                    return True
+                if "'segments'" in low and ("<title>" in low or "<paragraph>" in low):
+                    return True
                 return False
 
             def _looks_like_prompt_line(norm_line: str) -> bool:
@@ -699,7 +708,141 @@ class OCREngine:
 
         def _extract_from_obj(obj: object) -> list[str]:
             out: list[str] = []
+
+            def _segment_texts(segment_obj: object) -> list[str]:
+                seg_out: list[str] = []
+                if isinstance(segment_obj, str):
+                    seg_out.extend(_split_text_value(segment_obj))
+                    return seg_out
+                if not isinstance(segment_obj, dict):
+                    return seg_out
+
+                seg_type = str(segment_obj.get("type") or "").strip().lower()
+                is_content_like = seg_type in {"content", "paragraph", "body"}
+
+                def _normalize_segment_line(value: str) -> str:
+                    v = str(value or "")
+                    # OCR occasionally inserts vertical bar as a visual separator.
+                    v = re.sub(r"\s*\|\s*", " ", v)
+                    v = re.sub(r"\s+", " ", v).strip()
+                    return v
+
+                def _norm_parts(value: str) -> list[str]:
+                    parts: list[str] = []
+                    for raw in _split_text_value(value):
+                        norm = _normalize_segment_line(raw)
+                        if norm:
+                            parts.append(norm)
+                    return parts
+
+                def _is_time_line(value: str) -> bool:
+                    return bool(
+                        re.match(
+                            r"(?i)^\s*(?:remaining|time\s*left|left)\s*:\s*\d+\s*[dhms](?:\s+\d+\s*[dhms])*\s*$",
+                            value.strip(),
+                        )
+                    )
+
+                def _is_short_heading(value: str) -> bool:
+                    s = value.strip()
+                    if not s or len(s) > 48:
+                        return False
+                    if _is_time_line(s):
+                        return False
+                    if any(ch in s for ch in ".!?。！？"):
+                        return False
+                    # Title/label-like short text (e.g. "Featured Leisure")
+                    words = [w for w in re.split(r"\s+", s) if w]
+                    if len(words) > 6:
+                        return False
+                    letters = re.sub(r"[^A-Za-z]", "", s)
+                    return bool(letters)
+
+                def _merge_wrapped_lines(parts: list[str]) -> list[str]:
+                    if len(parts) <= 1:
+                        return parts
+                    merged: list[str] = []
+                    buf = parts[0]
+                    for nxt in parts[1:]:
+                        prev = buf.strip()
+                        curr = nxt.strip()
+                        if not prev:
+                            buf = curr
+                            continue
+                        if not curr:
+                            continue
+                        boundary = (
+                            prev.endswith((".", "!", "?", "。", "！", "？", ":", "："))
+                            or _is_time_line(prev)
+                            or _is_time_line(curr)
+                            or _is_short_heading(prev)
+                            or _is_short_heading(curr)
+                        )
+                        if boundary:
+                            merged.append(prev)
+                            buf = curr
+                            continue
+                        # Soft-wrap join: keep words continuous, fix hyphen-wrap.
+                        if prev.endswith("-"):
+                            buf = f"{prev[:-1].rstrip()}{curr}"
+                        else:
+                            buf = f"{prev} {curr}"
+                    if buf.strip():
+                        merged.append(buf.strip())
+                    return merged
+
+                # 兼容 title/content 双字段结构
+                title_text = segment_obj.get("title")
+                content_text = segment_obj.get("content")
+                if isinstance(title_text, str) and title_text.strip():
+                    seg_out.extend(_norm_parts(title_text))
+                if isinstance(content_text, str) and content_text.strip():
+                    seg_out.extend(_norm_parts(content_text))
+
+                # 通用 text 字段
+                txt = segment_obj.get("text")
+                if isinstance(txt, str) and txt.strip():
+                    seg_out.extend(_norm_parts(txt))
+
+                # 行数组（优先合并为单段，避免同段被拆成多行）
+                lines_val = segment_obj.get("lines")
+                if isinstance(lines_val, list):
+                    line_parts: list[str] = []
+                    for item in lines_val:
+                        if isinstance(item, str):
+                            line_parts.extend(_norm_parts(item))
+                    if is_content_like:
+                        seg_out.extend(line_parts)
+                    else:
+                        merged = " ".join(x.strip() for x in line_parts if x.strip()).strip()
+                        if merged:
+                            seg_out.append(merged)
+
+                # content 段若仍被拆成多行，强制段内合并
+                if is_content_like and len(seg_out) > 1:
+                    seg_out = _merge_wrapped_lines([x for x in seg_out if x.strip()])
+                return seg_out
+
             if isinstance(obj, dict):
+                # Segment sub-object (e.g. {"type":"content","lines":[...]}) should
+                # be interpreted as one logical block, not fallback line-by-line text.
+                if not isinstance(obj.get("segments"), list) and not isinstance(obj.get("paragraphs"), list):
+                    if any(k in obj for k in ("type", "title", "content")):
+                        seg_like = _segment_texts(obj)
+                        if seg_like:
+                            out.extend(seg_like)
+                            return out
+
+                seg_field = obj.get("segments")
+                if isinstance(seg_field, list):
+                    for seg in seg_field:
+                        out.extend(_segment_texts(seg))
+
+                para_field = obj.get("paragraphs")
+                if isinstance(para_field, list):
+                    for para in para_field:
+                        out.extend(_segment_texts(para))
+
                 if isinstance(obj.get("lines"), list):
                     for item in obj.get("lines", []):
                         if isinstance(item, str):
@@ -723,17 +866,18 @@ class OCREngine:
             if not raw_str:
                 return []
 
-            candidates: list[list[str]] = []
+            candidates: list[tuple[int, list[str]]] = []
 
-            def _score(lines: list[str]) -> tuple[int, int]:
-                return (len(lines), sum(len(x) for x in lines))
+            def _score(item: tuple[int, list[str]]) -> tuple[int, int, int]:
+                priority, lines = item
+                return (priority, len(lines), sum(len(x) for x in lines))
 
-            def _push(lines: list[str]) -> None:
+            def _push(lines: list[str], priority: int = 0) -> None:
                 if not lines:
                     return
                 filtered = _filter_prompt_lines(lines)
                 if filtered:
-                    candidates.append(filtered)
+                    candidates.append((priority, filtered))
 
             def _unwrap_obj(obj: object) -> object:
                 if isinstance(obj, str):
@@ -745,11 +889,31 @@ class OCREngine:
                             return obj
                 return obj
 
+            def _obj_priority(obj: object) -> int:
+                if isinstance(obj, dict):
+                    if isinstance(obj.get("segments"), list) or isinstance(obj.get("paragraphs"), list):
+                        return 200
+                    if any(k in obj for k in ("type", "title", "content")):
+                        return 120
+                    if isinstance(obj.get("lines"), list):
+                        return 80
+                    if obj.get("text"):
+                        return 60
+                    return 40
+                if isinstance(obj, list):
+                    for item in obj:
+                        if isinstance(item, dict) and (
+                            isinstance(item.get("segments"), list) or isinstance(item.get("paragraphs"), list)
+                        ):
+                            return 180
+                    return 50
+                return 0
+
             def _try_obj(obj: object) -> None:
                 obj = _unwrap_obj(obj)
                 extracted = _extract_from_obj(obj)
                 if extracted:
-                    _push(extracted)
+                    _push(extracted, priority=_obj_priority(obj))
 
             try:
                 _try_obj(json.loads(raw_str))
@@ -784,14 +948,31 @@ class OCREngine:
                 line = line.strip()
                 if not line:
                     continue
-                if not (line.startswith("{") and ("\"lines\"" in line or "\"text\"" in line or "'lines'" in line or "'text'" in line)):
+                if not (
+                    line.startswith("{")
+                    and (
+                        "\"lines\"" in line
+                        or "\"text\"" in line
+                        or "'lines'" in line
+                        or "'text'" in line
+                        or "\"segments\"" in line
+                        or "\"paragraphs\"" in line
+                        or "'segments'" in line
+                        or "'paragraphs'" in line
+                    )
+                ):
                     continue
                 try:
                     _try_obj(json.loads(line))
                 except Exception:
                     continue
             # try unescape JSON string content (e.g., \"lines\": ...)
-            if "\\\"" in raw_str and ("lines" in raw_str.lower() or "text" in raw_str.lower()):
+            if "\\\"" in raw_str and (
+                "lines" in raw_str.lower()
+                or "text" in raw_str.lower()
+                or "segments" in raw_str.lower()
+                or "paragraphs" in raw_str.lower()
+            ):
                 try:
                     unescaped = raw_str.encode("utf-8", "backslashreplace").decode("unicode_escape")
                 except Exception:
@@ -835,7 +1016,7 @@ class OCREngine:
                             inner = inner.replace("\\\\", "\\")
                             recovered_direct.extend(_split_text_value(inner))
                 if recovered_direct:
-                    _push(recovered_direct)
+                    _push(recovered_direct, priority=20)
                 else:
                     matches = re.findall(r"\"((?:\\.|[^\"\\])*)\"", target, flags=re.S)
                     if not matches:
@@ -851,10 +1032,34 @@ class OCREngine:
                             except Exception:
                                 decoded = m
                             out.extend(_split_text_value(decoded))
-                        _push(out)
+                        _push(out, priority=10)
+            # regex fallback for segments/paragraphs (malformed JSON tolerant)
+            if "\"segments\"" in low or "'segments'" in low or "\"paragraphs\"" in low or "'paragraphs'" in low:
+                for key in ("segments", "paragraphs"):
+                    m = re.search(rf"[\"']{key}[\"']\s*:\s*\[(.*?)]", raw_str, flags=re.S)
+                    if not m:
+                        continue
+                    body = m.group(1)
+                    try:
+                        parsed_items = json.loads(f"[{body}]")
+                        _try_obj({key: parsed_items})
+                        continue
+                    except Exception:
+                        pass
+                    # 弱恢复：提取对象中的 text/title/content 字符串字段
+                    kv_hits = re.findall(rf"[\"'](?:text|title|content)[\"']\s*:\s*[\"']((?:\\.|[^\"'\\])*)[\"']", body, flags=re.S)
+                    if kv_hits:
+                        recovered: list[str] = []
+                        for hit in kv_hits:
+                            try:
+                                decoded = json.loads(f"\"{hit.replace('\"', '\\\"')}\"")
+                            except Exception:
+                                decoded = hit
+                            recovered.extend(_split_text_value(decoded))
+                        _push(recovered, priority=20)
             if candidates:
                 candidates.sort(key=_score, reverse=True)
-                return candidates[0]
+                return candidates[0][1]
             return []
 
         parsed_lines = _parse_json_payload(cleaned)
@@ -870,7 +1075,16 @@ class OCREngine:
         cleaned_lines = _filter_prompt_lines(cleaned_lines)
         if cleaned_lines and len(cleaned_lines) == 1:
             candidate = cleaned_lines[0].strip()
-            if candidate.startswith("{") and ("\"lines\"" in candidate or "\"text\"" in candidate):
+            if candidate.startswith("{") and (
+                "\"lines\"" in candidate
+                or "\"text\"" in candidate
+                or "\"segments\"" in candidate
+                or "\"paragraphs\"" in candidate
+                or "'lines'" in candidate
+                or "'text'" in candidate
+                or "'segments'" in candidate
+                or "'paragraphs'" in candidate
+            ):
                 parsed_again = _parse_json_payload(candidate)
                 if parsed_again:
                     return parsed_again
