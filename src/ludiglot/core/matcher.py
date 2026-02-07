@@ -61,6 +61,7 @@ class TextMatcher:
             "critdamage": "maincritdmg",
             "critdmgbonus": "maincritdmg",
         }
+        self._title_translation_cache: dict[str, str] = {}
         
         # 然后初始化索引化搜索引擎（可能调用 log）
         db_keys = list(db.keys())
@@ -137,6 +138,88 @@ class TextMatcher:
         if not text:
             return False
         return bool(re.search(r"\b\d+\s*[dhms](?:\s+\d+\s*[dhms])*\b", text, flags=re.IGNORECASE))
+
+    def resolve_title_cn(self, title: str) -> str:
+        """解析标题（如角色名）对应的中文显示，供 UI 直接渲染。"""
+        cleaned = "".join(ch if ch.isalnum() or ch.isspace() else " " for ch in str(title or "")).strip()
+        key = normalize_en(cleaned)
+        if not key:
+            return ""
+
+        if key in self._title_translation_cache:
+            return self._title_translation_cache[key]
+
+        result, score = self.search_key(key)
+        if not isinstance(result, dict):
+            self._title_translation_cache[key] = ""
+            return ""
+
+        matches = result.get("matches", [])
+        best_cn = ""
+        best_rank = -10_000.0
+
+        if isinstance(matches, list):
+            for item in matches:
+                if not isinstance(item, dict):
+                    continue
+                cn = str(item.get("official_cn") or item.get("cn") or "").strip()
+                en = str(item.get("official_en") or "").strip()
+                text_key = str(item.get("text_key") or "")
+                if not cn or not en:
+                    continue
+
+                en_clean = "".join(ch if ch.isalnum() or ch.isspace() else " " for ch in en).strip()
+                en_key = normalize_en(en_clean)
+                if en_key != key:
+                    continue
+
+                tk = text_key.lower()
+                en_l = en.lower()
+                rank = 0.0
+
+                # 优先 Name/RoleInfo/Speaker 条目，压低 Main 对白条目
+                if tk.endswith("_name") or "_name_" in tk or "roleinfo_" in tk or "speaker_" in tk:
+                    rank += 6.0
+                if "main_" in tk:
+                    rank -= 5.0
+                if "_content" in tk or "_desc" in tk:
+                    rank -= 2.0
+
+                # 偏好干净人名，规避 LYNAE— / Lynae? / Lynae! 这类语气变体
+                if re.fullmatch(r"[A-Za-z][A-Za-z0-9' -]{0,40}", en):
+                    rank += 3.0
+                if any(ch in en for ch in ("—", "…", "?", "!", ":", ",", ".", "(", ")", "{", "}")):
+                    rank -= 3.0
+                if "{message}" in en_l:
+                    rank -= 2.0
+
+                # 中文人名通常较短且不包含拉长符
+                if len(cn) <= 6:
+                    rank += 1.0
+                if "——" in cn or "…" in cn:
+                    rank -= 2.0
+
+                if rank > best_rank:
+                    best_rank = rank
+                    best_cn = cn
+
+        if best_cn:
+            self._title_translation_cache[key] = best_cn
+            return best_cn
+
+        # 回退：无可判别候选时沿用主匹配结果
+        cn = result.get("official_cn") or result.get("cn")
+        if not cn and isinstance(matches, list) and matches:
+            first = matches[0]
+            if isinstance(first, dict):
+                cn = first.get("official_cn") or first.get("cn")
+        if cn and score >= 0.7:
+            value = str(cn)
+            self._title_translation_cache[key] = value
+            return value
+
+        self._title_translation_cache[key] = ""
+        return ""
 
     def _prioritize_time_context(self, result: Dict[str, Any], ocr_text: str) -> Dict[str, Any]:
         """当 OCR 明显是时间文本时，优先选择带 Time/时间 语义的同键候选。"""

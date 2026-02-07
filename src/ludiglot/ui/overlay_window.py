@@ -1581,29 +1581,13 @@ class OverlayWindow(QMainWindow):
             self.time_label.setText(f"{current_sec//60:02d}:{current_sec%60:02d} / {duration_sec//60:02d}:{duration_sec%60:02d}")
 
     def _translate_title(self, title: str) -> str:
-        """尝试将标题（如角色名、招式名）翻译为中文。"""
+        """标题翻译委托给核心匹配器，UI 层只负责调用。"""
         if not self.matcher:
             return ""
         try:
-            cleaned = "".join(ch if ch.isalnum() or ch.isspace() else " " for ch in title).strip()
-            key = normalize_en(cleaned)
-            if not key:
-                return ""
-            result, score = self.matcher.search_key(key)
-            if isinstance(result, dict):
-                # 1. 尝试直接获取
-                cn = result.get("official_cn") or result.get("cn")
-                # 2. 尝试从 matches 列表中获取
-                if not cn:
-                    matches = result.get("matches", [])
-                    if matches:
-                        cn = matches[0].get("official_cn") or matches[0].get("cn")
-                
-                if cn and score >= 0.7:
-                    return str(cn)
+            return self.matcher.resolve_title_cn(title)
         except Exception:
-            pass
-        return ""
+            return ""
 
     def _on_mode_changed(self, mode: str) -> None:
         self.engine.set_mode(mode)
