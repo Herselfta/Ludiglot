@@ -115,6 +115,7 @@ class OverlayWindow(QMainWindow):
             glm_ollama_model=getattr(config, "ocr_glm_ollama_model", None),
             glm_max_tokens=getattr(config, "ocr_glm_max_tokens", None),
             glm_timeout=getattr(config, "ocr_glm_timeout", None),
+            glm_prompt=getattr(config, "ocr_glm_prompt", None),
             allow_paddle=(getattr(config, "ocr_backend", "auto") == "paddle"),
         )
         self.engine.set_logger(self.signals.log.emit, self.signals.status.emit)

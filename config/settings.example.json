@@ -23,6 +23,8 @@
   "ocr_glm_max_tokens": 0,
   "_comment_ocr_glm_max_tokens": "num_predict hint for GLM-OCR. <=0 means use Ollama default (recommended)",
   "ocr_glm_timeout": 30,
+  "ocr_glm_prompt": "",
+  "_comment_ocr_glm_prompt": "optional override for GLM-OCR prompt. empty uses built-in prompt tuned for title/paragraph separation",
   "audio_cache_path": "cache/audio",
   "audio_wem_root": "data/GameAudio/Client/Content/Aki/WwiseAudio_Generated/Media/zh",
   "audio_bnk_root": "data/GameAudio/Client/Content/Aki/WwiseAudio_Generated/Event/zh",

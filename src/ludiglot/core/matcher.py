@@ -421,6 +421,39 @@ class TextMatcher:
             return ""
         return title
 
+    def _looks_title_like_line(self, raw_text: str, cleaned: str) -> bool:
+        """判断 OCR 单行是否更像标题/说话人名，而不是正文句子。"""
+        c = str(cleaned or "").strip()
+        if not c:
+            return False
+        words = [w for w in c.split() if w]
+        wc = len(words)
+        if wc == 0 or wc > 5:
+            return False
+        if len(c) > 36:
+            return False
+
+        raw = str(raw_text or "")
+        if any(p in raw for p in (",", ".", "!", "?", ";", ":")):
+            return False
+
+        digit_ratio = sum(ch.isdigit() for ch in c) / max(len(c), 1)
+        if digit_ratio > 0.30:
+            return False
+
+        alpha_words = [w for w in words if any(ch.isalpha() for ch in w)]
+        if alpha_words:
+            cap_like = 0
+            for w in alpha_words:
+                first = w[0]
+                if first.isupper() or w.isupper():
+                    cap_like += 1
+            if cap_like / max(len(alpha_words), 1) >= 0.66:
+                return True
+
+        # 回退兼容旧逻辑：很短的 1-3 词条目依旧可判为标题
+        return wc <= 3 and len(c) <= 20
+
     def _attach_title_hint(self, result: Dict[str, Any] | None, title_hint: str) -> Dict[str, Any] | None:
         if not isinstance(result, dict) or not title_hint:
             return result
@@ -683,9 +716,7 @@ class TextMatcher:
             primary_text_key = first_match.get("text_key") if isinstance(first_match, dict) else ""
             official_en = first_match.get("official_en") if isinstance(first_match, dict) else ""
             
-            word_count = len(cleaned.split())
-            is_short = word_count <= 3 and len(cleaned) <= 20
-            is_title_like = is_short and not any(ch in cleaned for ch in [',', '.', '!', '?'])
+            is_title_like = self._looks_title_like_line(text, cleaned)
             
             line_info.append({
                 'idx': idx, 'text': text, 'cleaned': cleaned, 'key': key,

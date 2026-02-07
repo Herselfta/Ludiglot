@@ -34,7 +34,17 @@ except ImportError:
     HAS_NUMPY = False
 
 PaddleOCR = None
-DEFAULT_GLM_OCR_PROMPT = "output phrased text"
+DEFAULT_GLM_OCR_PROMPT = (
+    "output phrased text\n"
+    "Transcribe all visible text in reading order (top-to-bottom, left-to-right).\n"
+    "Output plain text only.\n"
+    "Rules:\n"
+    "1) Keep short headers / speaker names on their own line.\n"
+    "2) Keep different paragraphs or blocks separated (one blank line between blocks).\n"
+    "3) Merge soft-wrapped lines that belong to the same sentence/paragraph.\n"
+    "4) Do not merge a header/title into the following sentence.\n"
+    "5) Do not output HTML/style tags or extra commentary."
+)
 DEFAULT_GLM_OCR_TIMEOUT = 30.0
 # <=0 means "follow Ollama default behavior" (do not send num_predict).
 DEFAULT_GLM_OCR_MAX_TOKENS = 0
@@ -55,6 +65,7 @@ class OCREngine:
         glm_ollama_model: str | None = None,
         glm_timeout: float | None = None,
         glm_max_tokens: int | None = None,
+        glm_prompt: str | None = None,
         allow_paddle: bool = True,
     ) -> None:
         self.lang = lang
@@ -106,7 +117,8 @@ class OCREngine:
         except Exception:
             self.glm_max_tokens = DEFAULT_GLM_OCR_MAX_TOKENS
 
-        self.glm_prompt = DEFAULT_GLM_OCR_PROMPT
+        prompt = str(glm_prompt).strip() if glm_prompt is not None else ""
+        self.glm_prompt = prompt or DEFAULT_GLM_OCR_PROMPT
         self._glm_ollama_last_error = None
         self._log_callback: Callable[[str], None] | None = None
         self._status_callback: Callable[[str], None] | None = None
@@ -587,7 +599,11 @@ class OCREngine:
                 continue
             if re.fullmatch(r"[{}\[\],:]+", line):
                 continue
-            lines_out.append(line)
+            split_lines = self._split_glm_compound_line(line)
+            for seg in split_lines:
+                seg = re.sub(r"\s+", " ", str(seg or "")).strip()
+                if seg:
+                    lines_out.append(seg)
 
         # Fallback: preserve one-line content if no explicit line breaks remain.
         if not lines_out:
@@ -596,6 +612,53 @@ class OCREngine:
             if one:
                 lines_out.append(one)
         return lines_out
+
+    def _split_glm_compound_line(self, line: str) -> List[str]:
+        """
+        尝试拆分 GLM 把「短标题 + 长正文」误并为一行的情况。
+        仅做保守拆分，避免误切正常句子。
+        """
+        s = str(line or "").strip()
+        if not s:
+            return []
+
+        if len(s) < 48:
+            return [s]
+        if not re.search(r"[.!?…]", s):
+            return [s]
+
+        # 例： "Luuk Herssen The Academy has its theories..."
+        m = re.match(
+            r"^([A-Z][A-Za-z'’\-]{1,24}(?:\s+[A-Z][A-Za-z'’\-]{1,24}){0,3})\s+([A-Z].+)$",
+            s,
+        )
+        if not m:
+            return [s]
+
+        title = m.group(1).strip()
+        body = m.group(2).strip()
+        if not title or not body:
+            return [s]
+
+        title_words = title.split()
+        if len(title_words) > 4:
+            return [s]
+        if len(body) < 30:
+            return [s]
+        if not re.search(r"[.!?…]", body):
+            return [s]
+
+        # 避免拆分普通句首（如 "The Academy ..."）
+        low = {w.lower() for w in title_words}
+        common_sentence_starters = {
+            "the", "a", "an", "this", "that", "these", "those", "there", "here",
+            "when", "while", "if", "after", "before", "in", "on", "at", "from",
+            "to", "for", "with", "without", "and", "or", "but",
+        }
+        if low & common_sentence_starters:
+            return [s]
+
+        return [title, body]
 
     def _glm_build_boxes(self, lines: List[str]) -> List[Dict[str, object]]:
         if not lines:

@@ -38,6 +38,7 @@ class AppConfig:
     ocr_glm_ollama_model: str | None = None
     ocr_glm_max_tokens: int | None = None
     ocr_glm_timeout: float | None = None
+    ocr_glm_prompt: str | None = None
     ocr_debug_dump_input: bool = False
     ocr_raw_capture: bool = False
     ocr_windows_input: str = "auto"  # auto | raw | png
@@ -171,6 +172,9 @@ def load_config(path: Path) -> AppConfig:
     ocr_glm_endpoint = raw.get("ocr_glm_endpoint")
     legacy_glm_model = raw.get("ocr_glm_model")
     ocr_glm_ollama_model = raw.get("ocr_glm_ollama_model") or legacy_glm_model
+    ocr_glm_prompt = raw.get("ocr_glm_prompt")
+    if ocr_glm_prompt is not None:
+        ocr_glm_prompt = str(ocr_glm_prompt).strip() or None
     ocr_glm_max_tokens = raw.get("ocr_glm_max_tokens")
     ocr_glm_timeout = raw.get("ocr_glm_timeout")
     try:
@@ -297,6 +301,7 @@ def load_config(path: Path) -> AppConfig:
         ocr_glm_ollama_model=str(ocr_glm_ollama_model) if ocr_glm_ollama_model else None,
         ocr_glm_max_tokens=ocr_glm_max_tokens,
         ocr_glm_timeout=ocr_glm_timeout,
+        ocr_glm_prompt=ocr_glm_prompt,
         ocr_debug_dump_input=bool(raw.get("ocr_debug_dump_input", False)),
         ocr_raw_capture=bool(raw.get("ocr_raw_capture", False)),
         ocr_windows_input=ocr_windows_input,
