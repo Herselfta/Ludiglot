@@ -61,6 +61,7 @@ from ludiglot.core.voice_map import build_voice_map_from_configdb, collect_all_v
 from ludiglot.core.voice_event_index import VoiceEventIndex
 from ludiglot.core.matcher import TextMatcher
 from ludiglot.core.audio_resolver import resolve_external_wem_root
+from ludiglot.core.skill_param_resolver import SkillParamResolver
 
 
 class PersistentMenu(QMenu):
@@ -107,6 +108,7 @@ class OverlayWindow(QMainWindow):
         # self.searcher = FuzzySearcher() # TextMatcher now handles this
         self.matcher: TextMatcher | None = None
         self.audio_resolver: AudioResolver | None = None
+        self.skill_param_resolver: SkillParamResolver | None = None
         self.engine = OCREngine(
             lang=config.ocr_lang,
             use_gpu=config.ocr_gpu,
@@ -1301,6 +1303,8 @@ class OverlayWindow(QMainWindow):
             self.signals.error.emit(f"DB 初始化失败: {exc}")
             return
 
+        self._init_skill_param_resolver()
+
         if self.config.data_root:
             try:
                 cache_path = Path(__file__).resolve().parents[3] / "cache" / "voice_map.json"
@@ -1363,6 +1367,16 @@ class OverlayWindow(QMainWindow):
         self.voice_event_index = index
         if index.names:
             self.signals.log.emit(f"[VOICE] 事件索引: {len(index.names)} 项")
+
+    def _init_skill_param_resolver(self) -> None:
+        self.skill_param_resolver = None
+        if not self.config.data_root:
+            return
+        db_path = self.config.data_root / "ConfigDB" / "db_skill.db"
+        resolver = SkillParamResolver(db_path, logger=self.signals.log.emit)
+        if resolver.available:
+            self.skill_param_resolver = resolver
+            self.signals.log.emit(f"[PARAM] 技能参数解析器已启用: {db_path}")
 
     def _init_matcher(self) -> None:
         if self.db:
@@ -2743,27 +2757,45 @@ class OverlayWindow(QMainWindow):
             if result.get("_multi"):
                 t2 = time.time()
                 items = result.get("items", [])
+                ocr_context = (result.get("_ocr_context") or result.get("_ocr_text")) if isinstance(result, dict) else None
                 left = []
                 right = []
+                left_raw = []
+                right_raw = []
                 for item in items:
                     # 使用数据库官方原文，如果不存在则fallback到OCR
-                    en = item.get("official_en") or item.get("ocr") or ""
-                    cn = item.get("official_cn") or item.get("text_key") or ""
-                    if en:
-                        left.append(en)
-                    if cn:
-                        right.append(cn)
+                    text_key = item.get("text_key")
+                    en_raw = item.get("official_en") or item.get("ocr") or ""
+                    cn_raw = item.get("official_cn") or item.get("text_key") or ""
+
+                    if en_raw:
+                        left_raw.append(en_raw)
+                        left.append(
+                            self._resolve_display_placeholders(
+                                en_raw,
+                                lang="en",
+                                ocr_context=ocr_context,
+                                text_key=text_key,
+                            )
+                        )
+                    if cn_raw:
+                        right_raw.append(cn_raw)
+                        right.append(
+                            self._resolve_display_placeholders(
+                                cn_raw,
+                                lang="cn",
+                                ocr_context=ocr_context,
+                                text_key=text_key,
+                            )
+                        )
                     self.signals.log.emit(
                         f"[ITEM] {item.get('ocr')} -> {item.get('text_key')} (score={item.get('score')})"
                     )
                 # 使用换行分隔多个条目，检测是否包含HTML标签
-                en_joined_raw = "\n".join(left)
-                cn_joined_raw = "\n".join(right) if right else "（未找到中文匹配）"
-                en_joined = en_joined_raw
-                cn_joined = cn_joined_raw
-                ocr_context = (result.get("_ocr_context") or result.get("_ocr_text")) if isinstance(result, dict) else None
-                en_joined = self._resolve_display_placeholders(en_joined, lang="en", ocr_context=ocr_context)
-                cn_joined = self._resolve_display_placeholders(cn_joined, lang="cn", ocr_context=ocr_context)
+                en_joined_raw = "\n".join(left_raw)
+                cn_joined_raw = "\n".join(right_raw) if right_raw else "（未找到中文匹配）"
+                en_joined = "\n".join(left)
+                cn_joined = "\n".join(right) if right else "（未找到中文匹配）"
                 self.signals.log.emit(f"[PERF] 多条目处理: {(time.time()-t2)*1000:.1f}ms")
                 
                 t3 = time.time()
@@ -2889,8 +2921,8 @@ class OverlayWindow(QMainWindow):
                 cn_text = f"<span style='color: #d4af37; font-weight: bold;'>{display_title}</span>\n{cn_text}"
                 self.signals.log.emit(f"[DISPLAY] 标题: {first_line} -> {display_title}, 内容: {text_key}")
         ocr_context = (result.get("_ocr_context") or result.get("_ocr_text")) if isinstance(result, dict) else None
-        en_text = self._resolve_display_placeholders(en_text, lang="en", ocr_context=ocr_context)
-        cn_text = self._resolve_display_placeholders(cn_text, lang="cn", ocr_context=ocr_context)
+        en_text = self._resolve_display_placeholders(en_text, lang="en", ocr_context=ocr_context, text_key=text_key)
+        cn_text = self._resolve_display_placeholders(cn_text, lang="cn", ocr_context=ocr_context, text_key=text_key)
         self.signals.log.emit(f"[PERF] 提取文本内容: {(time.time()-t6)*1000:.1f}ms")
 
         # 音频识别逻辑：委托给 AudioResolver
@@ -3160,7 +3192,13 @@ class OverlayWindow(QMainWindow):
             values.append(token)
         return values
 
-    def _resolve_display_placeholders(self, text: str, lang: str = "en", ocr_context: str | None = None) -> str:
+    def _resolve_display_placeholders(
+        self,
+        text: str,
+        lang: str = "en",
+        ocr_context: str | None = None,
+        text_key: str | None = None,
+    ) -> str:
         """解析游戏文本占位符，输出用于GUI展示的最终文本。"""
         import re
         if not isinstance(text, str) or not text:
@@ -3180,8 +3218,27 @@ class OverlayWindow(QMainWindow):
             flags=re.IGNORECASE,
         )
 
-        # 数值索引占位符：优先用 OCR 文本中的数值按顺序回填
-        numeric_values = self._extract_numeric_values_from_context(ocr_context or "")
+        # 数值索引占位符：技能文本优先使用 ConfigDB 参数，其他文本走 OCR 提取。
+        placeholder_indexes = [int(i) for i in re.findall(r"\{(\d+)\}", out)]
+        placeholder_count = (max(placeholder_indexes) + 1) if placeholder_indexes else 0
+        ocr_values = self._extract_numeric_values_from_context(ocr_context or "")
+        numeric_values = list(ocr_values)
+
+        if placeholder_count > 0 and text_key and self.skill_param_resolver:
+            db_values = self.skill_param_resolver.resolve_values(text_key, placeholder_count)
+            if db_values:
+                if len(db_values) >= placeholder_count:
+                    numeric_values = list(db_values)
+                elif not numeric_values:
+                    numeric_values = list(db_values)
+                elif len(numeric_values) < placeholder_count:
+                    merged = list(db_values)
+                    for token in numeric_values:
+                        if len(merged) >= placeholder_count:
+                            break
+                        merged.append(token)
+                    numeric_values = merged
+
         template_for_numeric = out
         time_pat = re.compile(r"^\d+\s*[dhms](?:\s+\d+\s*[dhms])*$", flags=re.IGNORECASE)
 
