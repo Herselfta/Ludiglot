@@ -2221,6 +2221,19 @@ class OCREngine:
         return best_lines
 
 
+def _sanitize_ocr_fragment(text: str) -> str:
+    """清洗 OCR 常见伪标签噪声（如误识别的 <br / <br> / <brthe）。"""
+    if not text:
+        return ""
+    s = str(text)
+    # 处理 HTML 实体形式
+    s = re.sub(r"(?i)&lt;\s*/?\s*br\s*/?&gt;", " ", s)
+    # 处理真实标签或半截标签（包含 <brthe 这类缺失 > 的情况）
+    s = re.sub(r"(?i)<\s*/?\s*br\s*/?>?", " ", s)
+    s = re.sub(r"(?i)</\s*br\s*>?", " ", s)
+    return s
+
+
 def group_ocr_lines(box_lines: List[Dict[str, object]], lang: str = "en") -> List[Tuple[str, float]]:
     """
     对 OCR 原始结果进行几何分行。
@@ -2236,7 +2249,7 @@ def group_ocr_lines(box_lines: List[Dict[str, object]], lang: str = "en") -> Lis
     merged_lines: List[List[Dict[str, Any]]] = []
     
     for item in lines_sorted:
-        text = str(item.get("text", "")).strip()
+        text = _sanitize_ocr_fragment(str(item.get("text", ""))).strip()
         if not text:
             continue
             
@@ -2318,11 +2331,11 @@ def group_ocr_lines(box_lines: List[Dict[str, object]], lang: str = "en") -> Lis
             # No, within paragraph logic, lines are ordered Y, words ordered X.
             # Concatenation is correct reading order.
             
-            valid_items = [t for t in all_items if str(t.get("text", "")).strip()]
+            valid_items = [t for t in all_items if _sanitize_ocr_fragment(str(t.get("text", ""))).strip()]
             if not valid_items:
                 continue
                 
-            tokens = [str(t.get("text", "")).strip() for t in valid_items]
+            tokens = [_sanitize_ocr_fragment(str(t.get("text", ""))).strip() for t in valid_items]
             full_text = " ".join(tokens)
             
             confs = [float(t.get("conf", 1.0)) for t in valid_items]

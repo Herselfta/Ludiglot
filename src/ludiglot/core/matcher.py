@@ -138,6 +138,13 @@ class TextMatcher:
         start = time.time()
         result = self._lookup_best(lines)
         elapsed = time.time() - start
+
+        # 兜底补齐 OCR 上下文，避免某些早退路径缺失 _ocr_text/_query_key
+        if isinstance(result, dict):
+            ocr_text = " ".join(str(text).strip() for text, _ in lines if str(text).strip())
+            if ocr_text:
+                result.setdefault("_ocr_text", ocr_text)
+                result.setdefault("_query_key", normalize_en(ocr_text))
         
         # 性能监控日志
         if elapsed > 1.0:
@@ -152,6 +159,8 @@ class TextMatcher:
         return result
 
     def _clean_ocr_line(self, text: str) -> str:
+        text = re.sub(r"(?i)&lt;\s*/?\s*br\s*/?&gt;", " ", str(text or ""))
+        text = re.sub(r"(?i)<\s*/?\s*br\s*/?>?", " ", text)
         # 去掉图标/分隔符噪声，保留字母数字与空格
         cleaned = "".join(ch if ch.isalnum() or ch.isspace() else " " for ch in text)
         cleaned = " ".join(cleaned.split())

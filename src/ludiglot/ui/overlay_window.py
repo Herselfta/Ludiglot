@@ -2089,6 +2089,9 @@ class OverlayWindow(QMainWindow):
         return unique
 
     def _clean_ocr_line(self, text: str) -> str:
+        import re
+        text = re.sub(r"(?i)&lt;\s*/?\s*br\s*/?&gt;", " ", str(text or ""))
+        text = re.sub(r"(?i)<\s*/?\s*br\s*/?>?", " ", text)
         # 去掉图标/分隔符噪声，保留字母数字与空格
         cleaned = "".join(ch if ch.isalnum() or ch.isspace() else " " for ch in text)
         cleaned = " ".join(cleaned.split())
@@ -2771,8 +2774,9 @@ class OverlayWindow(QMainWindow):
                 # 使用换行分隔多个条目，检测是否包含HTML标签
                 en_joined = "\n".join(left)
                 cn_joined = "\n".join(right) if right else "（未找到中文匹配）"
-                en_joined = self._resolve_display_placeholders(en_joined, lang="en")
-                cn_joined = self._resolve_display_placeholders(cn_joined, lang="cn")
+                ocr_context = result.get("_ocr_text") if isinstance(result, dict) else None
+                en_joined = self._resolve_display_placeholders(en_joined, lang="en", ocr_context=ocr_context)
+                cn_joined = self._resolve_display_placeholders(cn_joined, lang="cn", ocr_context=ocr_context)
                 self.signals.log.emit(f"[PERF] 多条目处理: {(time.time()-t2)*1000:.1f}ms")
                 
                 t3 = time.time()
@@ -2890,8 +2894,9 @@ class OverlayWindow(QMainWindow):
                 en_text = f"<span style='color: #d4af37; font-weight: bold;'>{first_line}</span>\n{en_text}"
                 cn_text = f"<span style='color: #d4af37; font-weight: bold;'>{display_title}</span>\n{cn_text}"
                 self.signals.log.emit(f"[DISPLAY] 标题: {first_line} -> {display_title}, 内容: {text_key}")
-        en_text = self._resolve_display_placeholders(en_text, lang="en")
-        cn_text = self._resolve_display_placeholders(cn_text, lang="cn")
+        ocr_context = result.get("_ocr_text") if isinstance(result, dict) else None
+        en_text = self._resolve_display_placeholders(en_text, lang="en", ocr_context=ocr_context)
+        cn_text = self._resolve_display_placeholders(cn_text, lang="cn", ocr_context=ocr_context)
         self.signals.log.emit(f"[PERF] 提取文本内容: {(time.time()-t6)*1000:.1f}ms")
 
         # 音频识别逻辑：委托给 AudioResolver
@@ -3089,7 +3094,27 @@ class OverlayWindow(QMainWindow):
 '''
         return html
 
-    def _resolve_display_placeholders(self, text: str, lang: str = "en") -> str:
+    def _extract_numeric_values_from_context(self, ocr_context: str) -> list[str]:
+        import re
+        if not isinstance(ocr_context, str) or not ocr_context:
+            return []
+        values: list[str] = []
+        pattern = re.compile(
+            r"\d+(?:\.\d+)?\s?(?:kb|mb|gb|tb)"
+            r"|\d+(?:\.\d+)?%"
+            r"|\d+(?:\.\d+)+"
+            r"|\d+",
+            flags=re.IGNORECASE,
+        )
+        for m in pattern.finditer(ocr_context):
+            token = m.group(0).strip()
+            if not token:
+                continue
+            token = re.sub(r"\s+", "", token)
+            values.append(token)
+        return values
+
+    def _resolve_display_placeholders(self, text: str, lang: str = "en", ocr_context: str | None = None) -> str:
         """解析游戏文本占位符，输出用于GUI展示的最终文本。"""
         import re
         if not isinstance(text, str) or not text:
@@ -3108,6 +3133,25 @@ class OverlayWindow(QMainWindow):
             out,
             flags=re.IGNORECASE,
         )
+
+        # 数值索引占位符：优先用 OCR 文本中的数值按顺序回填
+        numeric_values = self._extract_numeric_values_from_context(ocr_context or "")
+        template_for_numeric = out
+
+        def _replace_indexed_placeholder(m: re.Match[str]) -> str:
+            idx = int(m.group(1))
+            if 0 <= idx < len(numeric_values):
+                val = numeric_values[idx]
+                # 模板若本身是 "{0}%"，且回填值已带%，避免出现 "%%"
+                if val.endswith("%"):
+                    next_ch = template_for_numeric[m.end(): m.end() + 1]
+                    if next_ch == "%":
+                        val = val[:-1]
+                return val
+            # 未知运行时参数，显示可读占位，避免原样 {0}
+            return f"<{idx}>"
+
+        out = re.sub(r"\{(\d+)\}", _replace_indexed_placeholder, out)
 
         # 输入提示占位符：优先显示 PC 按键文案，兜底 Press
         def _replace_input_token(m: re.Match[str]) -> str:
