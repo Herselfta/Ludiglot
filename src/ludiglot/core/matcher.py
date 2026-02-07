@@ -352,6 +352,58 @@ class TextMatcher:
         result["_first_line"] = title_hint
         return result
 
+    def _build_mixed_content_candidate(self, line_info: list[dict]) -> tuple[Dict[str, Any], float] | None:
+        """基于首行标题 + 其余正文构建混合内容候选。"""
+        if len(line_info) < 2:
+            return None
+
+        first_line = line_info[0]
+        if not first_line.get("is_title_like"):
+            return None
+
+        rest_lines = line_info[1:]
+        rest_text = " ".join(str(l.get("cleaned") or "") for l in rest_lines).strip()
+        if not rest_text:
+            return None
+
+        rest_key = normalize_en(rest_text)
+        if not rest_key:
+            return None
+
+        rest_word_count = len(rest_text.split())
+        if rest_word_count < 3:
+            return None
+
+        rest_result, rest_score = self.search_key(rest_key)
+        if rest_score < 0.5:
+            return None
+
+        matched_key = str(rest_result.get("_matched_key", ""))
+        is_good_match = len(matched_key) >= len(rest_key) * 0.6
+        if not is_good_match:
+            return None
+
+        rest_has_voice = self._has_voice_match(rest_result)
+        first_has_voice = self._has_voice_match(first_line.get("result") or {})
+        first_score = float(first_line.get("score") or 0.0)
+        is_title_plus_body = rest_word_count >= 8 and len(rest_key) >= 40
+
+        should_use = (
+            is_title_plus_body
+            or len(rest_key) > 100
+            or rest_has_voice
+            or (not first_has_voice and rest_score > first_score)
+            or first_score < 0.75
+        )
+        if not should_use:
+            return None
+
+        rest_result["_score"] = round(rest_score, 3)
+        rest_result["_query_key"] = rest_key
+        rest_result["_ocr_text"] = rest_text
+        rest_result["_first_line"] = str(first_line.get("cleaned") or "").strip()
+        return rest_result, rest_score
+
     def _extract_anchor_tokens(self, text: str) -> list[str]:
         """提取长文本中的区分性锚词，用于抑制“同模板技能”误匹配。"""
         words = re.findall(r"[A-Za-z][A-Za-z0-9']+", text.lower())
@@ -561,7 +613,8 @@ class TextMatcher:
 
         if not line_info: return None
         title_hint = self._extract_first_line_title_hint(lines, line_info)
-        
+        mixed_candidate = self._build_mixed_content_candidate(line_info)
+
         # 0. 尝试全量文本合并匹配 (针对长句被OCR拆分的情况)
         full_text_key = normalize_en(context_text)
         if full_text_key and len(full_text_key) > 30:
@@ -571,6 +624,16 @@ class TextMatcher:
              full_ratio = len(matched_key) / max(len(full_text_key), 1) if matched_key else 0.0
              # 收紧早退：避免中低分命中导致长技能文本跳错
              if full_score >= 0.82 or (full_score >= 0.72 and full_ratio >= 0.75):
+                 if mixed_candidate is not None:
+                     mixed_res, mixed_score = mixed_candidate
+                     mixed_key = str(mixed_res.get('_matched_key', ''))
+                     same_target = bool(matched_key and mixed_key and matched_key == mixed_key)
+                     if same_target or mixed_score >= full_score - 0.06:
+                         self.log(
+                             f"[MATCH] 完整文本块命中后采用混合内容: "
+                             f"full={full_score:.3f}, mixed={mixed_score:.3f}, same_target={same_target}"
+                         )
+                         return mixed_res
                  self.log(f"[MATCH] 完整文本块匹配成功: score={full_score:.3f}, ratio={full_ratio:.2f}")
                  return self._attach_title_hint(full_res, title_hint)
              if full_score >= 0.5:
@@ -735,28 +798,10 @@ class TextMatcher:
                 }
 
         # Mixed Content Check
-        if len(line_info) >= 2 and len(multi_items) < 3:
-            first_line = line_info[0]
-            rest_lines = line_info[1:]
-            if first_line['is_title_like']:
-                rest_text = " ".join(l['cleaned'] for l in rest_lines)
-                rest_key = normalize_en(rest_text)
-                rest_result, rest_score = self.search_key(rest_key)
-                
-                rest_word_count = len(rest_text.split())
-                if rest_score >= 0.5 and rest_word_count >= 3:
-                    rest_has_voice = self._has_voice_match(rest_result)
-                    first_has_voice = self._has_voice_match(first_line['result'])
-                    matched_key = rest_result.get('_matched_key', '')
-                    is_good_match = len(matched_key) >= len(rest_key) * 0.6
-                    
-                    if is_good_match and (len(rest_key) > 100 or rest_has_voice or (not first_has_voice and rest_score > first_line['score'])):
-                         self.log(f"[MATCH] 混合内容策略生效")
-                         rest_result['_score'] = round(rest_score, 3)
-                         rest_result['_query_key'] = rest_key
-                         rest_result['_ocr_text'] = rest_text
-                         rest_result['_first_line'] = first_line['cleaned']
-                         return rest_result
+        if mixed_candidate is not None and len(multi_items) < 3:
+            self.log(f"[MATCH] 混合内容策略生效")
+            mixed_res, _ = mixed_candidate
+            return mixed_res
 
         # List Mode Check (Original logic copied)
         line_scores = [(l['cleaned'], l['score'], l['result']) for l in line_info]
