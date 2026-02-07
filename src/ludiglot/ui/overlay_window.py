@@ -2772,8 +2772,10 @@ class OverlayWindow(QMainWindow):
                         f"[ITEM] {item.get('ocr')} -> {item.get('text_key')} (score={item.get('score')})"
                     )
                 # 使用换行分隔多个条目，检测是否包含HTML标签
-                en_joined = "\n".join(left)
-                cn_joined = "\n".join(right) if right else "（未找到中文匹配）"
+                en_joined_raw = "\n".join(left)
+                cn_joined_raw = "\n".join(right) if right else "（未找到中文匹配）"
+                en_joined = en_joined_raw
+                cn_joined = cn_joined_raw
                 ocr_context = (result.get("_ocr_context") or result.get("_ocr_text")) if isinstance(result, dict) else None
                 en_joined = self._resolve_display_placeholders(en_joined, lang="en", ocr_context=ocr_context)
                 cn_joined = self._resolve_display_placeholders(cn_joined, lang="cn", ocr_context=ocr_context)
@@ -2809,6 +2811,9 @@ class OverlayWindow(QMainWindow):
                 official_cn = result.get('_official_cn') or ''
                 self.signals.log.emit(f"[MATCH] 官方原文: {official_en}")
                 self.signals.log.emit(f"[MATCH] 官方译文: {official_cn}")
+                # [EN]/[CN] 记录匹配原文（保留标记与占位符，不做展示替换）
+                self.signals.log.emit(f"[EN] {en_joined_raw}")
+                self.signals.log.emit(f"[CN] {cn_joined_raw}")
                 self.signals.log.emit(f"[QUERY] OCR识别: {result.get('_ocr_text')} -> {result.get('_query_key')}")
                 # 检查是否有高置信度音频
                 has_audio = result.get('_has_audio', False)
@@ -2869,6 +2874,8 @@ class OverlayWindow(QMainWindow):
         t6 = time.time()
         en_text = ""
         cn_text = ""
+        en_log_raw = ""
+        cn_log_raw = ""
         text_key = None
         audio_hash = None
         audio_event = None
@@ -2880,6 +2887,8 @@ class OverlayWindow(QMainWindow):
             # 使用数据库官方英文原文（保留HTML标记）
             en_text = matches[0].get("official_en", "")
             cn_text = matches[0].get("official_cn", "")
+            en_log_raw = en_text or ""
+            cn_log_raw = cn_text or ""
             text_key = matches[0].get("text_key")
             audio_hash = matches[0].get("audio_hash")
             audio_event = matches[0].get("audio_event")
@@ -2939,6 +2948,8 @@ class OverlayWindow(QMainWindow):
             self.source_label.setPlainText(ocr_original)
             self._last_en_raw = ocr_original
             self._last_en_is_html = False
+            if not en_log_raw:
+                en_log_raw = ocr_original
         self.signals.log.emit(f"[PERF] 设置英文显示: {(time.time()-t8)*1000:.1f}ms")
         
         # 渲染中文文本（支持HTML标记）
@@ -2954,11 +2965,18 @@ class OverlayWindow(QMainWindow):
                 self.cn_label.setPlainText(cn_text)
                 self._last_cn_raw = cn_text
                 self._last_cn_is_html = False
-            self.signals.log.emit(f"[CN] {cn_text[:100]}..." if len(cn_text) > 100 else f"[CN] {cn_text}")
+            if not cn_log_raw:
+                cn_log_raw = cn_text
         else:
             self.cn_label.setPlainText("（未找到中文匹配）")
             self._last_cn_raw = "（未找到中文匹配）"
             self._last_cn_is_html = False
+            if not cn_log_raw:
+                cn_log_raw = "（未找到中文匹配）"
+
+        # [EN]/[CN] 记录匹配原文（保留标记与占位符，不做展示替换）
+        self.signals.log.emit(f"[EN] {en_log_raw}")
+        self.signals.log.emit(f"[CN] {cn_log_raw}")
 
         # 每次渲染结果后立刻同步文档级字体/行距，确保所有设置实时生效
         en_font, cn_font = self._build_content_fonts()
@@ -3024,7 +3042,7 @@ class OverlayWindow(QMainWindow):
             "yellow": "#fbbf24",
             "yellowd": "#ffd12f",
             "red": "#ef4444",
-            "redd": "#dc2626",
+            "redd": "#e2524c",
             "reda": "#f87171",
             "white": "#f8fafc",
             "rare2": "#60a5fa",
