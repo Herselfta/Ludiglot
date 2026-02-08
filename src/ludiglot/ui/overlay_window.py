@@ -1382,12 +1382,36 @@ class OverlayWindow(QMainWindow):
         if self.db:
             from ludiglot.core.matcher import TextMatcher
             from ludiglot.core.audio_resolver import AudioResolver
+            from ludiglot.core.text_bridge_translator import OllamaTextBridgeTranslator
+
+            bridge_translator = None
+            try:
+                bridge_timeout = float(getattr(self.config, "ocr_glm_timeout", 30) or 30)
+            except Exception:
+                bridge_timeout = 30.0
+            bridge_timeout = min(max(bridge_timeout, 2.0), 12.0)
+
+            try:
+                candidate = OllamaTextBridgeTranslator(
+                    endpoint=getattr(self.config, "ocr_glm_endpoint", None),
+                    model=getattr(self.config, "ocr_glm_ollama_model", None),
+                    timeout=bridge_timeout,
+                    logger=self.signals.log.emit,
+                )
+                if candidate.available:
+                    bridge_translator = candidate
+                    self.signals.log.emit(
+                        f"[MATCHER] 跨语言桥接已启用 (model={candidate.model}, timeout={bridge_timeout:.1f}s)"
+                    )
+            except Exception as exc:
+                self.signals.log.emit(f"[MATCHER] 跨语言桥接初始化失败: {exc}")
 
             self.matcher = TextMatcher(
                 self.db,
                 self.voice_map,
                 self.voice_event_index,
                 gender_preference=self.config.gender_preference,
+                cross_lang_translator=bridge_translator,
             )
             self.matcher.set_logger(self.signals.log.emit)
             self.signals.log.emit("[MATCHER] 匹配服务已初始化")

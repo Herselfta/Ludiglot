@@ -370,8 +370,112 @@ def build_text_db_from_root_all(data_root: Path) -> Dict[str, dict]:
             return build_text_db_from_root(data_root)
         except Exception:
             pass
-            
-    return db
+
+    return _repair_detached_language_matches(db)
+
+
+def _repair_detached_language_matches(db: Dict[str, dict]) -> Dict[str, dict]:
+    """
+    统一修复中英脱钩条目：
+    1) 先按 text_key 聚合可用的 EN/CN 文本，回填同 text_key 的缺失语言。
+    2) 回填后按 EN/CN 重新建立索引键，确保回填文本可被搜索命中。
+    """
+    all_matches: list[dict] = []
+    for rec in db.values():
+        if not isinstance(rec, dict):
+            continue
+        matches = rec.get("matches")
+        if not isinstance(matches, list):
+            continue
+        for item in matches:
+            if isinstance(item, dict):
+                all_matches.append(dict(item))
+
+    if not all_matches:
+        return db
+
+    en_by_text_key: Dict[str, str] = {}
+    cn_by_text_key: Dict[str, str] = {}
+    for item in all_matches:
+        text_key = str(item.get("text_key") or "")
+        if not text_key:
+            continue
+        en_text = str(item.get("official_en") or "")
+        cn_text = str(item.get("official_cn") or "")
+        if en_text and text_key not in en_by_text_key:
+            en_by_text_key[text_key] = en_text
+        if cn_text and text_key not in cn_by_text_key:
+            cn_by_text_key[text_key] = cn_text
+
+    patched_en = 0
+    patched_cn = 0
+    for item in all_matches:
+        text_key = str(item.get("text_key") or "")
+        if not text_key:
+            continue
+        en_text = str(item.get("official_en") or "")
+        cn_text = str(item.get("official_cn") or "")
+
+        if not en_text:
+            fallback_en = en_by_text_key.get(text_key, "")
+            if fallback_en:
+                item["official_en"] = fallback_en
+                patched_en += 1
+        if not cn_text:
+            fallback_cn = cn_by_text_key.get(text_key, "")
+            if fallback_cn:
+                item["official_cn"] = fallback_cn
+                patched_cn += 1
+
+    rebuilt: Dict[str, dict] = {}
+    seen: set[tuple[str, str, str, str, str]] = set()
+
+    def add_index(norm_key: str, match: dict) -> None:
+        if not norm_key:
+            return
+        text_key = str(match.get("text_key") or "")
+        source_json = str(match.get("source_json") or "")
+        official_en = str(match.get("official_en") or "")
+        official_cn = str(match.get("official_cn") or "")
+        sig = (norm_key, text_key, source_json, official_en, official_cn)
+        if sig in seen:
+            return
+        seen.add(sig)
+        if norm_key not in rebuilt:
+            rebuilt[norm_key] = {"key": norm_key, "matches": [dict(match)]}
+        else:
+            rebuilt[norm_key]["matches"].append(dict(match))
+
+    for item in all_matches:
+        en_text = str(item.get("official_en") or "")
+        cn_text = str(item.get("official_cn") or "")
+        cleaned_en = clean_en_text(en_text) if en_text else ""
+        cleaned_cn = clean_en_text(cn_text) if cn_text else ""
+        key_en = normalize_en(cleaned_en) if cleaned_en else ""
+        key_cn = normalize_en(cleaned_cn) if cleaned_cn else ""
+        add_index(key_en, item)
+        add_index(key_cn, item)
+
+    # 仅记录简要统计，便于版本更新时追踪脱钩规模变化
+    cn_only = 0
+    en_only = 0
+    both = 0
+    for item in all_matches:
+        has_en = bool(str(item.get("official_en") or ""))
+        has_cn = bool(str(item.get("official_cn") or ""))
+        if has_en and has_cn:
+            both += 1
+        elif has_cn and not has_en:
+            cn_only += 1
+        elif has_en and not has_cn:
+            en_only += 1
+
+    print(
+        "[TEXT_DB] 语言修复: "
+        f"patched_en={patched_en}, patched_cn={patched_cn}, "
+        f"rows_both={both}, rows_cn_only={cn_only}, rows_en_only={en_only}"
+    )
+    return rebuilt or db
 
 
 
@@ -444,7 +548,8 @@ def build_text_db(
     """从 MultiText 构建数据库（兼容多种 JSON 结构）。"""
     en_map = _load_map(en_json)
     zh_map = _load_map(zh_json)
-    return build_text_db_from_maps(en_map, zh_map, en_json.name, plot_audio, voice_map)
+    db = build_text_db_from_maps(en_map, zh_map, en_json.name, plot_audio, voice_map)
+    return _repair_detached_language_matches(db)
 
 
 def save_text_db(db: Dict[str, dict], output: Path) -> None:

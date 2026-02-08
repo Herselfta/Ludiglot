@@ -1,6 +1,7 @@
 from __future__ import annotations
 import re
 import time
+from difflib import SequenceMatcher
 from typing import Any, Dict, List, Tuple, Optional
 from ludiglot.core.search import FuzzySearcher
 from ludiglot.core.indexed_search import IndexedSearchEngine
@@ -39,11 +40,14 @@ class TextMatcher:
         voice_map: Dict[str, Any] = None,
         voice_event_index: VoiceEventIndex = None,
         gender_preference: str = "female",
+        cross_lang_translator: Any = None,
     ):
         self.db = db
         self.voice_map = voice_map or {}
         self.voice_event_index = voice_event_index
         self.searcher = FuzzySearcher()
+        self.cross_lang_translator = cross_lang_translator
+        self._cross_lang_query_cache: dict[str, str] = {}
         pref = str(gender_preference or "female").strip().lower()
         self.gender_preference = pref if pref in {"female", "male"} else "female"
         
@@ -62,6 +66,17 @@ class TextMatcher:
             "critdmgbonus": "maincritdmg",
         }
         self._title_translation_cache: dict[str, str] = {}
+        self._title_bridge_index_ready = False
+        self._title_en_base_to_cn: dict[str, str] = {}
+        self._title_cn_name_set: set[str] = set()
+        self._title_modifier_prefix_map: dict[str, str] = {
+            "young": "年幼的",
+            "younger": "年幼的",
+            "old": "旧日的",
+            "former": "旧日的",
+            "past": "旧日的",
+            "elder": "年长的",
+        }
         
         # 然后初始化索引化搜索引擎（可能调用 log）
         db_keys = list(db.keys())
@@ -139,9 +154,326 @@ class TextMatcher:
             return False
         return bool(re.search(r"\b\d+\s*[dhms](?:\s+\d+\s*[dhms])*\b", text, flags=re.IGNORECASE))
 
+    def _looks_english_query(self, text: str) -> bool:
+        s = str(text or "")
+        if not s:
+            return False
+        latin = sum(1 for ch in s if ch.isascii() and ch.isalpha())
+        cjk = sum(1 for ch in s if "\u4e00" <= ch <= "\u9fff")
+        return latin >= 4 and latin >= cjk
+
+    def _translate_query_to_cn(self, query_text: str) -> str:
+        if not self.cross_lang_translator:
+            return ""
+        cleaned = self._clean_ocr_line(query_text)
+        if not cleaned or not self._looks_english_query(cleaned):
+            return ""
+
+        cached = self._cross_lang_query_cache.get(cleaned)
+        if cached is not None:
+            return cached
+
+        translated = ""
+        try:
+            translated = str(self.cross_lang_translator.translate_en_to_zh(cleaned) or "").strip()
+        except Exception as exc:
+            self.log(f"[MATCH] 跨语言桥接翻译失败: {exc}")
+            translated = ""
+
+        translated = self._clean_ocr_line(translated)
+        if len(self._cross_lang_query_cache) >= 256:
+            old_keys = list(self._cross_lang_query_cache.keys())[:128]
+            for k in old_keys:
+                self._cross_lang_query_cache.pop(k, None)
+        self._cross_lang_query_cache[cleaned] = translated
+        return translated
+
+    def _cross_lang_rescue_search(self, context_text: str) -> Dict[str, Any] | None:
+        """
+        常规英文匹配失败时，将 OCR 文本翻译为中文再检索。
+        目标：兜住“数据库仅有中文文本”的非剧情/系统条目。
+        """
+        zh_query = self._translate_query_to_cn(context_text)
+        if not zh_query:
+            return None
+
+        key = normalize_en(zh_query)
+        if not key:
+            return None
+
+        result, score = self.search_key(key)
+        if not isinstance(result, dict) or score < 0.62:
+            self.log(
+                f"[MATCH] 跨语言桥接未命中: zh={zh_query[:72]!r}, score={score:.3f}"
+            )
+            return None
+
+        matches = result.get("matches")
+        first = matches[0] if isinstance(matches, list) and matches else {}
+        cn_text = first.get("official_cn") if isinstance(first, dict) else ""
+        if not cn_text:
+            return None
+
+        result["_score"] = round(score, 3)
+        result["_query_key"] = key
+        result["_ocr_text"] = str(context_text or "")
+        result["_ocr_context"] = str(context_text or "")
+        result["_bridge_query_cn"] = zh_query
+        result["_bridge_mode"] = "en_to_cn"
+        self.log(
+            f"[MATCH] 跨语言桥接命中: score={score:.3f}, zh={zh_query[:72]!r}, "
+            f"text_key={first.get('text_key') if isinstance(first, dict) else ''}"
+        )
+        return result
+
+    def _clean_title_text(self, text: str) -> str:
+        cleaned = "".join(ch if ch.isalnum() or ch.isspace() else " " for ch in str(text or ""))
+        return " ".join(cleaned.split()).strip()
+
+    def _title_tokens(self, text: str) -> list[str]:
+        return [tok.lower() for tok in re.findall(r"[A-Za-z0-9]+", str(text or "")) if tok]
+
+    def _title_text_similarity(self, left: str, right: str) -> float:
+        a = str(left or "").strip().lower()
+        b = str(right or "").strip().lower()
+        if not a or not b:
+            return 0.0
+        if a == b:
+            return 1.0
+
+        a_len = len(a)
+        b_len = len(b)
+        short_len = min(a_len, b_len)
+        long_len = max(a_len, b_len)
+        prefix_score = 0.0
+        if short_len >= 4 and (a.startswith(b) or b.startswith(a)):
+            prefix_score = short_len / max(long_len, 1)
+
+        fuzz_score = 0.0
+        if fuzz:
+            try:
+                fuzz_score = float(fuzz.ratio(a, b)) / 100.0
+            except Exception:
+                pass
+
+        seq_score = SequenceMatcher(None, a, b).ratio()
+        return max(prefix_score, fuzz_score, seq_score)
+
+    def _is_name_like_text_key(self, text_key: str) -> bool:
+        tk = str(text_key or "").lower()
+        if not tk:
+            return False
+        return (
+            tk.endswith("_name")
+            or "_name_" in tk
+            or tk.startswith("speaker_")
+            or tk.startswith("roleinfo_")
+            or tk.startswith("occupationconfig_")
+        )
+
+    def _is_short_name_text(self, text: str, *, is_cn: bool) -> bool:
+        raw = str(text or "").strip()
+        if not raw:
+            return False
+        if "{message}" in raw.lower():
+            return False
+        if "\n" in raw:
+            return False
+
+        cleaned = self._clean_title_text(raw)
+        if not cleaned:
+            return False
+
+        if is_cn:
+            if len(cleaned) > 20:
+                return False
+            if any(ch in raw for ch in ("。", "，", "！", "？", "；", "：")):
+                return False
+            return any("\u4e00" <= ch <= "\u9fff" for ch in cleaned)
+
+        tokens = self._title_tokens(cleaned)
+        if not tokens or len(tokens) > 4:
+            return False
+        if len(cleaned) > 40:
+            return False
+        if any(ch in raw for ch in ("—", "…", "!", "?", ":", ",", ".", "(", ")", "{", "}")):
+            return False
+        return True
+
+    def _build_title_bridge_index(self) -> None:
+        if self._title_bridge_index_ready:
+            return
+
+        en_to_cn: dict[str, str] = {}
+        cn_names: set[str] = set()
+        articles = {"the", "a", "an"}
+
+        for rec in self.db.values():
+            if not isinstance(rec, dict):
+                continue
+            matches = rec.get("matches")
+            if not isinstance(matches, list):
+                continue
+            for item in matches:
+                if not isinstance(item, dict):
+                    continue
+                text_key = str(item.get("text_key") or "")
+                if not self._is_name_like_text_key(text_key):
+                    continue
+
+                en_raw = str(item.get("official_en") or item.get("en") or "").strip()
+                cn_raw = str(item.get("official_cn") or item.get("cn") or "").strip()
+                if not en_raw and not cn_raw:
+                    continue
+
+                cn_clean = self._clean_title_text(cn_raw)
+                if cn_clean and self._is_short_name_text(cn_clean, is_cn=True):
+                    cn_names.add(cn_clean)
+
+                en_clean = self._clean_title_text(en_raw)
+                if not en_clean or not cn_clean:
+                    continue
+                if not self._is_short_name_text(en_clean, is_cn=False):
+                    continue
+                if not self._is_short_name_text(cn_clean, is_cn=True):
+                    continue
+
+                key = normalize_en(en_clean)
+                if key and key not in en_to_cn:
+                    en_to_cn[key] = cn_clean
+
+                tokens = self._title_tokens(en_clean)
+                if len(tokens) >= 2 and tokens[0] in articles:
+                    alias_key = normalize_en(" ".join(tokens[1:]))
+                    if alias_key and alias_key not in en_to_cn:
+                        en_to_cn[alias_key] = cn_clean
+
+        self._title_en_base_to_cn = en_to_cn
+        self._title_cn_name_set = cn_names
+        self._title_bridge_index_ready = True
+        self.log(
+            f"[MATCH] 标题桥接索引构建完成: en_base={len(en_to_cn)}, cn_names={len(cn_names)}"
+        )
+
+    def _lookup_base_cn_from_en(self, query_key: str) -> tuple[str, float]:
+        qk = str(query_key or "").strip().lower()
+        if not qk:
+            return "", 0.0
+
+        direct = self._title_en_base_to_cn.get(qk)
+        if direct:
+            return direct, 1.0
+        if len(qk) < 4:
+            return "", 0.0
+
+        max_len_delta = max(2, int(len(qk) * 0.35))
+        best_cn = ""
+        best_score = 0.0
+        for base_key, cn in self._title_en_base_to_cn.items():
+            if abs(len(base_key) - len(qk)) > max_len_delta:
+                continue
+            if qk[0] != base_key[0]:
+                continue
+            s = self._title_text_similarity(qk, base_key)
+            if s > best_score:
+                best_score = s
+                best_cn = cn
+
+        if best_score >= 0.86:
+            return best_cn, best_score
+        return "", best_score
+
+    def _resolve_detached_title_cn(self, query_title: str) -> str:
+        """处理中英脱钩标题：基于基底名 + 修饰词推断中文标题。"""
+        cleaned = self._clean_title_text(query_title)
+        if not cleaned:
+            return ""
+        tokens = self._title_tokens(cleaned)
+        if not tokens or len(tokens) > 6:
+            return ""
+
+        self._build_title_bridge_index()
+
+        # 先做直接基底映射（例如 Aemeath -> 爱弥斯）
+        full_key = normalize_en(cleaned)
+        if full_key:
+            base_direct, base_score = self._lookup_base_cn_from_en(full_key)
+            if base_direct and base_score >= 0.90:
+                return base_direct
+
+        # 修饰词映射（young/old/... + base name）
+        modifier = tokens[0]
+        prefix = self._title_modifier_prefix_map.get(modifier)
+        if not prefix or len(tokens) < 2:
+            return ""
+
+        stop_words = {"the", "a", "an", "at", "of", "to", "and", "or", "for", "in", "on", "with", "from", "by"}
+        base_tokens = [tok for tok in tokens[1:] if tok not in stop_words] or tokens[1:]
+        base_key = normalize_en(" ".join(base_tokens))
+        base_cn, base_score = self._lookup_base_cn_from_en(base_key)
+        if not base_cn:
+            return ""
+
+        expected = f"{prefix}{base_cn}"
+        if expected in self._title_cn_name_set:
+            self.log(
+                f"[MATCH] 标题脱钩桥接命中: query={query_title!r}, base_score={base_score:.3f}, cn={expected!r}"
+            )
+            return expected
+
+        # 放宽：同前缀且包含基底名的现有条目
+        for cn_name in self._title_cn_name_set:
+            if cn_name.startswith(prefix) and base_cn in cn_name:
+                self.log(
+                    f"[MATCH] 标题脱钩桥接近似命中: query={query_title!r}, base_score={base_score:.3f}, cn={cn_name!r}"
+                )
+                return cn_name
+        return ""
+
+    def _is_reliable_title_fallback(
+        self,
+        query_title: str,
+        query_key: str,
+        candidate_en: str,
+        score: float,
+    ) -> bool:
+        cand_clean = self._clean_title_text(candidate_en)
+        cand_key = normalize_en(cand_clean)
+        if not cand_key:
+            return False
+
+        # 完全同键时保持原阈值
+        if cand_key == query_key:
+            return score >= 0.7
+
+        # 非同键回退从严，避免 Young Aemeath -> Young at Heart
+        if score < 0.88:
+            return False
+
+        q_tokens = self._title_tokens(query_title)
+        c_tokens = self._title_tokens(candidate_en)
+        if not q_tokens or not c_tokens:
+            return False
+
+        stop_words = {"the", "a", "an", "at", "of", "to", "and", "or", "for", "in", "on", "with", "from", "by"}
+        q_sig = [t for t in q_tokens if t not in stop_words] or q_tokens
+
+        strong_hits = 0
+        for tok in q_sig:
+            best = max(self._title_text_similarity(tok, ct) for ct in c_tokens)
+            if best >= 0.84:
+                strong_hits += 1
+
+        required_hits = len(q_sig)
+        if len(q_sig) >= 3:
+            required_hits -= 1
+        if strong_hits < max(1, required_hits):
+            return False
+        return True
+
     def resolve_title_cn(self, title: str) -> str:
         """解析标题（如角色名）对应的中文显示，供 UI 直接渲染。"""
-        cleaned = "".join(ch if ch.isalnum() or ch.isspace() else " " for ch in str(title or "")).strip()
+        cleaned = self._clean_title_text(title)
         key = normalize_en(cleaned)
         if not key:
             return ""
@@ -208,15 +540,32 @@ class TextMatcher:
             return best_cn
 
         # 回退：无可判别候选时沿用主匹配结果
-        cn = result.get("official_cn") or result.get("cn")
-        if not cn and isinstance(matches, list) and matches:
+        fallback_cn = result.get("official_cn") or result.get("cn")
+        fallback_en = result.get("official_en") or result.get("en")
+        if isinstance(matches, list) and matches and (not fallback_cn or not fallback_en):
             first = matches[0]
             if isinstance(first, dict):
-                cn = first.get("official_cn") or first.get("cn")
-        if cn and score >= 0.7:
-            value = str(cn)
+                if not fallback_cn:
+                    fallback_cn = first.get("official_cn") or first.get("cn")
+                if not fallback_en:
+                    fallback_en = first.get("official_en") or first.get("en")
+
+        if fallback_cn and self._is_reliable_title_fallback(cleaned, key, str(fallback_en or ""), score):
+            value = str(fallback_cn)
             self._title_translation_cache[key] = value
             return value
+
+        # 脱钩桥接：某些版本的 Name 条目只有中文，补偿解析
+        bridged_cn = self._resolve_detached_title_cn(cleaned)
+        if bridged_cn:
+            self._title_translation_cache[key] = bridged_cn
+            return bridged_cn
+
+        if fallback_cn:
+            self.log(
+                f"[MATCH] 标题回退拒绝: query={cleaned!r}, "
+                f"candidate={str(fallback_en or '')!r}, score={score:.3f}"
+            )
 
         self._title_translation_cache[key] = ""
         return ""
@@ -1081,11 +1430,32 @@ class TextMatcher:
         if best_result:
             # 修改：增加全局置信度阈值
             if best_score < 0.55:
+                rescue = self._cross_lang_rescue_search(context_text)
+                if rescue is not None:
+                    self.log(f"[SEARCH] 耗时: {elapsed:.2f}s, 采用跨语言桥接结果")
+                    return self._attach_title_hint(rescue, title_hint)
                 self.log(f"[SEARCH] 耗时: {elapsed:.2f}s, 最佳匹配权重过低 ({best_score:.3f}), 丢弃结果")
                 return None
+
+            # 中等置信度结果做一次跨语言复核，避免被“相似但错误”的英文候选吸附
+            if best_score < 0.82:
+                rescue = self._cross_lang_rescue_search(context_text)
+                if rescue is not None:
+                    rescue_score = float(rescue.get("_score") or 0.0)
+                    base_score = float(best_result.get("_score") or 0.0)
+                    if rescue_score >= max(0.72, base_score + 0.12):
+                        self.log(
+                            f"[SEARCH] 耗时: {elapsed:.2f}s, "
+                            f"跨语言桥接优先: base={base_score:.3f}, rescue={rescue_score:.3f}"
+                        )
+                        return self._attach_title_hint(rescue, title_hint)
             
             self.log(f"[SEARCH] 耗时: {elapsed:.2f}s, 最佳匹配: {best_result.get('_query_key')} (score={best_result.get('_score')}, weighted={best_score:.3f})")
         else:
+            rescue = self._cross_lang_rescue_search(context_text)
+            if rescue is not None:
+                self.log(f"[SEARCH] 耗时: {elapsed:.2f}s, 常规未命中，采用跨语言桥接结果")
+                return self._attach_title_hint(rescue, title_hint)
             self.log(f"[SEARCH] 耗时: {elapsed:.2f}s, 未找到合适匹配")
         
         return self._attach_title_hint(best_result, title_hint)
