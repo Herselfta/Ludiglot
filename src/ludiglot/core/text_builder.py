@@ -326,13 +326,45 @@ def build_text_db_from_root_all(data_root: Path) -> Dict[str, dict]:
     # 语言对定义
     langs = [("en", "zh-Hans"), ("en", "zh-CN")]
     
-    # 探测可能的数据目录
-    roots = [
+    # 探测可能的数据目录（种子根）
+    seed_roots = [
         data_root / "ConfigDB",
         data_root / "Client" / "Content" / "Aki" / "ConfigDB",
         data_root / "TextMap",
         data_root / "Client" / "Content" / "Aki" / "TextMap",
     ]
+
+    # 自动发现嵌套的语言目录对。
+    # 鸣潮 PAK 内部结构可能包含 ConfigDB/ConfigDB/{lang}/ 等多层嵌套，
+    # 解包后会出现 data/ConfigDB/ConfigDB/{en,zh-Hans}/ 这样的路径。
+    # 这里递归扫描种子根下的所有 {en} 子目录并尝试匹配 {zh} 对。
+    roots: list[Path] = []
+    _seen_roots: set[Path] = set()
+    for sr in seed_roots:
+        if not sr.exists():
+            continue
+        # 添加种子本身
+        if sr not in _seen_roots:
+            roots.append(sr)
+            _seen_roots.add(sr)
+        # 发现额外嵌套：遍历种子根的直接子目录，若子目录也包含语言对则加入
+        try:
+            for child in sr.iterdir():
+                if not child.is_dir():
+                    continue
+                # 跳过语言目录本身（en, zh-Hans 等）
+                if child.name in ("en", "zh-Hans", "zh-CN", "ja", "ko", "de", "fr", "es", "ru",
+                                  "pt", "id", "vi", "th", "zh-Hant", "Misc"):
+                    continue
+                # 检查这个子目录是否包含语言对
+                for en_name, zh_name in langs:
+                    if (child / en_name).is_dir() and (child / zh_name).is_dir():
+                        if child not in _seen_roots:
+                            roots.append(child)
+                            _seen_roots.add(child)
+                        break
+        except OSError:
+            pass
 
     plot_audio = load_plot_audio_map(data_root)
     # 启用缓存，确保 voice_map 可读
