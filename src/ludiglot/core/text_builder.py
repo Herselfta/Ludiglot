@@ -18,6 +18,43 @@ def normalize_en(text: str) -> str:
 _TAG_RE = re.compile(r"</?[^>]+>")
 _BRACE_RE = re.compile(r"\{[^}]+\}")
 
+# 性别占位符正则：匹配 {Male=xxx;Female=yyy} 或 {Female=xxx;Male=yyy} 格式
+_GENDER_PLACEHOLDER_RE = re.compile(
+    r"\{(?:Male=([^;]+);Female=([^}]+)|Female=([^;]+);Male=([^}]+))\}",
+    re.IGNORECASE
+)
+
+
+def expand_gender_placeholder(text: str, gender: str) -> str:
+    """
+    将性别占位符展开为具体的性别变体。
+    
+    参数:
+        text: 原始文本，可能包含 {Male=He;Female=She} 格式的占位符
+        gender: "male" 或 "female"
+    
+    返回:
+        展开后的文本
+    """
+    def replace_match(m):
+        # 匹配格式：{Male=xxx;Female=yyy} 或 {Female=xxx;Male=yyy}
+        male_first, female_first = m.group(1), m.group(2)
+        female_second, male_second = m.group(3), m.group(4)
+        
+        if male_first is not None:
+            # 格式: {Male=xxx;Female=yyy}
+            return male_first if gender == "male" else female_first
+        else:
+            # 格式: {Female=xxx;Male=yyy}
+            return male_second if gender == "male" else female_second
+    
+    return _GENDER_PLACEHOLDER_RE.sub(replace_match, text)
+
+
+def has_gender_placeholder(text: str) -> bool:
+    """检查文本是否包含性别占位符。"""
+    return bool(_GENDER_PLACEHOLDER_RE.search(text))
+
 
 def clean_en_text(text: str) -> str:
     text = _TAG_RE.sub("", text)
@@ -441,15 +478,6 @@ def build_text_db_from_maps(
         if not isinstance(zh_text, str):
             zh_text = ""
 
-        cleaned_en = clean_en_text(en_text) if en_text else ""
-        cleaned_zh = clean_en_text(zh_text) if zh_text else ""
-
-        key_en = normalize_en(cleaned_en) if cleaned_en else ""
-        key_zh = normalize_en(cleaned_zh) if cleaned_zh else ""
-
-        if not key_en and not key_zh:
-            continue
-
         audio_hash, audio_event = _resolve_audio_hash(text_key, plot_audio, voice_map)
         match = {
             "text_key": text_key,
@@ -462,8 +490,38 @@ def build_text_db_from_maps(
             "terms": [],
         }
 
-        add_match(key_en, text_key, match)
-        add_match(key_zh, text_key, match)
+        # 生成规范化键列表
+        keys_to_add: list[str] = []
+        
+        # 原有逻辑：清理HTML标签和所有花括号占位符
+        cleaned_en = clean_en_text(en_text) if en_text else ""
+        cleaned_zh = clean_en_text(zh_text) if zh_text else ""
+        
+        key_en = normalize_en(cleaned_en) if cleaned_en else ""
+        key_zh = normalize_en(cleaned_zh) if cleaned_zh else ""
+        
+        if key_en:
+            keys_to_add.append(key_en)
+        if key_zh:
+            keys_to_add.append(key_zh)
+        
+        # 新增：为包含性别占位符的文本生成 male 和 female 变体的键
+        if en_text and has_gender_placeholder(en_text):
+            for gender in ("male", "female"):
+                expanded = expand_gender_placeholder(en_text, gender)
+                # 清理HTML标签（但保留已展开的性别文本）
+                expanded = _TAG_RE.sub("", expanded)
+                # 移除其他非性别占位符（如 {0}、{TA} 等）
+                expanded = _BRACE_RE.sub("", expanded)
+                expanded_key = normalize_en(expanded)
+                if expanded_key and expanded_key not in keys_to_add:
+                    keys_to_add.append(expanded_key)
+        
+        if not keys_to_add:
+            continue
+
+        for k in keys_to_add:
+            add_match(k, text_key, match)
     return db
 
 
