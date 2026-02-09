@@ -65,11 +65,13 @@
 
 ---
 
-### Resource Patch 翻译缺失（2026-01-26 已修复）
+### Resource Patch 翻译缺失（2026-01-26 Overlay 临时修复 → 2026-02-10 FModelCLI 根治）
 
-**问题**：基础 PAK 中 8,427 条目 EN 字段为空（ZH 有内容），Resource Patch 包含完整翻译但未被提取
+**问题**：基础 PAK 中 8,427 条目 EN 字段为空（ZH 有内容），Resource Patch 包含完整翻译但导出时被基础版本覆盖
 
-**修复**：在 `game_pak_update.py` 增加 Resource Patch Overlay 逻辑，自动扫描并覆盖基础版本
+**根因**：FModelCLI 遍历 `provider.Files`（`GetEnumerator()` yield 所有 PAK 条目含重复），补丁版本先写入但被后续基础版本覆盖
+
+**最终修复**：FModelCLI v1.1.0 导出循环加入 `HashSet` 去重 — 首次出现（最高 `ReadOrder` = 补丁优先）为权威版本。Resource Patch Overlay 已废弃
 
 **成果**：修复 1,782 条主线/支线/角色剧情翻译缺失
 

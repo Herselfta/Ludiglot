@@ -51,7 +51,70 @@
   * 建立索引：`Normalized English` → `TextKey`
   * 支持多语言：en, zh-Hans, ja, ko 等
 
-### 3.2 Audio Pipeline
+### 3.2 PAK Extraction Strategy
+
+#### FModelCLI 工作模式
+
+```csharp
+// FModelCLI/Program.cs L158
+var provider = new DefaultFileProvider(
+    gameDir,                          // E:/Wuthering Waves/Wuthering Waves Game
+    SearchOption.AllDirectories,      // 递归扫描所有子目录
+    version, 
+    StringComparer.OrdinalIgnoreCase
+);
+provider.Mount();  // 挂载所有找到的 PAK
+```
+
+**扫描范围**：
+- `Content/Paks/*.pak` - 基础游戏资源
+- `Content/Paks/pakchunk0-WindowsNoEditor.pak` - 主要数据包
+- `Saved/Resources/<ver>/Resource/*.pak` - 增量补丁
+
+#### CUE4Parse PAK 合并策略
+
+**问题核心**：当多个 PAK 包含同一虚拟路径时的导出行为
+
+```
+基础 PAK  (pakchunk2-WindowsNoEditor.pak):   ReadOrder = 3      (EN 字段为空)
+补丁 PAK  (pakchunk2-WindowsNoEditor_P.pak): ReadOrder = 103    (EN 字段完整)
+```
+
+**CUE4Parse 内部优先级**（源码分析 `FileProviderDictionary.cs`）：
+
+| API | 行为 | 结果 |
+|-----|------|------|
+| `TryGetValue(key)` | `OrderByDescending(ReadOrder)` 首个匹配即返回 | ✅ 补丁 (103) 正确胜出 |
+| `GetEnumerator()` | `OrderByDescending(ReadOrder)` 遍历所有 bag，yield 每条条目，**不去重** | ⚠️ 同一路径出现两次 |
+
+`ReadOrder` 计算（`AbstractVfsReader.VerifyReadOrder()`）：
+- 基础 PAK: `GetPakOrderFromPakFilePath() = 3`
+- 补丁 `_P.pak`: `3 + 100 × (versionNumber + 1) = 103`（补丁始终更高）
+
+**旧 FModelCLI 的 bug**：
+```csharp
+foreach (var file in provider.Files)   // GetEnumerator(): 补丁条目先出，基础条目后出
+    File.WriteAllBytes(outPath, ...);  // 后写覆盖先写 → 基础版本覆盖补丁版本
+```
+
+#### 修复方案：FModelCLI ReadOrder 去重（v1.1.0）
+
+```csharp
+var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+foreach (var file in provider.Files)
+{
+    if (!seen.Add(file.Key)) continue;  // 首次出现 (最高 ReadOrder) 为权威版本
+    // ... export
+}
+```
+
+**优势**：
+- ✅ 从根源修复，一次遍历，零重复写入
+- ✅ 所有场景自动生效（不限于 ConfigDB）
+- ✅ 无需 Resource Patch Overlay 二次提取
+- ✅ 性能提升：跳过重复文件的 Read() + WriteAllBytes()
+
+### 3.3 Audio Pipeline
 
 基于 `PlotAudio.json` 的发现，语音调用链路如下：
 
@@ -60,13 +123,13 @@
 3. **Hash Calculation**: 使用 **FNV-1a (32-bit)** 算法计算哈希值
 4. **Local Lookup**: 在本地查找 `{hash}.wem` 并转码播放
 
-### 3.3 Font Pipeline
+### 3.4 Font Pipeline
 
 * **Source**: `Client/Content/Aki/UI/Framework/LGUI/Font/*.ufont`
 * **Output**: `data/Fonts/*.ttf`（自动转换扩展名）
 * **Usage**: UI 字体选择菜单自动加载
 
-### 3.4 Database Schema
+### 3.5 Database Schema
 
 ```json
 {
@@ -84,7 +147,7 @@
 }
 ```
 
-### 3.5 Database Construction Pipeline
+### 3.6 Database Construction Pipeline
 
 **Architecture**: `build_text_db_from_root_all()` 采用多根扫描策略。
 

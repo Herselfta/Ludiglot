@@ -20,11 +20,19 @@
 **Phase 2 - Resource Patch 发现**：
 - 定位到 `Client/Saved/Resources/3.1.0/Resource/3.1.13/pakchunk2-WindowsNoEditor_P.pak` (747MB)
 - 补丁包含完整翻译，修复了基础 PAK 中 1,782 条空 EN 条目
-- CUE4Parse 的默认提取策略未正确优先补丁版本
+- **FModelCLI 导出循环迭代器不去重 bug**（已在 FModelCLI v1.1.0 修复）：
+  - CUE4Parse 的 `FileProviderDictionary` 按 `ReadOrder` 降序管理优先级
+  - 补丁 PAK (`_P.pak`) 的 `ReadOrder = base(3) + 100×version = 103`，高于基础 PAK (3)
+  - **单次查询 `TryGetValue()` 正确返回补丁版本**（游戏运行时无问题）
+  - **但 `GetEnumerator()` yield 所有条目包括重复**：先 yield 补丁 (103)，后 yield 基础 (3)
+  - FModelCLI 的 `foreach (var file in provider.Files)` 遍历全部条目并 `File.WriteAllBytes()`
+  - **结果：补丁版本先写入磁盘，基础版本后写入覆盖 → 最终磁盘上是空 EN 的基础版本**
+  - 修复方案：导出循环加入 `HashSet` 去重，首次出现（最高 ReadOrder）为权威版本
 
-**Phase 3 - Resource Patch 修复**（已在之前版本完成）：
-- 在 `game_pak_update.py` 增加 Resource Patch Overlay 逻辑（lines 301-326）
-- 解包后扫描 `Client/Saved/Resources/` 并重复提取 ConfigDB 覆盖基础版本
+**Phase 3 - Resource Patch 修复**（已在之前版本完成，后被 FModelCLI 去重修复替代）：
+- 原方案：在 `game_pak_update.py` 增加 Resource Patch Overlay — 二次提取补丁目录覆盖基础文件
+- **已废弃**：FModelCLI v1.1.0 在导出循环中加入 `HashSet` 去重，从根源修复问题
+- 去重机制确保每个虚拟路径只写入最高 `ReadOrder`（补丁优先）版本，无需二次提取
 
 **Phase 4 - 匹配失败复现**：
 - 用户报告修复后仍有文本无法匹配（如 "Bioprinter"/"Kronablight"）

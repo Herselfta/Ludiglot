@@ -298,29 +298,12 @@ def update_from_game_paks(cfg, config_path: Path, output_db_path: Path, progress
     font_filter = "UI/Framework/LGUI/Font/"
     native_extractor.run_extraction(pak_root, keys_str, data_root, font_filter)
 
-    # ── Resource Patch Overlay ──────────────────────────────────
-    # 鸣潮将增量资源补丁下载到 Client/Saved/Resources/<ver>/Resource/ 目录。
-    # 基础 PAK (Content/Paks/) 中的 ConfigDB 可能缺少新版本的英文翻译，
-    # 而补丁 PAK (_P.pak) 包含最新的已填充翻译。
-    # CUE4Parse 在合并冲突路径时可能无法正确选择补丁版本，
-    # 因此这里进行二次提取以确保补丁覆盖基础数据。
-    _resource_patch_dirs = sorted(
-        (pak_root / "Client" / "Saved" / "Resources").rglob("Resource"),
-        key=lambda p: str(p),
-    ) if (pak_root / "Client" / "Saved" / "Resources").exists() else []
-    
-    for res_dir in _resource_patch_dirs:
-        # 跳过非目录
-        if not res_dir.is_dir():
-            continue
-        # 确认里面确实有 pak 文件
-        if not any(res_dir.rglob("*.pak")):
-            continue
-        _log(progress, f"[PAK] 发现资源补丁目录: {res_dir}")
-        _log(progress, f"[PAK] 正在从资源补丁覆盖 ConfigDB ...")
-        native_extractor.run_extraction(res_dir, keys_str, data_root, "ConfigDB/")
-        for lang in options.languages:
-            native_extractor.run_extraction(res_dir, keys_str, data_root, f"ConfigDB/{lang}")
+    # ── Resource Patch Overlay（已废弃） ──────────────────────────
+    # FModelCLI v1.1.0 起，导出循环已内置 ReadOrder 去重：
+    #   FileProviderDictionary.GetEnumerator() 按 ReadOrder 降序 yield，
+    #   补丁 PAK (_P.pak, ReadOrder=103) 先于基础 PAK (ReadOrder=3)，
+    #   HashSet 去重确保只写入最高优先级版本。
+    # 因此不再需要二次提取补丁目录。
     # ── END Resource Patch Overlay ──────────────────────────────
 
     # Audio Extraction (if requested)
