@@ -84,6 +84,82 @@
 }
 ```
 
+### 3.5 Database Construction Pipeline
+
+**Architecture**: `build_text_db_from_root_all()` 采用多根扫描策略。
+
+#### 扫描根 (Scan Roots)
+
+```python
+roots = [
+    data_root / "ConfigDB",                          # Primary ConfigDB
+    data_root / "Client" / "Content" / "Aki" / "ConfigDB",
+    data_root / "TextMap",
+    data_root / "Client" / "Content" / "Aki" / "TextMap",
+]
+```
+
+#### 嵌套目录自动发现 (2026-02-10 Enhancement)
+
+**问题背景**：PAK 解包后可能产生嵌套结构（如 `ConfigDB/ConfigDB/`），导致补充数据库遗漏。
+
+**解决方案**：递归扫描种子根的直接子目录，自动发现并加入包含语言对的子目录：
+
+```python
+for seed_root in seed_roots:
+    roots.append(seed_root)  # 添加种子本身
+    
+    # 扫描直接子目录
+    for child in seed_root.iterdir():
+        if not child.is_dir():
+            continue
+        # 跳过语言目录本身（en, zh-Hans 等）
+        if child.name in LANGUAGE_DIR_NAMES:
+            continue
+        # 检查子目录是否包含语言对
+        for (en_name, zh_name) in langs:
+            if (child / en_name).is_dir() and (child / zh_name).is_dir():
+                roots.append(child)  # 发现嵌套语言目录，加入扫描
+                break
+```
+
+#### 文件对扫描
+
+对每个有效根执行：
+
+```python
+def scan_pair(en_dir: Path, zh_dir: Path):
+    for ext in ("*.json", "*.db"):
+        for en_path in en_dir.rglob(ext):
+            rel = en_path.relative_to(en_dir)
+            zh_path = zh_dir / rel
+            if zh_path.exists():
+                # 构建并合并数据库
+                partial = build_text_db(en_path, zh_path)
+                merge(partial, global_db)
+```
+
+#### 规范化键生成
+
+```python
+def normalize_en(text: str) -> str:
+    """移除所有非字母数字字符，转小写"""
+    return "".join(ch.lower() for ch in text if ch.isalnum())
+```
+
+**示例**：
+- EN: `"Head to the Bioprinter and find the Kronablight"`
+- Normalized: `"headtothebioprinterandfindthekronablight"` (40 chars)
+
+#### 技术要点
+
+| 特性 | 实现细节 |
+|------|---------|
+| **双键索引** | 每个条目生成 `key_en` 和 `key_zh` 两个索引键 |
+| **去重合并** | 多个源文件中的同 text_key 条目自动合并 `matches[]` |
+| **空值跳过** | EN/ZH 均为空的条目不纳入索引 |
+| **数据库统计** | v3.1: **308,129 keys**, 262 MB JSON |
+
 ---
 
 ## 4. UI/UX Design
