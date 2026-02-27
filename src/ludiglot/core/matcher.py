@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Tuple, Optional
 from ludiglot.core.search import FuzzySearcher
 from ludiglot.core.indexed_search import IndexedSearchEngine
 from ludiglot.core.text_builder import normalize_en
-from ludiglot.core.smart_match import build_smart_candidates
+from ludiglot.core.smart_match import build_smart_candidates, strip_speaker_prefix
 from ludiglot.core.voice_event_index import VoiceEventIndex
 
 try:
@@ -434,6 +434,14 @@ class TextMatcher:
             return False
 
         raw = str(raw_text or "")
+
+        # 缩写人名（如 N.A.N.A.）：经 _clean_ocr_line 后点号变为空格，cleaned 为 "N A N A"
+        # 识别：所有字母均大写、无其他标点（冒号除外）
+        abbr_only = c.replace(' ', '')
+        if (abbr_only.isupper() and abbr_only.isalpha() and len(abbr_only) <= 10
+                and not any(p in raw for p in (',', '!', '?', ';'))):
+            return True
+
         if any(p in raw for p in (",", ".", "!", "?", ";", ":")):
             return False
 
@@ -752,7 +760,29 @@ class TextMatcher:
                  return self._attach_title_hint(full_res, title_hint)
              if full_score >= 0.5:
                  self.log(f"[MATCH] 完整文本块命中被跳过: score={full_score:.3f}, ratio={full_ratio:.2f}")
-        
+
+        # 0b. 说话者前缀剥离早退：处理 "Name: dialogue" 或分行人名场景
+        # 合并原始前 1-2 行尝试匹配（支持 "Luuk\nHerssen: dialogue" 和 "N.A.N.A.: dialogue"）
+        if len(lines) >= 1:
+            raw_combined = " ".join(
+                str(t).strip() for t, _ in lines[:2] if str(t).strip()
+            )
+            speaker_stripped = strip_speaker_prefix(raw_combined)
+            if speaker_stripped:
+                _, dialogue_text = speaker_stripped
+                stripped_key = normalize_en(self._clean_ocr_line(dialogue_text))
+                if stripped_key and len(stripped_key) >= 15:
+                    stripped_res, stripped_score = self.search_key(stripped_key)
+                    if stripped_score >= 0.80:
+                        self.log(
+                            f"[MATCH] 说话者前缀剥离命中: score={stripped_score:.3f}, "
+                            f"key_len={len(stripped_key)}"
+                        )
+                        stripped_res["_query_key"] = stripped_key
+                        stripped_res["_ocr_text"] = dialogue_text
+                        stripped_res["_score"] = round(stripped_score, 3)
+                        return self._attach_title_hint(stripped_res, title_hint)
+
         # --- Multiline Checks (from original code) ---
         multi_items = []
         for line in line_info:
