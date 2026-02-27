@@ -158,6 +158,7 @@ class OverlayWindow(QMainWindow):
         self._hotkey_listener = None
         self._win_hotkey_filter = None
         self._win_hotkey_ids: list[int] = []
+        self._capture_in_progress = False  # 防止快捷键重复触发捕获
         self._dragging = False
         self._drag_pos: QPoint | None = None
         self._resizing = False
@@ -1625,46 +1626,66 @@ class OverlayWindow(QMainWindow):
         self.capture_requested.emit(True)
 
     def _capture_and_process_async(self, force_select: bool = False) -> None:
+        if self._capture_in_progress:
+            self.signals.log.emit("[HOTKEY] 正在处理中，忽略重复触发")
+            return
+        self._capture_in_progress = True
         import time
         t_start = time.time()
         selected_region: CaptureRegion | None = None
         snapshot: DesktopSnapshot | None = None
-        # 新一轮 OCR 前先停止当前播放，避免旧音频与新结果串音
-        self.stop_audio(emit_status=False)
-        self.last_text_key = None
-        self.last_hash = None
-        self.last_event_name = None
-        self.signals.log.emit("[HOTKEY] 触发捕获")
-        if force_select or self.config.capture_mode == "select":
-            self.signals.status.emit("冻结屏幕…")
-            t_snap_start = time.time()
-            try:
-                snapshot = self._capture_desktop_snapshot()
-            except Exception as exc:
-                snapshot = None
-                self.signals.log.emit(f"[CAPTURE] 预截图失败，回退实时框选: {exc}")
-            t_snap_end = time.time()
-            if snapshot is not None:
-                self.signals.log.emit(f"[PERF] 屏幕快照耗时: {(t_snap_end - t_snap_start):.3f}s")
-            self.signals.status.emit("请选择 OCR 区域…")
-            t_select_start = time.time()
-            selected_region = self._select_region(snapshot)
-            t_select_end = time.time()
-            self.signals.log.emit(f"[PERF] 区域选择耗时: {(t_select_end - t_select_start):.3f}s")
-            if selected_region is None:
-                self.signals.status.emit("已取消")
-                return
-        threading.Thread(
-            target=self._capture_and_process,
-            args=(selected_region, snapshot),
-            daemon=True,
-        ).start()
-        self.signals.log.emit(f"[PERF] 异步调用总耗时: {(time.time() - t_start):.3f}s")
+        thread_started = False
+        try:
+            # 新一轮 OCR 前先停止当前播放，避免旧音频与新结果串音
+            self.stop_audio(emit_status=False)
+            self.last_text_key = None
+            self.last_hash = None
+            self.last_event_name = None
+            self.signals.log.emit("[HOTKEY] 触发捕获")
+            if force_select or self.config.capture_mode == "select":
+                self.signals.status.emit("冻结屏幕…")
+                t_snap_start = time.time()
+                try:
+                    snapshot = self._capture_desktop_snapshot()
+                except Exception as exc:
+                    snapshot = None
+                    self.signals.log.emit(f"[CAPTURE] 预截图失败，回退实时框选: {exc}")
+                t_snap_end = time.time()
+                if snapshot is not None:
+                    self.signals.log.emit(f"[PERF] 屏幕快照耗时: {(t_snap_end - t_snap_start):.3f}s")
+                self.signals.status.emit("请选择 OCR 区域…")
+                t_select_start = time.time()
+                selected_region = self._select_region(snapshot)
+                t_select_end = time.time()
+                self.signals.log.emit(f"[PERF] 区域选择耗时: {(t_select_end - t_select_start):.3f}s")
+                if selected_region is None:
+                    self.signals.status.emit("已取消")
+                    return
+            threading.Thread(
+                target=self._capture_and_process,
+                args=(selected_region, snapshot),
+                daemon=True,
+            ).start()
+            thread_started = True
+            self.signals.log.emit(f"[PERF] 异步调用总耗时: {(time.time() - t_start):.3f}s")
+        except Exception as exc:
+            self.signals.log.emit(f"[CAPTURE] 触发捕获异常: {exc}")
+            self.signals.status.emit("捕获失败")
+        finally:
+            # 仅在未成功启动后台线程时（后台线程会自己清除标志）清除
+            if not thread_started:
+                self._capture_in_progress = False
 
     def _capture_and_process(self, selected_region: CaptureRegion | None, snapshot: DesktopSnapshot | None) -> None:
         import time
         t_total_start = time.time()
-        
+        try:
+            self._do_capture_and_process(selected_region, snapshot, t_total_start)
+        finally:
+            self._capture_in_progress = False
+
+    def _do_capture_and_process(self, selected_region: CaptureRegion | None, snapshot: DesktopSnapshot | None, t_total_start: float) -> None:
+        import time
         self.signals.status.emit("捕获中…")
         
         # 1. 截图 (In-Memory)
