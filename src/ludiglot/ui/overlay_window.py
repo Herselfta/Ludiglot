@@ -2920,6 +2920,7 @@ class OverlayWindow(QMainWindow):
         
         # 检查是否有标题信息（混合内容场景）
         first_line = result.get("_first_line")
+        speaker_name = result.get("_speaker_name", "")
         
         if matches:
             # 使用数据库官方英文原文（保留HTML标记）
@@ -2931,8 +2932,18 @@ class OverlayWindow(QMainWindow):
             audio_hash = matches[0].get("audio_hash")
             audio_event = matches[0].get("audio_event")
             
+            # 说话者前缀：「Name:」样式，显示于正文上方（CN 侧尝试查库翻译人名）
+            if speaker_name:
+                t_title = time.time()
+                speaker_cn = self._translate_title(speaker_name)
+                self.signals.log.emit(f"[PERF] 说话者名翻译: {(time.time()-t_title)*1000:.1f}ms")
+                display_speaker_en = speaker_name
+                display_speaker_cn = speaker_cn or speaker_name
+                en_text = f"<span style='color: #d4af37; font-weight: bold;'>{display_speaker_en}:</span>\n{en_text}"
+                cn_text = f"<span style='color: #d4af37; font-weight: bold;'>{display_speaker_cn}:</span>\n{cn_text}"
+                self.signals.log.emit(f"[DISPLAY] 说话者前缀: {display_speaker_en} -> {display_speaker_cn}, 内容: {text_key}")
             # 如果有标题，添加到显示开头（不加【】）
-            if first_line:
+            elif first_line:
                 t_title = time.time()
                 title_cn = self._translate_title(first_line)
                 self.signals.log.emit(f"[PERF] 标题翻译: {(time.time()-t_title)*1000:.1f}ms")
@@ -3396,6 +3407,28 @@ class OverlayWindow(QMainWindow):
                 self.audio_slider.setEnabled(False)
             if hasattr(self, 'time_label'):
                 self.time_label.setText("00:00 / 00:00")
+
+    def _play_audio_for_key(self, text_key: str) -> None:
+        """根据 text_key 解析音频并播放（供多条目模式调用）。"""
+        if not text_key:
+            return
+        self.last_text_key = text_key
+        self.last_hash = None
+        self.last_event_name = None
+        if self.audio_resolver:
+            event_name = f"vo_{text_key}"
+            res = self.audio_resolver.resolve(text_key, db_event=event_name, db_hash=None)
+            if res:
+                self.last_hash = res.hash_value
+                self.last_event_name = res.event_name
+                self.signals.log.emit(
+                    f"[AUDIO] text_key={text_key} hash={self.last_hash} ({res.source_type})"
+                )
+            else:
+                self.signals.log.emit(f"[AUDIO] text_key={text_key} 未找到对应音频，跳过播放")
+                return
+        if self.config.play_audio and self.last_hash is not None:
+            self.play_audio()
 
     def play_audio(self) -> None:
         if self.last_hash is None or not self.config.audio_cache_path:

@@ -769,7 +769,7 @@ class TextMatcher:
             )
             speaker_stripped = strip_speaker_prefix(raw_combined)
             if speaker_stripped:
-                _, dialogue_text = speaker_stripped
+                speaker_name, dialogue_text = speaker_stripped
                 stripped_key = normalize_en(self._clean_ocr_line(dialogue_text))
                 if stripped_key and len(stripped_key) >= 15:
                     stripped_res, stripped_score = self.search_key(stripped_key)
@@ -781,6 +781,7 @@ class TextMatcher:
                         stripped_res["_query_key"] = stripped_key
                         stripped_res["_ocr_text"] = dialogue_text
                         stripped_res["_score"] = round(stripped_score, 3)
+                        stripped_res["_speaker_name"] = speaker_name
                         return self._attach_title_hint(stripped_res, title_hint)
 
         # --- Multiline Checks (from original code) ---
