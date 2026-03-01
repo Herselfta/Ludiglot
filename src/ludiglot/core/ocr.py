@@ -35,7 +35,6 @@ except ImportError:
 
 PaddleOCR = None
 DEFAULT_GLM_OCR_PROMPT = (
-    "output phrased text\n"
     "Transcribe all visible text in reading order (top-to-bottom, left-to-right).\n"
     "Output plain text only.\n"
     "Rules:\n"
@@ -685,10 +684,23 @@ class OCREngine:
             self._set_glm_ollama_error("输入转换失败")
             return []
 
-        payload = {
+        b64_img = base64.b64encode(image_bytes).decode("ascii")
+
+        # Use /api/chat endpoint with messages – compatible with newer Ollama
+        # versions that changed multimodal handling in /api/generate.
+        payload: Dict[str, Any] = {
             "model": self.glm_ollama_model,
-            "prompt": self.glm_prompt,
-            "images": [base64.b64encode(image_bytes).decode("ascii")],
+            "messages": [
+                {
+                    "role": "system",
+                    "content": self.glm_prompt,
+                },
+                {
+                    "role": "user",
+                    "content": "output phrased text",
+                    "images": [b64_img],
+                },
+            ],
             "stream": False,
         }
         try:
@@ -699,7 +711,7 @@ class OCREngine:
             payload["options"] = {"num_predict": max_tokens}
             self._emit_log(f"[OCR] GLM num_predict={max_tokens}")
 
-        url = f"{self.glm_endpoint}/api/generate"
+        url = f"{self.glm_endpoint}/api/chat"
         req = urllib.request.Request(
             url,
             data=json.dumps(payload).encode("utf-8"),
@@ -733,7 +745,13 @@ class OCREngine:
                 self._emit_log(f"[OCR] GLM-OCR 错误：{response_obj.get('error')}")
                 self._set_glm_ollama_error("响应错误", Exception(str(response_obj.get("error"))))
                 return []
-            text = response_obj.get("response") or response_obj.get("message") or ""
+            # /api/chat returns {"message": {"role": "assistant", "content": "..."}}
+            msg = response_obj.get("message")
+            if isinstance(msg, dict):
+                text = msg.get("content", "")
+            else:
+                # fallback for older Ollama or /api/generate-style response
+                text = response_obj.get("response") or str(msg or "")
         else:
             text = raw
 
