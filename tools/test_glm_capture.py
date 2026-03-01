@@ -28,7 +28,7 @@ def main():
         lang="en",
         mode="gpu",
         glm_endpoint="http://127.0.0.1:11434",
-        glm_ollama_model="glm-ocr:latest",
+        glm_ollama_model="glm-ocr:q8_0",
     )
     engine.initialize()
 

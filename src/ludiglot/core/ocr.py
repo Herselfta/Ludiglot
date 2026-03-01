@@ -34,16 +34,13 @@ except ImportError:
     HAS_NUMPY = False
 
 PaddleOCR = None
-DEFAULT_GLM_OCR_PROMPT = (
-    "Transcribe all visible text in reading order (top-to-bottom, left-to-right).\n"
-    "Output plain text only.\n"
-    "Rules:\n"
-    "1) Keep short headers / speaker names on their own line.\n"
-    "2) Keep different paragraphs or blocks separated (one blank line between blocks).\n"
-    "3) Merge soft-wrapped lines that belong to the same sentence/paragraph.\n"
-    "4) Do not merge a header/title into the following sentence.\n"
-    "5) Do not output HTML/style tags or extra commentary."
-)
+# The GLM-OCR model expects task-directive prompts, NOT descriptive instructions.
+# Passing descriptive rules causes the model to hallucinate them as OCR output.
+# Official prompts (from zai-org/GLM-OCR SDK config.yaml):
+#   "Text Recognition:"    – general text / subtitles
+#   "Table Recognition:"   – tabular data
+#   "Formula Recognition:" – math formulas
+DEFAULT_GLM_OCR_PROMPT = "Text Recognition:"
 DEFAULT_GLM_OCR_TIMEOUT = 30.0
 # <=0 means "follow Ollama default behavior" (do not send num_predict).
 DEFAULT_GLM_OCR_MAX_TOKENS = 0
@@ -590,7 +587,16 @@ class OCREngine:
         lines_out: list[str] = []
         for raw_line in cleaned.splitlines():
             line = _sanitize_ocr_fragment(raw_line)
+            # Strip markdown heading markers (# ## ###) produced by "Text Recognition:"
+            line = re.sub(r"^#{1,6}\s+", "", line).strip()
+            # Strip markdown list markers and numbered lists
             line = re.sub(r"^([-*•]\s+|\d+[.)]\s+)", "", line).strip()
+            # Strip inline bold/italic markers (**text**, __text__, *text*, _text_)
+            line = re.sub(r"\*{1,3}([^\*]+)\*{1,3}", r"\1", line)
+            line = re.sub(r"_{1,3}([^_]+)_{1,3}", r"\1", line)
+            # Skip horizontal rules
+            if re.fullmatch(r"[-=_*]{3,}", line):
+                continue
             if not line:
                 continue
             line = re.sub(r"\s+", " ", line).strip()
@@ -686,32 +692,27 @@ class OCREngine:
 
         b64_img = base64.b64encode(image_bytes).decode("ascii")
 
-        # Use /api/chat endpoint with messages – compatible with newer Ollama
-        # versions that changed multimodal handling in /api/generate.
+        # glm-ocr uses a custom RENDERER/PARSER in Ollama and requires
+        # /api/generate (not /api/chat which triggers GGML_ASSERT crashes).
+        # Ollama 0.17+ auto-reduces num_ctx based on VRAM; glm-ocr's MRoPE
+        # fails when num_ctx < 8192 – always force a safe minimum.
+        # (ollama/ollama issues #14171 / #14401)
         payload: Dict[str, Any] = {
             "model": self.glm_ollama_model,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": self.glm_prompt,
-                },
-                {
-                    "role": "user",
-                    "content": "output phrased text",
-                    "images": [b64_img],
-                },
-            ],
+            "prompt": self.glm_prompt,
+            "images": [b64_img],
             "stream": False,
+            "options": {"num_ctx": 8192},
         }
         try:
             max_tokens = int(self.glm_max_tokens or 0)
         except Exception:
             max_tokens = 0
         if max_tokens > 0:
-            payload["options"] = {"num_predict": max_tokens}
+            payload["options"]["num_predict"] = max_tokens
             self._emit_log(f"[OCR] GLM num_predict={max_tokens}")
 
-        url = f"{self.glm_endpoint}/api/chat"
+        url = f"{self.glm_endpoint}/api/generate"
         req = urllib.request.Request(
             url,
             data=json.dumps(payload).encode("utf-8"),
@@ -745,13 +746,7 @@ class OCREngine:
                 self._emit_log(f"[OCR] GLM-OCR 错误：{response_obj.get('error')}")
                 self._set_glm_ollama_error("响应错误", Exception(str(response_obj.get("error"))))
                 return []
-            # /api/chat returns {"message": {"role": "assistant", "content": "..."}}
-            msg = response_obj.get("message")
-            if isinstance(msg, dict):
-                text = msg.get("content", "")
-            else:
-                # fallback for older Ollama or /api/generate-style response
-                text = response_obj.get("response") or str(msg or "")
+            text = response_obj.get("response", "")
         else:
             text = raw
 
