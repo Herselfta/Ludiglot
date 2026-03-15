@@ -36,8 +36,8 @@ class TextMatcher:
     def __init__(
         self,
         db: Dict[str, Any],
-        voice_map: Dict[str, Any] = None,
-        voice_event_index: VoiceEventIndex = None,
+        voice_map: Dict[str, Any] | None = None,
+        voice_event_index: VoiceEventIndex | None = None,
         gender_preference: str = "female",
     ):
         self.db = db
@@ -871,7 +871,7 @@ class TextMatcher:
         
         if len(multi_items) >= 3:
             # 去重：合并匹配到同一个 text_key 的多个 OCR 行
-            text_key_map = {}  # text_key -> list of line info
+            text_key_map: dict[str, list[dict]] = {}  # text_key -> list of line info
             for line in multi_items:
                 matches = line['result'].get("matches")
                 match = matches[0] if matches else {}
@@ -921,18 +921,18 @@ class TextMatcher:
                 if len(text_key_map) <= 2:
                     # 合并为单条目处理
                     merged_lines = []
-                    for text_key, lines in text_key_map.items():
+                    for text_key, tk_lines in text_key_map.items():
                         # 合并所有OCR文本
-                        merged_ocr = " ".join(l['cleaned'] for l in lines)
+                        merged_ocr = " ".join(l['cleaned'] for l in tk_lines)
                         merged_key = normalize_en(merged_ocr)
                         # 使用第一个匹配结果（它们都指向同一个条目）
-                        first_line = lines[0]
+                        first_line = tk_lines[0]
                         merged_lines.append({
                             'cleaned': merged_ocr,
                             'key': merged_key,
-                            'score': max(l['score'] for l in lines),  # 使用最高分
+                            'score': max(l['score'] for l in tk_lines),  # 使用最高分
                             'result': first_line['result'],
-                            'conf': max(l['conf'] for l in lines),
+                            'conf': max(l['conf'] for l in tk_lines),
                         })
                     
                     # 如果只有一个条目，返回单条目结果
@@ -948,14 +948,14 @@ class TextMatcher:
                 # 构建多条目结果
                 items = []
                 has_high_confidence_audio = False
-                
-                for text_key, lines in text_key_map.items():
+
+                for text_key, tk_lines in text_key_map.items():
                     # 合并同一条目的多个OCR行
-                    merged_ocr = " ".join(l['cleaned'] for l in lines)
+                    merged_ocr = " ".join(l['cleaned'] for l in tk_lines)
                     merged_key = normalize_en(merged_ocr)
-                    max_score = max(l['score'] for l in lines)
-                    
-                    first_line = lines[0]
+                    max_score = max(l['score'] for l in tk_lines)
+
+                    first_line = tk_lines[0]
                     matches = first_line['result'].get("matches")
                     match = matches[0] if matches else {}
                     official_en = match.get("official_en") or ""
