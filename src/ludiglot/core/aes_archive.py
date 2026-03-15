@@ -143,7 +143,7 @@ def select_keys(
     version: str,
     os_name: str,
     server: str,
-    max_chunks: int = 2,
+    max_chunks: int = 10,
 ) -> AesSelection:
     # First, filter by OS and server
     all_entries = [e for e in entries if e.os == os_name and e.server == server]
