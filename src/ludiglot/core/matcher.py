@@ -221,6 +221,53 @@ class TextMatcher:
         self._title_translation_cache[key] = ""
         return ""
 
+    def _prioritize_exact_text_match(self, result: Dict[str, Any], ocr_text: str) -> Dict[str, Any]:
+        """对于同键多条目碰撞（如同为 'thatsthespirit'），基于原文本标点或保留字符做次级重排。"""
+        if not isinstance(result, dict) or result.get("_multi"):
+            return result
+            
+        matches = result.get("matches")
+        if not isinstance(matches, list) or len(matches) < 2:
+            return result
+            
+        import difflib
+        import re
+        
+        ocr_norm = ocr_text.strip().lower()
+        if not ocr_norm:
+            return result
+
+        scored: list[tuple[float, int, Any]] = []
+        for idx, item in enumerate(matches):
+            if not isinstance(item, dict):
+                scored.append((-1.0, idx, item))
+                continue
+            
+            official_en = str(item.get("official_en") or "")
+            # 移除 {PlayerName} 这类的变量，避免影响比对
+            clean_en = re.sub(r"\{.*?\}", "", official_en).strip().lower()
+            
+            ratio = difflib.SequenceMatcher(None, ocr_norm, clean_en).ratio()
+
+            # 基于 text_key 的类型给予微小优先级：优先选中常规叙事/对话节点，规避广播、活动小游戏等特殊节点
+            tk = str(item.get("text_key") or "").upper()
+            if tk.startswith("MAIN_"):
+                ratio += 0.003
+            elif tk.startswith("GNNPC_") or tk.startswith("POI_"):
+                ratio += 0.002
+            elif tk.startswith("ROLE_") or tk.startswith("SQ_"):
+                ratio += 0.001
+            else:
+                # 其他冷门前缀（如 WFLKDJS 等活动/系统机制前缀），优先级垫底
+                ratio -= 0.001
+
+            scored.append((ratio, -idx, item)) # -idx 为稳定排序
+            
+        # 降序排序，分数高的在前面
+        scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
+        result["matches"] = [item for _, _, item in scored]
+        return result
+
     def _prioritize_time_context(self, result: Dict[str, Any], ocr_text: str) -> Dict[str, Any]:
         """当 OCR 明显是时间文本时，优先选择带 Time/时间 语义的同键候选。"""
         if not isinstance(result, dict) or result.get("_multi"):
@@ -291,6 +338,7 @@ class TextMatcher:
                 result.setdefault("_ocr_text", ocr_text)
                 result.setdefault("_query_key", normalize_en(ocr_text))
                 result["_ocr_context"] = ocr_text
+                result = self._prioritize_exact_text_match(result, ocr_text)
                 result = self._prioritize_time_context(result, ocr_text)
         
         # 性能监控日志
