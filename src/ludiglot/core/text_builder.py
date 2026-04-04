@@ -17,6 +17,8 @@ def normalize_en(text: str) -> str:
 
 _TAG_RE = re.compile(r"</?[^>]+>")
 _BRACE_RE = re.compile(r"\{[^}]+\}")
+_PRINTABLE_ASCII_RE = re.compile(rb"[\x20-\x7E]{4,}")
+_TEXT_KEY_TOKEN_RE = re.compile(r"^[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9.]+)+$")
 
 # 性别占位符正则：匹配 {Male=xxx;Female=yyy} 或 {Female=xxx;Male=yyy} 格式
 _GENDER_PLACEHOLDER_RE = re.compile(
@@ -60,6 +62,118 @@ def clean_en_text(text: str) -> str:
     text = _TAG_RE.sub("", text)
     text = _BRACE_RE.sub("", text)
     return text
+
+
+def _iter_utf16le_ascii_runs(blob: bytes, min_len: int = 4) -> Iterable[str]:
+    run: list[str] = []
+    i = 0
+    n = len(blob)
+    while i + 1 < n:
+        lo = blob[i]
+        hi = blob[i + 1]
+        if hi == 0 and 32 <= lo <= 126:
+            run.append(chr(lo))
+        else:
+            if len(run) >= min_len:
+                yield "".join(run)
+            run.clear()
+        i += 2
+    if len(run) >= min_len:
+        yield "".join(run)
+
+
+def _extract_blob_text_candidates(blob: bytes) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+
+    for m in _PRINTABLE_ASCII_RE.finditer(blob):
+        s = m.group(0).decode("ascii", errors="ignore").strip()
+        if not s:
+            continue
+        if len(s) > 240:
+            continue
+        if all(ch in "0123456789abcdefABCDEF" for ch in s) and len(s) >= 8:
+            continue
+        if s not in seen:
+            seen.add(s)
+            out.append(s)
+
+    for s in _iter_utf16le_ascii_runs(blob):
+        s = s.strip()
+        if not s or len(s) > 240:
+            continue
+        if s not in seen:
+            seen.add(s)
+            out.append(s)
+
+    return out
+
+
+def _is_probably_human_text(text: str) -> bool:
+    if len(text) < 12:
+        return False
+    if any(sep in text for sep in ("/", "\\", "\t", "\n", "\r")):
+        return False
+    low = text.lower()
+    if low.startswith("game/") or low.endswith((".uasset", ".png", ".jpg", ".atlas")):
+        return False
+    words = [w for w in text.split(" ") if w]
+    if len(words) < 3:
+        return False
+    letters = sum(ch.isalpha() for ch in text)
+    if letters < 8:
+        return False
+    return True
+
+
+def _is_text_key_like(text: str) -> bool:
+    if not text or " " in text:
+        return False
+    if any(sep in text for sep in ("/", "\\", "\t", "\n", "\r")):
+        return False
+    if len(text) < 8 or len(text) > 160:
+        return False
+    low = text.lower()
+    if any(hint in low for hint in ("_text", "_title", "_name", "_desc", "summary")):
+        return True
+    return bool(_TEXT_KEY_TOKEN_RE.fullmatch(text))
+
+
+def _pick_text_from_blob(blob: bytes) -> str | None:
+    candidates = _extract_blob_text_candidates(blob)
+    if not candidates:
+        return None
+
+    human_candidates = [c for c in candidates if _is_probably_human_text(c)]
+    if human_candidates:
+        human_candidates.sort(key=lambda s: (len(s.split()), len(s)), reverse=True)
+        return human_candidates[0]
+
+    key_candidates = [c for c in candidates if _is_text_key_like(c)]
+    if key_candidates:
+        def _key_score(s: str) -> tuple[int, int]:
+            low = s.lower()
+            if "title" in low:
+                pri = 4
+            elif "name" in low:
+                pri = 3
+            elif "summary" in low:
+                pri = 2
+            elif "describe" in low or "desc" in low:
+                pri = 1
+            elif "_text" in low:
+                pri = 0
+            else:
+                pri = -1
+            return pri, len(s)
+
+        key_candidates.sort(
+            key=_key_score,
+            reverse=True,
+        )
+        return key_candidates[0]
+
+    return None
 
 
 def _extract_map(obj: object) -> Dict[str, str]:
@@ -130,44 +244,92 @@ def _load_sqlite_map(path: Path) -> Dict[str, str]:
                 # 即使截断，sqlite3 有时也能读到前面的数据，继续尝试
 
         conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        try:
+            cursor = conn.cursor()
 
-        cursor = conn.cursor()
-        
-        # 探测表名
-        cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
-        tables = [r[0] for r in cursor.fetchall()]
-        if not tables:
-            return {}
-        
-        # 优先使用 lang_text 或通用表名
-        table_name = None
-        for cand in ["Table", "data", "lang_text", "text"]:
-            if cand in tables:
-                table_name = cand
-                break
-        if not table_name: table_name = tables[0]
-
-        # 探测列名
-        cursor.execute(f"PRAGMA table_info({table_name})")
-        cols = {r[1].lower(): r[1] for r in cursor.fetchall()}
-        
-        id_col = cols.get("textid") or cols.get("textmapid") or cols.get("key") or cols.get("id")
-        text_col = cols.get("text") or cols.get("content") or cols.get("value")
-        
-        if not id_col or not text_col:
-            # 这种情况下尝试猜测第一列和第二列
-            cursor.execute(f"SELECT * FROM {table_name} LIMIT 1")
-            row = cursor.fetchone()
-            if row and len(row) >= 2:
-                id_col = list(cols.values())[0]
-                text_col = list(cols.values())[1]
-            else:
+            # 探测表名
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            tables = [r[0] for r in cursor.fetchall()]
+            if not tables:
                 return {}
 
-        cursor.execute(f"SELECT {id_col}, {text_col} FROM {table_name}")
-        mapping = {str(r[0]): str(r[1]) for r in cursor.fetchall() if r[0] and r[1]}
-        conn.close()
-        return mapping
+            # 优先语言常见表，但会遍历所有表
+            preferred = ["Table", "data", "lang_text", "text", "MultiText"]
+            table_order = [t for t in preferred if t in tables] + [t for t in tables if t not in preferred]
+
+            mapping: Dict[str, str] = {}
+
+            for table_name in table_order:
+                try:
+                    cursor.execute(f"PRAGMA table_info({table_name})")
+                    cols_info = cursor.fetchall()
+                except Exception:
+                    continue
+
+                if not cols_info:
+                    continue
+
+                cols = {r[1].lower(): r[1] for r in cols_info}
+                decl_types = {r[1].lower(): (r[2] or "") for r in cols_info}
+
+                id_col = cols.get("textid") or cols.get("textmapid") or cols.get("key") or cols.get("id")
+                text_col = cols.get("text") or cols.get("content") or cols.get("value")
+                blob_col = next(
+                    (r[1] for r in cols_info if "blob" in (r[2] or "").lower() or r[1].lower() == "bindata"),
+                    None,
+                )
+
+                # 1) 标准文本表（优先）
+                if id_col and text_col and "blob" not in decl_types.get(text_col.lower(), "").lower():
+                    try:
+                        cursor.execute(f"SELECT {id_col}, {text_col} FROM {table_name}")
+                        for k, v in cursor.fetchall():
+                            if k is None or v is None or isinstance(v, (bytes, bytearray)):
+                                continue
+                            text = str(v).strip()
+                            if not text:
+                                continue
+                            mapping.setdefault(str(k), text)
+                    except Exception:
+                        pass
+                    continue
+
+                # 2) BinData/FlatBuffers 启发式提取
+                if id_col and blob_col:
+                    try:
+                        cursor.execute(f"SELECT {id_col}, {blob_col} FROM {table_name}")
+                        for k, blob in cursor.fetchall():
+                            if k is None or not isinstance(blob, (bytes, bytearray)):
+                                continue
+                            picked = _pick_text_from_blob(blob)
+                            if picked:
+                                mapping.setdefault(str(k), picked)
+                    except Exception:
+                        pass
+                    continue
+
+                # 3) 极端兜底：猜测前两列是 key/value
+                if len(cols_info) >= 2:
+                    c0 = cols_info[0][1]
+                    c1 = cols_info[1][1]
+                    c1_type = (cols_info[1][2] or "").lower()
+                    if "blob" in c1_type:
+                        continue
+                    try:
+                        cursor.execute(f"SELECT {c0}, {c1} FROM {table_name}")
+                        for k, v in cursor.fetchall():
+                            if k is None or v is None or isinstance(v, (bytes, bytearray)):
+                                continue
+                            text = str(v).strip()
+                            if not text:
+                                continue
+                            mapping.setdefault(str(k), text)
+                    except Exception:
+                        pass
+
+            return mapping
+        finally:
+            conn.close()
     except Exception as e:
         print(f"警告: 无法读取 SQLite 数据库 {path.name}: {e}")
         return {}
@@ -409,6 +571,13 @@ def build_text_db_from_root_all(data_root: Path) -> Dict[str, dict]:
     voice_map = build_voice_map_from_configdb(data_root, cache_path=cache_path)
     db: Dict[str, dict] = {}
 
+    def merge_partial(partial: Dict[str, dict]) -> None:
+        for key, payload in partial.items():
+            if key not in db:
+                db[key] = payload
+            else:
+                db[key]["matches"].extend(payload.get("matches", []))
+
     def scan_pair(en_dir: Path, zh_dir: Path):
         if not en_dir.exists() or not zh_dir.exists():
             return
@@ -420,11 +589,7 @@ def build_text_db_from_root_all(data_root: Path) -> Dict[str, dict]:
                     continue
                 try:
                     partial = build_text_db(en_path, zh_path, plot_audio=plot_audio, voice_map=voice_map)
-                    for key, payload in partial.items():
-                        if key not in db:
-                            db[key] = payload
-                        else:
-                            db[key]["matches"].extend(payload.get("matches", []))
+                    merge_partial(partial)
                 except Exception:
                     continue
 
@@ -432,6 +597,37 @@ def build_text_db_from_root_all(data_root: Path) -> Dict[str, dict]:
         if not r.exists(): continue
         for en, zh in langs:
             scan_pair(r / en, r / zh)
+
+    # 额外补充：扫描 ConfigDB 根目录中的 BLOB 配置库（典型为 db_gacha.db）。
+    # 这些文件不在 en/zh 语言子目录内，原逻辑不会覆盖到。
+    root_blob_db_names = ("db_gacha.db",)
+    root_blob_db_paths: list[Path] = []
+    for base in (
+        data_root / "ConfigDB",
+        data_root / "Client" / "Content" / "Aki" / "ConfigDB",
+    ):
+        if not base.exists():
+            continue
+        for name in root_blob_db_names:
+            cand = base / name
+            if cand.exists() and cand not in root_blob_db_paths:
+                root_blob_db_paths.append(cand)
+
+    for db_path in root_blob_db_paths:
+        try:
+            en_map = _load_sqlite_map(db_path)
+            if not en_map:
+                continue
+            partial = build_text_db_from_maps(
+                en_map,
+                {},
+                db_path.name,
+                plot_audio=plot_audio,
+                voice_map=voice_map,
+            )
+            merge_partial(partial)
+        except Exception:
+            continue
 
     # 兜底：如果完全没有扫到，或者扫出的是空的，尝试使用 MultiText 逻辑兜底
     if not db:
