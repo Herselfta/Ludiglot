@@ -65,7 +65,7 @@ This project is licensed under the [MIT License](../../LICENSE).
 
 - [PyQt6](https://www.riverbankcomputing.com/software/pyqt/) - GUI framework
 - [FModelCLI](https://github.com/Herselfta/FModelCLI) - Pak extraction (based on FModel/CUE4Parse)
-- [ClostroOffi/wuwa-aes-archive](https://github.com/ClostroOffi/wuwa-aes-archive) - AES keys
+- [yarik0chka/wuwa-keys](https://github.com/yarik0chka/wuwa-keys) - AES keys
 - [vgmstream](https://github.com/vgmstream/vgmstream) - Game audio decoder
 
 ---

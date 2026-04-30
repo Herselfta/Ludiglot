@@ -15,7 +15,7 @@ from urllib.request import urlopen
 from ludiglot.core.aes_archive import parse_aes_archive, select_keys, list_versions
 
 
-AES_ARCHIVE_URL = "https://raw.githubusercontent.com/ClostroOffi/wuwa-aes-archive/main/readme.md"
+AES_ARCHIVE_URL = "https://raw.githubusercontent.com/yarik0chka/wuwa-keys/main/keys.json"
 _PAKCHUNK_RE = re.compile(r"pakchunk[-_]?([0-9]+)", re.IGNORECASE)
 
 

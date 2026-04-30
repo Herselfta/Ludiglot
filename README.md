@@ -77,7 +77,7 @@ Ludiglot/
 
 - 核心框架：[PyQt6](https://www.riverbankcomputing.com/software/pyqt/)
 - 资源提取：[FModelCLI](https://github.com/Herselfta/FModelCLI) (基于 [FModel](https://github.com/4sval/FModel) / [CUE4Parse](https://github.com/FabianFG/CUE4Parse))
-- 数据来源：[ClostroOffi/wuwa-aes-archive](https://github.com/ClostroOffi/wuwa-aes-archive)
+- 数据来源：[yarik0chka/wuwa-keys](https://github.com/yarik0chka/wuwa-keys)
 - 工具组件：`vgmstream`, `wwiser`, `PaddleOCR`
 
 ---

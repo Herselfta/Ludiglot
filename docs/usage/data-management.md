@@ -11,7 +11,7 @@ Ludiglot 直接从本地游戏 Pak 解包数据，无需手动下载。
 - 或在程序菜单点击 **Update Database**
 
 **自动处理**：
-- **AES 密钥**：自动从 [ClostroOffi/wuwa-aes-archive](https://github.com/ClostroOffi/wuwa-aes-archive) 获取
+- **AES 密钥**：自动从 [yarik0chka/wuwa-keys](https://github.com/yarik0chka/wuwa-keys) 获取
 - **解包工具**：内置 FModelCLI（自包含发布，无需安装依赖）
 - **语言选择**：根据配置文件中的 `game_languages` 提取对应语言
 

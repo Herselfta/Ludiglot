@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 import re
 from typing import Iterable, List
@@ -76,6 +77,42 @@ def _parse_table_row(line: str) -> list[str] | None:
 
 def parse_aes_archive(text: str) -> list[AesKeyEntry]:
     entries: list[AesKeyEntry] = []
+    text = text.strip()
+    if text.startswith("{"):
+        try:
+            data = json.loads(text)
+            main_key = data.get("mainKey")
+            dynamic_keys = data.get("dynamicKeys", [])
+            for os_n in ["Windows", "Android", "iOS"]:
+                for svr in ["OS", "CN"]:
+                    if main_key:
+                        entries.append(
+                            AesKeyEntry(
+                                version_label="Latest",
+                                version_number="Latest",
+                                pak_name="main",
+                                aes_key=main_key.strip(),
+                                os=os_n,
+                                server=svr,
+                            )
+                        )
+                    for idx, dyn in enumerate(dynamic_keys):
+                        k = dyn.get("key")
+                        if k:
+                            entries.append(
+                                AesKeyEntry(
+                                    version_label="Latest",
+                                    version_number="Latest",
+                                    pak_name=f"pakchunk{1000 + idx}",
+                                    aes_key=k.strip(),
+                                    os=os_n,
+                                    server=svr,
+                                )
+                            )
+            return entries
+        except Exception:
+            pass
+
     current_label = ""
     current_version = ""
     for raw_line in text.splitlines():
@@ -143,7 +180,7 @@ def select_keys(
     version: str,
     os_name: str,
     server: str,
-    max_chunks: int = 10,
+    max_chunks: int = 100,
 ) -> AesSelection:
     # First, filter by OS and server
     all_entries = [e for e in entries if e.os == os_name and e.server == server]
