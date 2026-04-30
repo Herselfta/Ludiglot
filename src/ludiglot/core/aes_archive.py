@@ -180,7 +180,7 @@ def select_keys(
     version: str,
     os_name: str,
     server: str,
-    max_chunks: int = 100,
+    max_chunks: int = 10000,
 ) -> AesSelection:
     # First, filter by OS and server
     all_entries = [e for e in entries if e.os == os_name and e.server == server]
@@ -213,7 +213,9 @@ def select_keys(
 
     main_entries = [e for e in filtered if e.pak_name.lower() == "main"]
     chunk_entries = [e for e in filtered if _pakchunk_id(e.pak_name) is not None]
-    chunk_entries.sort(key=lambda e: _pakchunk_id(e.pak_name) or -1, reverse=True)
+    
+    # Sort them normally just in case, but keep all by default using a high limit
+    chunk_entries.sort(key=lambda e: _pakchunk_id(e.pak_name) or -1)
 
     selected: list[AesKeyEntry] = []
     if main_entries:
