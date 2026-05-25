@@ -4,6 +4,7 @@ import sqlite3
 from pathlib import Path
 
 from ludiglot.core import text_builder
+from ludiglot.core.matcher import TextMatcher
 
 
 def _create_blob_db(db_path: Path, rows: list[tuple[int, bytes]]) -> None:
@@ -69,3 +70,21 @@ def test_build_text_db_from_root_all_includes_root_gacha_db(
     assert matches, "expected at least one match from root db_gacha.db"
     assert matches[0].get("official_en") == title
     assert matches[0].get("source_json") == "db_gacha.db"
+
+
+def test_player_name_placeholder_generates_rover_search_key() -> None:
+    db = text_builder.build_text_db_from_maps(
+        {"MAIN_TEST_001": "Hello {PlayerName}, welcome back."},
+        {},
+        "test.json",
+    )
+
+    matcher = TextMatcher(db)
+
+    with_rover = matcher.match([("Hello Rover, welcome back.", 0.99)])
+    without_rover = matcher.match([("Hello, welcome back.", 0.99)])
+
+    assert (with_rover.get("matches") or [{}])[0].get("text_key") == "MAIN_TEST_001"
+    assert with_rover.get("_score") == 1.0
+    assert (without_rover.get("matches") or [{}])[0].get("text_key") == "MAIN_TEST_001"
+    assert without_rover.get("_score") == 1.0

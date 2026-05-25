@@ -25,6 +25,28 @@ _GENDER_PLACEHOLDER_RE = re.compile(
     r"\{(?:Male=([^;]+);Female=([^}]+)|Female=([^;]+);Male=([^}]+))\}",
     re.IGNORECASE
 )
+_PLAYER_NAME_PLACEHOLDER_RE = re.compile(
+    r"\{PlayerName\}|\{Cus:Var,\s*VarType=Global\s+Key=main_team_name\}",
+    re.IGNORECASE,
+)
+
+
+def expand_player_name_placeholder(text: str, player_name: str) -> str:
+    return _PLAYER_NAME_PLACEHOLDER_RE.sub(player_name, text)
+
+
+def has_player_name_placeholder(text: str) -> bool:
+    return bool(_PLAYER_NAME_PLACEHOLDER_RE.search(text))
+
+
+def _strip_remaining_placeholders(text: str) -> str:
+    return _BRACE_RE.sub("", _TAG_RE.sub("", text))
+
+
+def _add_unique(items: list[str], value: str) -> None:
+    if value and value not in items:
+        items.append(value)
+
 
 
 def expand_gender_placeholder(text: str, gender: str) -> str:
@@ -697,21 +719,32 @@ def build_text_db_from_maps(
         key_zh = normalize_en(cleaned_zh) if cleaned_zh else ""
         
         if key_en:
-            keys_to_add.append(key_en)
+            _add_unique(keys_to_add, key_en)
         if key_zh:
-            keys_to_add.append(key_zh)
-        
+            _add_unique(keys_to_add, key_zh)
+
+        if en_text and has_player_name_placeholder(en_text):
+            for player_name in ("Rover", ""):
+                expanded = expand_player_name_placeholder(en_text, player_name)
+                expanded_key = normalize_en(_strip_remaining_placeholders(expanded))
+                _add_unique(keys_to_add, expanded_key)
+        if zh_text and has_player_name_placeholder(zh_text):
+            for player_name in ("漂泊者", ""):
+                expanded = expand_player_name_placeholder(zh_text, player_name)
+                expanded_key = normalize_en(_strip_remaining_placeholders(expanded))
+                _add_unique(keys_to_add, expanded_key)
+
         # 新增：为包含性别占位符的文本生成 male 和 female 变体的键
         if en_text and has_gender_placeholder(en_text):
             for gender in ("male", "female"):
                 expanded = expand_gender_placeholder(en_text, gender)
-                # 清理HTML标签（但保留已展开的性别文本）
-                expanded = _TAG_RE.sub("", expanded)
-                # 移除其他非性别占位符（如 {0}、{TA} 等）
-                expanded = _BRACE_RE.sub("", expanded)
-                expanded_key = normalize_en(expanded)
-                if expanded_key and expanded_key not in keys_to_add:
-                    keys_to_add.append(expanded_key)
+                expanded_key = normalize_en(_strip_remaining_placeholders(expanded))
+                _add_unique(keys_to_add, expanded_key)
+        if zh_text and has_gender_placeholder(zh_text):
+            for gender in ("male", "female"):
+                expanded = expand_gender_placeholder(zh_text, gender)
+                expanded_key = normalize_en(_strip_remaining_placeholders(expanded))
+                _add_unique(keys_to_add, expanded_key)
         
         if not keys_to_add:
             continue
