@@ -375,10 +375,11 @@ def _resolve_audio_hash(
         event_name = plot_audio[text_key]
     elif voice_map and text_key in voice_map and voice_map[text_key]:
         event_name = voice_map[text_key][0]
-    if event_name:
-        event_name = strategy.parse_event_name(event_name)
-    else:
-        event_name = f"vo_{text_key}"
+    if not event_name:
+        return None, None
+    event_name = strategy.parse_event_name(event_name)
+    if not event_name:
+        return None, None
     audio_hash = str(strategy.hash_name(event_name))
     return audio_hash, event_name
 

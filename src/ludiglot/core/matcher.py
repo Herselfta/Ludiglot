@@ -371,12 +371,11 @@ class TextMatcher:
         text_key = matches[0].get('text_key', '')
         if not text_key:
             return False
-        # 检查语音映射或缓存
-        event_name = f"vo_{text_key}"
-        if self.voice_map and event_name in self.voice_map:
+        if self.voice_map and self.voice_map.get(text_key):
             return True
         if self.voice_event_index:
-            events = self.voice_event_index.find_candidates(text_key=text_key, voice_event=event_name, limit=1)
+            event_name = f"vo_{text_key}"
+            events = self.voice_event_index.find_candidates(text_key=text_key, voice_event=event_name, limit=1, min_score=0.95)
             if events:
                 return True
         return False

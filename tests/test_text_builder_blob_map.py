@@ -72,6 +72,33 @@ def test_build_text_db_from_root_all_includes_root_gacha_db(
     assert matches[0].get("source_json") == "db_gacha.db"
 
 
+def test_text_db_leaves_audio_empty_without_explicit_mapping() -> None:
+    db = text_builder.build_text_db_from_maps(
+        {"MENU_ITEM_001": "Wanderer Knows No Far and Near"},
+        {},
+        "test.json",
+    )
+
+    match = db[text_builder.normalize_en("Wanderer Knows No Far and Near")]["matches"][0]
+
+    assert match.get("audio_hash") is None
+    assert match.get("audio_event") is None
+
+
+def test_text_db_uses_explicit_voice_map_for_audio_metadata() -> None:
+    db = text_builder.build_text_db_from_maps(
+        {"MAIN_AUDIO_001": "That is the spirit."},
+        {},
+        "test.json",
+        voice_map={"MAIN_AUDIO_001": ["play_vo_main_audio_001"]},
+    )
+
+    match = db[text_builder.normalize_en("That is the spirit.")]["matches"][0]
+
+    assert match.get("audio_hash") is not None
+    assert match.get("audio_event") == "play_vo_main_audio_001"
+
+
 def test_player_name_placeholder_generates_rover_search_key() -> None:
     db = text_builder.build_text_db_from_maps(
         {"MAIN_TEST_001": "Hello {PlayerName}, welcome back."},

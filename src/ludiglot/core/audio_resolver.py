@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import re
 import time
 from pathlib import Path
 from typing import NamedTuple, Any, List
@@ -111,12 +110,10 @@ class AudioResolver:
         # 1. 填充 Stage 1 (Strategy) 和 Stage 2 (Fuzzy)
         if text_key:
             stages[1].extend(self.strategy.build_names(text_key, None))
-            
-            # 恢复模糊搜索：无论是否是 Story ID，如果 Strategy 没命中，都需要 Fuzzy 作为兜底
-            # 旧版逻辑证明这是必要的，且通过分级排序可以避免误匹配
-            if self._voice_event_index:
-                 seed = events[0] if events else None
-                 stages[2].extend(self._voice_event_index.find_candidates(text_key, seed, limit=8))
+
+            if events and self._voice_event_index:
+                 seed = events[0]
+                 stages[2].extend(self._voice_event_index.find_candidates(text_key, seed, limit=8, min_score=0.9))
 
         elif db_event:
             stages[1].extend(self.strategy.build_names(None, db_event))
@@ -264,9 +261,12 @@ class AudioResolver:
 
     def resolve(self, text_key: str | None, db_event: str | None = None, db_hash: int | None = None) -> AudioResolution | None:
         """全流程解析音频。
-        
+
         优化：避免慢速文件系统扫描，优先使用缓存和直接路径。
         """
+        if text_key and not db_event and db_hash is None and not _resolve_events_for_text_key(text_key, self.config):
+            return None
+
         candidates = self.get_candidates(text_key, db_event)
         
         final_candidates: list[tuple[str, int]] = []
@@ -353,8 +353,9 @@ class AudioResolver:
                 if direct.exists():
                     return AudioResolution(h, name, 'wem')
 
-        # === 最后：返回计算的hash（跳过BNK扫描，太慢） ===
-        return AudioResolution(final_candidates[0][1], final_candidates[0][0], 'computed')
+        if db_event:
+            return AudioResolution(final_candidates[0][1], final_candidates[0][0], 'computed')
+        return None
 
     def ensure_playable_audio(
         self, 
@@ -442,40 +443,6 @@ class AudioResolver:
             if active_event and txtp_cache:
                 txtp_file = find_txtp_for_event(txtp_cache, active_event, hash_value)
 
-            # 兜底：当数据库给出的 event 无法直接命中资源时，尝试从索引做低阈值候选回退。
-            if not txtp_file and not bnk_file and text_key and self._voice_event_index:
-                for min_score in (0.45, 0.40, 0.35):
-                    fallback_events = self._voice_event_index.find_candidates(
-                        text_key=text_key,
-                        voice_event=active_event,
-                        limit=12,
-                        min_score=min_score,
-                    )
-                    key_nums = set(re.findall(r"\d+", f"{text_key or ''} {active_event or ''}"))
-                    if key_nums:
-                        fallback_events = sorted(
-                            fallback_events,
-                            key=lambda ev: 0 if key_nums.intersection(re.findall(r"\d+", ev)) else 1,
-                        )
-                    for candidate_event in fallback_events:
-                        if candidate_event == active_event:
-                            continue
-                        candidate_bnk = find_bnk_for_event(bnk_root, candidate_event)
-                        candidate_txtp = (
-                            find_txtp_for_event(txtp_cache, candidate_event, hash_value)
-                            if txtp_cache
-                            else None
-                        )
-                        if not candidate_bnk and not candidate_txtp:
-                            continue
-                        active_event = candidate_event
-                        bnk_file = candidate_bnk
-                        txtp_file = candidate_txtp
-                        log(f"[AUDIO] 事件回退命中: {active_event} (min_score={min_score:.2f})")
-                        break
-                    if bnk_file or txtp_file:
-                        break
-            
             if not txtp_file and bnk_file and txtp_cache and wem_root:
                 try:
                     # 调用 wwiser

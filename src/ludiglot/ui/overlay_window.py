@@ -2710,8 +2710,7 @@ class OverlayWindow(QMainWindow):
         self.last_hash = None
         self.last_event_name = None
         if self.audio_resolver:
-            event_name = f"vo_{text_key}"
-            res = self.audio_resolver.resolve(text_key, db_event=event_name, db_hash=None)
+            res = self.audio_resolver.resolve(text_key, db_event=None, db_hash=None)
             if res:
                 self.last_hash = res.hash_value
                 self.last_event_name = res.event_name

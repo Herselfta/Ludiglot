@@ -73,6 +73,40 @@ def test_get_cached_path_requires_trusted_event_metadata(tmp_path: Path) -> None
     assert trusted.get_cached_path(123, "other_event", trusted_only=True) is None
 
 
+def test_resolve_returns_none_for_text_key_without_explicit_audio_mapping(tmp_path: Path) -> None:
+    resolver = AudioResolver(_config(tmp_path))
+
+    assert resolver.resolve("MENU_ITEM_WITHOUT_AUDIO") is None
+
+
+def test_ensure_playable_audio_does_not_fallback_to_similar_event(tmp_path: Path, monkeypatch) -> None:
+    class FakeVoiceEventIndex:
+        def find_candidates(self, text_key, voice_event, limit=8, min_score=0.65):
+            return ["play_vo_wrong_line"]
+
+    cfg = _config(
+        tmp_path,
+        audio_wem_root=tmp_path / "wem_root",
+        audio_bnk_root=tmp_path / "bnk_root",
+        audio_txtp_cache=tmp_path / "txtp",
+    )
+    resolver = AudioResolver(cfg, voice_event_index=FakeVoiceEventIndex())
+    bnk = tmp_path / "wrong.bnk"
+    bnk.write_bytes(b"bnk")
+
+    monkeypatch.setattr("ludiglot.core.audio_resolver.find_wem_by_hash", lambda root, hash_value: None)
+    monkeypatch.setattr("ludiglot.core.audio_resolver.find_wem_by_event_name", lambda root, event_name: None)
+    monkeypatch.setattr(
+        "ludiglot.core.audio_resolver.find_bnk_for_event",
+        lambda root, event_name: bnk if event_name == "play_vo_wrong_line" else None,
+    )
+    monkeypatch.setattr("ludiglot.core.audio_resolver.find_txtp_for_event", lambda root, event_name, hash_value=None: None)
+
+    path = resolver.ensure_playable_audio(456, "MISSING_TEXT_KEY", "play_vo_missing_line")
+
+    assert path is None
+
+
 def test_ensure_playable_audio_converts_wem_and_marks_cache_trusted(tmp_path: Path, monkeypatch) -> None:
     cache = tmp_path / "cache"
     wem = tmp_path / "source.wem"
