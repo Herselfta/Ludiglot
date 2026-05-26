@@ -5,8 +5,8 @@ Welcome to the Ludiglot documentation. This project is organized following open-
 ---
 
 ## 📖 User Guides
-- [Quick Start Guide](usage/quick-start.md) - Get up and running in 5 minutes.
-- [Data Management](usage/data-management.md) - Learn how to set up game text and audio assets.
+- [Quick Start Guide](usage/quick-start.md) - Install, configure the game path, rebuild data, and run Ludiglot.
+- [Data Management](usage/data-management.md) - Rebuild game text, audio, fonts, and local caches from game Pak files.
 
 ---
 

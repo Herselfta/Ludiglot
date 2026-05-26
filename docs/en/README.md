@@ -29,8 +29,8 @@
 1. **Prerequisites**: Python 3.10+ installed
 2. **Clone**: `git clone ...`
 3. **Setup**: Run `.\setup.ps1` (creates venv, installs dependencies)
-4. **Configure**: Edit `config/settings.json` with your game path
-5. **Extract Data**: Click "Update Database" in menu or run `python -m ludiglot pak-update`
+4. **Configure**: Edit `config/settings.json` with your game path, server, and languages
+5. **Rebuild Data**: Run `.\.venv\Scripts\python.exe -m ludiglot pak-update`
 6. **Run**: Execute `.\run.ps1`
 
 ---

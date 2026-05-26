@@ -46,8 +46,9 @@
 1. **环境准备**：确保安装了 Python 3.10+。
 2. **克隆项目**：`git clone ...`
 3. **一键初始化**：运行 `.\setup.ps1`（创建虚拟环境、安装依赖）。
-4. **解包数据**：运行后在菜单点击 "Update Database" 或执行 `python -m ludiglot pak-update`。
-5. **启动程序**：执行 `.\run.ps1` (PowerShell) 或 `run.bat` (CMD)。
+4. **配置游戏路径**：编辑 `config/settings.json` 的 `game_install_root`、区服和语言。
+5. **完全重建数据**：执行 `.\.venv\Scripts\python.exe -m ludiglot pak-update`。
+6. **启动程序**：执行 `.\run.ps1` (PowerShell) 或 `run.bat` (CMD)。
 
 *详见 **[快速开始指南](docs/usage/quick-start.md)** 获取完整步骤。*
 
