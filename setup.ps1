@@ -123,11 +123,11 @@ if (Test-Path ".venv") {
         Write-Host "  删除现有虚拟环境..." -ForegroundColor Yellow
         Remove-Item -Recurse -Force .venv
         Write-Host "  创建新虚拟环境..." -ForegroundColor Yellow
-        & $uvExe venv -p 3.12 .venv
+        & $uvExe venv --seed -p 3.12 .venv
     }
 } else {
     Write-Host "  创建虚拟环境..." -ForegroundColor Yellow
-    & $uvExe venv -p 3.12 .venv
+    & $uvExe venv --seed -p 3.12 .venv
 }
 
 # 兜底修复 uv Python 缺失 _socket 的情况
@@ -148,6 +148,14 @@ if (-not $socketOk -and $systemPython) {
 Write-Host ""
 Write-Host "激活虚拟环境..." -ForegroundColor Yellow
 & .\.venv\Scripts\Activate.ps1
+
+# 确保 pip 可用（uv 默认不安装 seed 包；旧环境可能缺 pip）
+& $venvPython -m pip --version 2>$null
+if ($LASTEXITCODE -ne 0) {
+    Write-Host ""
+    Write-Host "检测到虚拟环境缺少 pip，正在安装..." -ForegroundColor Yellow
+    & $venvPython -m ensurepip --upgrade
+}
 
 # 升级 pip (仅当虚拟环境创建后执行一次，或使用静默模式)
 Write-Host ""

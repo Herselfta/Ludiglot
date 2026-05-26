@@ -1,8 +1,42 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
+import pytest
+
+from ludiglot.core.config import load_config
 from ludiglot.core.game_pak_update import GamePakOptions, build_game_pak_update_plan
+
+
+def test_pak_update_config_loads_without_existing_generated_data(tmp_path: Path) -> None:
+    config_path = tmp_path / "config" / "settings.json"
+    config_path.parent.mkdir()
+    (tmp_path / "data").mkdir()
+    config_path.write_text(
+        json.dumps(
+            {
+                "use_game_paks": True,
+                "game_install_root": str(tmp_path / "game"),
+                "game_platform": "Windows",
+                "game_server": "CN",
+                "game_languages": ["en", "zh-Hans"],
+                "data_root": str(tmp_path / "data"),
+                "db_path": str(tmp_path / "cache" / "game_text_db.json"),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(FileNotFoundError):
+        load_config(config_path)
+
+    cfg = load_config(config_path, validate_data=False)
+
+    assert cfg.use_game_paks is True
+    assert cfg.data_root == tmp_path / "data"
+    assert cfg.db_path == tmp_path / "cache" / "game_text_db.json"
+
 
 
 def test_game_pak_update_plan_includes_text_filters_and_moves(tmp_path: Path) -> None:

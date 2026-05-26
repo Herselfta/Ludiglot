@@ -653,7 +653,7 @@ def main() -> None:
 
 
 def cmd_pak_update(args: argparse.Namespace) -> None:
-    cfg = load_config(Path(args.config))
+    cfg = load_config(Path(args.config), validate_data=False)
     try:
         update_from_game_paks(cfg, Path(args.config), cfg.db_path, progress=print)
         print("✅ Pak 更新完成")

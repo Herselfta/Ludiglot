@@ -72,7 +72,7 @@ class AppConfig:
     capture_force_dpr: float | None = None
 
 
-def load_config(path: Path) -> AppConfig:
+def load_config(path: Path, *, validate_data: bool = True) -> AppConfig:
     if not path.exists():
         raise FileNotFoundError(
             f"配置文件不存在: {path}\n"
@@ -144,7 +144,7 @@ def load_config(path: Path) -> AppConfig:
     zh_json = raw.get("zh_json")
     
     # 只有在需要重建或者没有 DB 的时候，才强制要求 MultiText 路径
-    if (not has_db or auto_rebuild) and (not en_json or not zh_json) and data_root and data_root.exists():
+    if validate_data and (not has_db or auto_rebuild) and (not en_json or not zh_json) and data_root and data_root.exists():
         try:
             data_paths = WutheringDataMapper(data_root).parse()
             en_json = en_json or str(data_paths.en_text)
@@ -156,7 +156,7 @@ def load_config(path: Path) -> AppConfig:
     en_json_path = resolve_path(en_json)
     zh_json_path = resolve_path(zh_json)
     
-    if not has_db and (not en_json_path or not zh_json_path) and not use_game_paks:
+    if validate_data and not has_db and (not en_json_path or not zh_json_path) and not use_game_paks:
          raise ValueError("配置中缺少数据库文件 (db_path) 且无法通过 data_root 构建。请至少提供其中之一。")
 
     fonts_root = resolve_path(raw.get("fonts_root"))
