@@ -1093,6 +1093,20 @@ class TextMatcher:
                  elif key_len > matched_len * 1.5 and score < 0.97:
                      weighted_score *= 0.85 # Relaxed from 0.75
 
+                 if (
+                     strategy == "single"
+                     and len(line_info) == 1
+                     and context_len >= 25
+                     and key_len < context_len
+                     and matched_key != key
+                     and len(text.split()) <= max(2, len(context_words) // 2)
+                 ):
+                     candidate_coverage = key_len / max(context_len, 1)
+                     matched_coverage = matched_len / max(context_len, 1)
+                     if candidate_coverage < 0.65 and matched_coverage < 0.65:
+                         weighted_score *= 0.35
+                         self.log(f"[MATCH] 单行短片段候选降权: coverage={candidate_coverage:.2f}, matched={matched_coverage:.2f}")
+
              # 长技能段落：降低“技能短条目”(SkillName/AttributeName)的优先级，提升正文条目
              if context_len >= 120 and primary_text_key:
                  if self._is_skill_meta_key(primary_text_key):

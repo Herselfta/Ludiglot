@@ -88,3 +88,30 @@ def test_player_name_placeholder_generates_rover_search_key() -> None:
     assert with_rover.get("_score") == 1.0
     assert (without_rover.get("matches") or [{}])[0].get("text_key") == "MAIN_TEST_001"
     assert without_rover.get("_score") == 1.0
+
+
+def test_missing_long_title_does_not_match_short_ngram() -> None:
+    db = text_builder.build_text_db_from_maps(
+        {"NPC_FARID_NAME": "Farid"},
+        {},
+        "test.json",
+    )
+
+    matcher = TextMatcher(db)
+    result = matcher.match([("Wanderer Knows No Far and Near", 0.99)])
+
+    assert result is None
+
+
+def test_prefixed_item_name_can_match_exact_ngram() -> None:
+    db = text_builder.build_text_db_from_maps(
+        {"ITEM_TEST": "Wildfire Mark"},
+        {},
+        "test.json",
+    )
+
+    matcher = TextMatcher(db)
+    result = matcher.match([("New Weapon Wildfire Mark Obtained", 0.99)])
+
+    assert result is not None
+    assert (result.get("matches") or [{}])[0].get("text_key") == "ITEM_TEST"
