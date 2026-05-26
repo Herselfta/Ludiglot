@@ -93,8 +93,20 @@ def find_wem_by_event_name(
     # 增强匹配：生成去除非字母数字的版本
     clean_token = "".join(c for c in token if c.isalnum())
     token_nums = re.findall(r'\d+', token)
-    
-    candidates: list[Path] = []
+
+    def _numbers_match(stem: str) -> bool:
+        if not token_nums:
+            return True
+        stem_nums = re.findall(r"\d+", stem)
+        ptr = 0
+        for num in stem_nums:
+            if ptr < len(token_nums) and num == token_nums[ptr]:
+                ptr += 1
+        return ptr >= len(token_nums)
+
+    token_boundary_re = re.compile(rf"(?<![a-z0-9]){re.escape(token)}(?![a-z0-9])")
+
+    candidates: list[tuple[int, int, Path]] = []
     roots = [wem_root]
     if external_root:
         roots.append(external_root)
@@ -103,32 +115,30 @@ def find_wem_by_event_name(
             continue
         for path in root.rglob("*.wem"):
             stem = path.stem.lower()
-            if token in stem:
-                candidates.append(path)
-                continue
+            if token_boundary_re.search(stem):
+                if _numbers_match(stem):
+                    candidates.append((300, len(str(path)), path))
+                    continue
+            elif token in stem:
+                # 仅作为次级候选，避免 "6_4" 误命中 "6_43"
+                if _numbers_match(stem):
+                    candidates.append((220, len(str(path)), path))
+                    continue
             
             # 策略2：去除干扰字符后包含 (解决 FavorWord vs favor_word 不同命名风格的问题)
             clean_stem = "".join(c for c in stem if c.isalnum())
             # 只有当 clean_token 长度足够时才使用模糊匹配，避免误匹配短ID
             if len(clean_token) > 5 and clean_token in clean_stem:
                 # 额外校验：数字序列必须一致 (防止 5_22 匹配到 52_2)
-                if token_nums:
-                    stem_nums = re.findall(r'\d+', stem)
-                    # 检查 token_nums 是否按顺序出现在 stem_nums 中
-                    ptr = 0
-                    for num in stem_nums:
-                        if ptr < len(token_nums) and num == token_nums[ptr]:
-                            ptr += 1
-                    if ptr < len(token_nums):
-                         continue 
-                
-                candidates.append(path)
+                if not _numbers_match(stem):
+                    continue
+                candidates.append((140, len(str(path)), path))
 
     if not candidates:
         return None
-    # 优先选择最短路径（更可能是直接外部源）
-    candidates.sort(key=lambda p: len(str(p)))
-    return candidates[0]
+    # 先按匹配质量，再按路径长度
+    candidates.sort(key=lambda item: (-item[0], item[1]))
+    return candidates[0][2]
 
 
 def find_bnk_for_event(bnk_root: Path, event_name: str | None) -> Path | None:

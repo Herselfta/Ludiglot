@@ -9,22 +9,15 @@ import json
 import sys
 from pathlib import Path
 
-from ludiglot.adapters.wuthering_waves.audio_strategy import WutheringAudioStrategy
 from ludiglot.core.audio_extract import (
     build_audio_index,
     collect_wem_files,
     convert_wem_to_wav,
-    convert_single_wem_to_wav,
-    convert_txtp_to_wav,
     default_vgmstream_path,
-    default_wwiser_path,
-    find_bnk_for_event,
-    find_txtp_for_event,
-    find_wem_by_hash,
-    generate_txtp_for_bnk,
 )
 from ludiglot.core.audio_mapper import AudioCacheIndex
 from ludiglot.core.audio_player import AudioPlayer
+from ludiglot.core.audio_resolver import AudioResolver, get_voice_event_index
 from ludiglot.core.capture import (
     CaptureError,
     CaptureRegion,
@@ -34,210 +27,69 @@ from ludiglot.core.capture import (
 )
 from ludiglot.core.config import load_config
 from ludiglot.core.game_pak_update import GamePakUpdateError, update_from_game_paks
+from ludiglot.core.matcher import TextMatcher
 from ludiglot.core.ocr import OCREngine
 from ludiglot.core.search import FuzzySearcher
 from ludiglot.core.text_builder import (
     build_text_db,
     build_text_db_from_maps,
-    build_text_db_from_root,
     build_text_db_from_root_all,
-    load_plot_audio_map,
     normalize_en,
     save_text_db,
 )
-from ludiglot.core.voice_map import build_voice_map_from_configdb
-from ludiglot.core.voice_event_index import VoiceEventIndex
 from ludiglot.core.wwise_hash import WwiseHash
 from ludiglot.ui.overlay_window import run_gui
 
 
-# 已移至 ludiglot.core.git_manager
-
-
-def _is_wuthering_data_valid(data_root: Path) -> bool:
-    """检查WutheringData目录是否包含必要的数据文件"""
-    if not data_root.exists():
-        return False
-    
-    # 检查是否有关键目录（不再检查.git）
-    required_dirs = ["TextMap", "ConfigDB"]
-    for dir_name in required_dirs:
-        dir_path = data_root / dir_name
-        if not dir_path.exists():
-            return False
-        # 检查目录是否为空
-        if not any(dir_path.iterdir()):
-            return False
-    
-    return True
-
-
-def _check_and_setup_wuthering_data(config_path: Path) -> bool:
-    """在终端中检测WutheringData，如不存在则交互式询问是否克隆。
-    
-    Returns:
-        bool: True表示data_root可用或用户选择跳过，False表示用户取消操作
-    """
-    import subprocess
-    
-    # 检查配置文件是否存在
-    if not config_path.exists():
-        return True  # 让load_config处理配置文件缺失的错误
-    
-    try:
-        raw = json.loads(config_path.read_text(encoding="utf-8"))
-    except Exception:
-        return True  # 配置文件解析错误，让后续流程处理
-
-    if raw.get("use_game_paks") or raw.get("game_install_root") or raw.get("game_pak_root"):
-        return True
-    
-    data_root_str = raw.get("data_root")
-    
-    # 如果没有配置data_root，直接返回
-    if not data_root_str:
-        return True
-    
-    # 解析data_root路径
-    data_root = Path(data_root_str)
-    if not data_root.is_absolute():
-        project_root = Path(__file__).resolve().parents[2]
-        data_root = (project_root / data_root).resolve()
-    
-    # 检查目录是否存在且完整
-    if data_root.exists():
-        if _is_wuthering_data_valid(data_root):
-            return True  # 目录存在且完整
-        else:
-            # 目录存在但不完整（可能是上次克隆失败留下的）
-            print("\n" + "="*70)
-            print("⚠️  WutheringData 目录不完整")
-            print("="*70)
-            print(f"\n检测到目录存在但不完整：{data_root}")
-            print("这可能是上次克隆失败留下的空文件夹。\n")
-            print("选项：")
-            print("  [Y] 删除并重新克隆 (推荐)")
-            print("  [N] 跳过（稍后手动处理）")
-            print("  [C] 取消启动")
-            print()
-            
-            while True:
-                choice = input("请选择 [Y/N/C]: ").strip().upper()
-                
-                if choice == 'C':
-                    return False
-                
-                if choice == 'N':
-                    print("\n⚠️  跳过重新克隆。如需手动处理：")
-                    print(f"   1. 删除目录： Remove-Item '{data_root}' -Recurse -Force")
-                    print(f"   2. 重新克隆： git clone https://github.com/Dimbreath/WutheringData.git {data_root}")
-                    return True
-                
-                if choice == 'Y':
-                    # 删除不完整的目录
-                    print(f"\n🗑️  正在删除不完整的目录...")
-                    try:
-                        import shutil
-                        shutil.rmtree(data_root)
-                        print("✅ 已删除\n")
-                    except Exception as e:
-                        print(f"\n❌ 删除失败：{e}")
-                        print("请手动删除后重试。")
-                        return False
-                    break
-                
-                print("❌ 无效输入，请输入 Y、N 或 C")
-    
-    # WutheringData不存在，在终端中询问用户
-    print("\n" + "="*70)
-    print("📂 WutheringData 未找到")
-    print("="*70)
-    print(f"\n配置的数据目录不存在：{data_root}")
-    print("\nWutheringData 是鸣潮游戏的文本和音频数据库。")
-    print("将仅下载必要目录（TextMap, ConfigDB），约 50MB。")
-    print("\n选项：")
-    print("  [Y] 从 GitHub 自动克隆 (推荐)")
-    print("  [N] 跳过（稍后手动设置）")
-    print("  [C] 取消启动")
-    print()
-    
-    while True:
-        choice = input("请选择 [Y/N/C]: ").strip().upper()
-        
-        if choice == 'C':
-            return False
-        
-        if choice == 'N':
-            print("\n⚠️  跳过克隆。如需完整功能，请手动克隆：")
-            print(f"   git clone https://github.com/Dimbreath/WutheringData.git {data_root}")
-            return True
-        
-        if choice == 'Y':
-            break
-        
-        print("❌ 无效输入，请输入 Y、N 或 C")
-    
-    # 用户选择克隆
-    from ludiglot.core.git_manager import GitManager
-    
-    print("\n" + "="*70)
-    print("🔄 开始克隆 WutheringData...")
-    print("="*70)
-    print(f"目标位置: {data_root}\n")
-    
-    success = GitManager.fast_clone_wuthering_data(
-        data_root, 
-        progress_callback=lambda line: print(line)
-    )
-    
-    if success:
-        print("\n" + "="*70)
-        print("✅ 克隆成功！")
-        print("="*70)
-        print(f"位置：{data_root}\n")
-        return True
-    else:
-        print("\n" + "="*70)
-        print("❌ 克隆失败")
-        print("="*70)
-        print("\n请检查网络连接或手动执行：")
-        print(f"git clone https://github.com/Dimbreath/WutheringData.git {data_root}")
-        return False
-        return False
+# 旧的 WutheringData 克隆逻辑已移除
+# 现在统一使用 FModelCLI 从游戏 Pak 构建数据库
 
 
 def _check_and_setup_game_data(config_path: Path) -> bool:
-    """在终端中检测游戏 Pak 解包数据，如不存在则交互式更新。"""
+    """在终端中检测游戏数据，如不存在则交互式构建。"""
     if not config_path.exists():
         return True
     try:
         cfg = load_config(config_path)
+    except FileNotFoundError as e:
+        # load_config 抛出的 FileNotFoundError 说明数据缺失
+        # 需要交互式处理
+        pass
+    except Exception:
+        return True
+    else:
+        # 成功加载配置，检查数据是否存在
+        data_root = cfg.data_root
+        if data_root:
+            data_root = Path(data_root).resolve()
+            configdb = data_root / "ConfigDB"
+            if configdb.exists() and any(configdb.iterdir()):
+                # ConfigDB 存在且非空，数据就绪
+                return True
+
+    # 数据缺失，尝试重新解析原始配置以获取路径信息
+    try:
+        raw = json.loads(config_path.read_text(encoding="utf-8"))
     except Exception:
         return True
 
-    if not (cfg.use_game_paks or cfg.game_install_root or cfg.game_pak_root):
+    game_pak_root = raw.get("game_pak_root") or raw.get("game_install_root")
+    
+    # 如果没有配置游戏路径，直接返回让后续流程报错
+    if not game_pak_root:
         return True
 
-    # 检查 Pak 解包数据是否存在
-    data_root = cfg.data_root
-    if data_root:
-        data_root = Path(data_root).resolve()
-        # 检查关键目录是否存在
-        configdb = data_root / "ConfigDB"
-        if configdb.exists() and any(configdb.iterdir()):
-            # ConfigDB 存在且非空，认为数据就绪
-            return True
-
     if not sys.stdin.isatty():
-        print("\n⚠️  Pak 模式已启用，但数据缺失。请运行 ludiglot pak-update 更新数据。")
+        print("\n⚠️  游戏数据未就绪。请运行 ludiglot pak-update 构建数据库。")
         return False
 
     print("\n" + "=" * 70)
-    print("📦 游戏 Pak 数据未就绪")
+    print("📦 游戏数据未就绪")
     print("=" * 70)
-    print("将从本地游戏 Pak 解包文本/音频资源。")
-    print("选项：")
-    print("  [Y] 立即解包并构建数据库 (推荐)")
+    print(f"\n检测到游戏路径: {game_pak_root}")
+    print("将使用 FModelCLI 从游戏 Pak 解包文本和音频资源。")
+    print("\n选项：")
+    print("  [Y] 立即解包并构建数据库 (推荐，首次运行必选)")
     print("  [N] 跳过 (稍后手动执行 ludiglot pak-update)")
     print("  [C] 取消启动")
 
@@ -252,10 +104,55 @@ def _check_and_setup_game_data(config_path: Path) -> bool:
         print("❌ 无效输入，请输入 Y、N 或 C")
 
     try:
-        update_from_game_paks(cfg, config_path, cfg.db_path, progress=lambda m: print(m))
+        # 直接从 raw 配置构建最小配置，绕过 load_config 的数据验证
+        # 因为此时数据还未构建，load_config 会因为 find_multitext_paths 失败
+        project_root = Path(__file__).resolve().parents[2]
+        
+        def resolve_path(p: str | None) -> Path | None:
+            if not p: return None
+            pp = Path(p)
+            if pp.is_absolute(): return pp
+            return (project_root / pp).resolve()
+        
+        data_root = resolve_path(raw.get("data_root", "data"))
+        db_path = resolve_path(raw.get("db_path", "game_text_db.json")) or project_root / "game_text_db.json"
+        
+        # 确保数据目录存在
+        if data_root:
+            data_root.mkdir(parents=True, exist_ok=True)
+        
+        # 创建最小配置对象
+        from ludiglot.core.config import AppConfig
+        minimal_cfg = AppConfig(
+            data_root=data_root,
+            en_json=None,  # 构建前不需要
+            zh_json=None,  # 构建前不需要
+            db_path=db_path,
+            image_path=project_root / "cache" / "capture.png",
+            use_game_paks=bool(raw.get("use_game_paks")),
+            game_install_root=resolve_path(raw.get("game_install_root")),
+            game_pak_root=resolve_path(raw.get("game_pak_root")),
+            game_data_root=resolve_path(raw.get("game_data_root")) or (data_root / "GameData" if data_root else None),
+            game_audio_root=resolve_path(raw.get("game_audio_root")) or (data_root / "WwiseAudio_Generated" if data_root else None),
+            game_platform=raw.get("game_platform"),
+            game_server=raw.get("game_server"),
+            game_version=raw.get("game_version"),
+            game_languages=raw.get("game_languages"),
+            game_audio_languages=raw.get("game_audio_languages"),
+            aes_archive_url=raw.get("aes_archive_url"),
+            extract_audio=raw.get("extract_audio") if raw.get("extract_audio") is not None else raw.get("extract_game_audio"),
+        )
+            
+        update_from_game_paks(minimal_cfg, config_path, db_path, progress=lambda m: print(m))
+        print("\n✅ 数据库构建成功！")
         return True
     except GamePakUpdateError as exc:
         print(f"\n❌ Pak 更新失败: {exc}")
+        return False
+    except Exception as exc:
+        print(f"\n❌ 构建失败: {exc}")
+        import traceback
+        traceback.print_exc()
         return False
 
 
@@ -345,365 +242,112 @@ def cmd_search(args: argparse.Namespace) -> None:
 def cmd_ocr(args: argparse.Namespace) -> None:
     db = _load_db(Path(args.db))
     engine = OCREngine(lang=args.lang, use_gpu=args.gpu)
-    lines = engine.recognize_with_confidence(Path(args.image))
+    ocr_result = engine.recognize_pipeline(Path(args.image))
+    lines = ocr_result.lines
 
     if not lines:
         print("OCR 未识别到文本")
         return
 
-    searcher = FuzzySearcher()
+    matcher = TextMatcher(db)
     for text, conf in lines:
-        key = normalize_en(text)
-        if not key:
+        result = matcher.match([(text, conf)])
+        if not result:
             continue
-        if key in db:
-            result = db[key]
-            print(f"[OCR {conf:.2f}] {text}")
-            print(json.dumps(result, ensure_ascii=False, indent=2))
-            continue
-
-        best, score = searcher.search(key, db.keys())
         print(f"[OCR {conf:.2f}] {text}")
-        print(f"Best match: {best}  score={score:.3f}")
-        print(json.dumps(db.get(best, {}), ensure_ascii=False, indent=2))
+        print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
-def _find_audio(cache_dir: Path, hash_value: int) -> Path | None:
-    for ext in (".wav", ".ogg", ".wem", ".mp3"):
-        cand = cache_dir / f"{hash_value}{ext}"
-        if cand.exists():
-            return cand
-    return None
-
-
-def _ensure_audio_for_hash(
-    cache_dir: Path,
-    wem_root: Path | None,
-    vgmstream_path: Path | None,
-    hash_value: int,
-    audio_index: AudioCacheIndex | None = None,
-    event_name: str | None = None,
-) -> Path | None:
-    audio_path = _find_audio(cache_dir, hash_value)
-    if audio_path is not None:
-        return audio_path
-    if wem_root is None or vgmstream_path is None:
-        return None
-        
-    # 1. Try finding by Hash in wem_root
-    wem_path = find_wem_by_hash(wem_root, hash_value)
-    
-    # 2. Fallback: Try finding by Event Name in WwiseExternalSource
-    if wem_path is None and event_name:
-        # Check if wem_root is already WwiseExternalSource or if we need to navigate
-        if "WwiseExternalSource" in str(wem_root):
-            ext_root = wem_root
-        else:
-            # Assuming wem_root is .../Media/zh, go up to .../WwiseExternalSource
-            ext_root = wem_root.parents[1] / "WwiseExternalSource"
-        
-        if ext_root.exists():
-            # Try multiple patterns
-            for pat in [f"*{event_name}*.wem", f"zh_{event_name}*.wem"]:
-                matches = list(ext_root.rglob(pat))
-                if matches:
-                    wem_path = matches[0]
-                    break
-    
-    if wem_path is None:
-        return None
-        
-    try:
-        audio_path = convert_single_wem_to_wav(wem_path, vgmstream_path, cache_dir, output_name=str(hash_value))
-    except Exception:
-        return None
-    if audio_index is not None:
-        audio_index.add_file(audio_path)
-    return audio_path
-
-
-def _ensure_audio_for_event(
-    cache_dir: Path,
-    wem_root: Path | None,
-    bnk_root: Path | None,
-    txtp_cache: Path | None,
-    vgmstream_path: Path | None,
-    wwiser_path: Path | None,
-    hash_value: int,
-    event_name: str | None,
-    audio_index: AudioCacheIndex | None = None,
-) -> Path | None:
-    audio_path = _find_audio(cache_dir, hash_value)
-    if audio_path is not None:
-        return audio_path
-    if wem_root is None or bnk_root is None or txtp_cache is None:
-        return None
-    if vgmstream_path is None or wwiser_path is None:
-        return None
-    bnk_path = find_bnk_for_event(bnk_root, event_name)
-    if bnk_path is None:
-        return None
-    try:
-        txtp_files = generate_txtp_for_bnk(bnk_path, wem_root, txtp_cache, wwiser_path)
-    except Exception:
-        return None
-    if not txtp_files:
-        return None
-    txtp_dir = txtp_cache / bnk_path.stem
-    txtp_path = find_txtp_for_event(txtp_dir, event_name) or txtp_files[0]
-    output_path = cache_dir / f"{hash_value}.wav"
-    try:
-        audio_path = convert_txtp_to_wav(txtp_path, vgmstream_path, output_path)
-    except Exception:
-        return None
-    if audio_index is not None:
-        audio_index.add_file(audio_path)
-    return audio_path
-def _resolve_hash_for_text_key(
-    text_key: str,
-    cfg: AppConfig,
-    audio_index: AudioCacheIndex | None,
-) -> int | None:
-    data_root = cfg.data_root
-    strategy = WutheringAudioStrategy()
-    if data_root:
-        plot_audio = load_plot_audio_map(data_root)
-        voice_map = build_voice_map_from_configdb(data_root)
-        candidates: list[tuple[str, int]] = []
-        voice_event = plot_audio.get(text_key)
-        if voice_event:
-            for name in strategy.build_names(text_key, voice_event):
-                candidates.append((name, strategy.hash_name(name)))
-        voice_list = voice_map.get(text_key, [])
-        for voice in voice_list:
-            for name in strategy.build_names(text_key, voice):
-                candidates.append((name, strategy.hash_name(name)))
-        if not candidates:
-            for name in strategy.build_names(text_key, None):
-                candidates.append((name, strategy.hash_name(name)))
-        seen: set[int] = set()
-        for name, hash_value in candidates:
-            if hash_value in seen:
-                continue
-            seen.add(hash_value)
-            if audio_index and audio_index.find(hash_value):
-                return hash_value
-        if candidates:
-            # 同样应用性别筛选
-            pref = (cfg.gender_preference or "female").lower()
-            if pref == "female":
-                f_keywords = ["_f", "nvzhu", "roverf", "female"]
-                f_cands = [c for c in candidates if any(k in c[0].lower() for k in f_keywords)]
-                if f_cands: return f_cands[0][1]
-            elif pref == "male":
-                m_keywords = ["_m", "nanzhu", "roverm", "male"]
-                m_cands = [c for c in candidates if any(k in c[0].lower() for k in m_keywords)]
-                if m_cands: return m_cands[0][1]
-
-            return candidates[0][1]
-        return None
-    return strategy.build_hash(text_key)
-
-
-_EVENT_INDEX_CACHE: dict[str, VoiceEventIndex] = {}
-
-
-def _collect_voice_events(data_root: Path) -> list[str]:
-    events: list[str] = []
-    try:
-        plot_audio = load_plot_audio_map(data_root)
-        events.extend([str(v) for v in plot_audio.values() if v])
-    except Exception:
-        pass
-    try:
-        voice_map = build_voice_map_from_configdb(data_root)
-        for items in voice_map.values():
-            if isinstance(items, list):
-                events.extend([str(v) for v in items if v])
-    except Exception:
-        pass
-    # 去重
-    dedup: list[str] = []
-    seen = set()
-    for ev in events:
-        if ev in seen:
-            continue
-        seen.add(ev)
-        dedup.append(ev)
-    return dedup
-
-
-def _get_voice_event_index(cfg: AppConfig) -> VoiceEventIndex | None:
-    if not cfg.audio_bnk_root and not cfg.audio_txtp_cache:
-        return None
-
-    cache_path = None
-    if cfg.audio_cache_path:
-        cache_path = cfg.audio_cache_path / "voice_event_index.json"
-
-    key = f"{cfg.audio_bnk_root}|{cfg.audio_txtp_cache}|{cfg.data_root}|{cache_path}"
-    cached = _EVENT_INDEX_CACHE.get(key)
-    if cached is not None:
-        return cached
-
-    extra_names: list[str] = []
-    if cfg.data_root:
-        extra_names = _collect_voice_events(cfg.data_root)
-
-    index = VoiceEventIndex(
-        bnk_root=cfg.audio_bnk_root,
-        txtp_root=cfg.audio_txtp_cache,
-        cache_path=cache_path,
-        extra_names=extra_names,
+def _build_audio_resolver(cfg, index: AudioCacheIndex | None = None) -> AudioResolver:
+    return AudioResolver(
+        cfg,
+        voice_event_index=get_voice_event_index(cfg),
+        audio_index=index,
     )
-    index.load_or_build()
-    _EVENT_INDEX_CACHE.clear()
-    _EVENT_INDEX_CACHE[key] = index
-    return index
 
 
-def load_plot_audio_map(data_root: Path) -> Dict[str, str]:
-    path = data_root / "ConfigDB" / "PlotAudio.json"
-    if not path.exists():
-        return {}
+def _coerce_audio_hash(value: str | int | None) -> int | None:
+    if value is None:
+        return None
     try:
-        from ludiglot.core.voice_map import _iter_items
-        data = json.loads(path.read_text(encoding="utf-8"))
-        res = {}
-        for item in _iter_items(data):
-            # 假设 PlotAudio.json 的 Key 是 Content/TextKey，Value 是 Voice
-            tk = item.get("TextKey") or item.get("Name")
-            v = item.get("Voice")
-            if tk and v:
-                res[tk] = v
-        return res
-    except Exception:
-        return {}
-
-
-from ludiglot.core.voice_map import (
-    build_voice_map_from_configdb,
-    _resolve_events_for_text_key
-)
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _play_audio_for_key(
     text_key: str,
-    cfg: AppConfig,
+    cfg,
     index: AudioCacheIndex | None = None,
     audio_event: str | None = None,
-    audio_hash: str | int | None = None
+    audio_hash: str | int | None = None,
 ) -> bool:
-    strategy = WutheringAudioStrategy()
-    
-    # 直接由解析器返回已经排序、去重、互换好的候选列表
-    final_events = _resolve_events_for_text_key(text_key, cfg)
-    if audio_event and audio_event not in final_events:
-        final_events.insert(0, audio_event)
-            
-    # 如果此时还是空的，尝试回退到猜测模式
-    if not final_events:
-        final_events = [None]  # 让 strategy.build_names 生成默认猜测
+    resolver = _build_audio_resolver(cfg, index)
+    resolution = resolver.resolve(
+        text_key,
+        db_event=audio_event,
+        db_hash=_coerce_audio_hash(audio_hash),
+    )
+    if resolution is None:
+        return False
 
-    # 后续播放逻辑...
-    wwiser_path = cfg.wwiser_path or default_wwiser_path()
-    
-    total_candidates = []
-    seen = set()
-    
-    for event_name in final_events:
-        for name in strategy.build_names(text_key, event_name):
-            if name not in seen:
-                total_candidates.append(name)
-                seen.add(name)
-
-    # 从实际音频资源建立索引，补充候选事件名
-    event_index = _get_voice_event_index(cfg)
-    if event_index:
-        ref_event = next((e for e in final_events if e), None)
-        extra = event_index.find_candidates(text_key, ref_event, limit=8)
-        for name in extra:
-            if name not in seen:
-                total_candidates.append(name)
-                seen.add(name)
-    
-    # 终极全局排优：不仅是 Event 名，连生成的哈希名也必须符合性别偏好
-    pref = (cfg.gender_preference or "female").lower()
-    f_pats = ["_f_", "nvzhu", "roverf", "_female"]
-    m_pats = ["_m_", "nanzhu", "roverm", "_male"]
-    target_pats = f_pats if pref == "female" else m_pats
-    other_pats = m_pats if pref == "female" else f_pats
-
-    def final_priority(n):
-        nl = n.lower()
-        if any(w in nl for w in target_pats): return 0
-        if any(w in nl for w in other_pats): return 2
-        return 1
-
-    total_candidates.sort(key=final_priority)
-    
     print(f"[AUDIO] 尝试播放 TextKey: {text_key}")
-    print(f"[AUDIO] 最终排序 (前2名): {total_candidates[:2]}")
-    
-    # 如果有明确传入的 hash，插入到最前面
-    if audio_hash:
-        pass
-    
-    for name in total_candidates:
-        h = strategy.hash_name(name)
-        # 1. 查缓存
-        audio_path = (index.find(h) if index else None) or _find_audio(cfg.audio_cache_path, h)
-        
-        # 2. 如果缓存没有，尝试从 WEM 提取 (WEM 名通常就是 hash)
-        if audio_path is None and cfg.audio_wem_root and cfg.vgmstream_path:
-            audio_path = _ensure_audio_for_hash(
-                cfg.audio_cache_path,
-                cfg.audio_wem_root,
-                cfg.vgmstream_path,
-                h,
-                audio_index=index,
-                event_name=name,
-            )
-    
-        # 3. 如果还是没有，尝试通过 BNK Event 提取
-        if audio_path is None and cfg.audio_bnk_root and cfg.audio_txtp_cache and cfg.wwiser_path:
-            audio_path = _ensure_audio_for_event(
-                cfg.audio_cache_path,
-                cfg.audio_wem_root,
-                cfg.audio_bnk_root,
-                cfg.audio_txtp_cache,
-                cfg.vgmstream_path,
-                cfg.wwiser_path,
-                h,
-                name,
-                audio_index=index
-            )
-            
-        if audio_path:
-            AudioPlayer().play(str(audio_path))
-            return True
-            
-    return False
+    print(
+        f"[AUDIO] 解析结果: event={resolution.event_name}, "
+        f"hash={resolution.hash_value}, source={resolution.source_type}"
+    )
+
+    audio_path = None
+    if resolution.source_type == "cache":
+        audio_path = resolver.get_cached_path(resolution.hash_value, resolution.event_name)
+    if audio_path is None:
+        audio_path = resolver.ensure_playable_audio(
+            resolution.hash_value,
+            text_key,
+            resolution.event_name,
+        )
+    if audio_path is None:
+        return False
+
+    AudioPlayer().play(str(audio_path))
+    return True
 
 
 def cmd_play(args: argparse.Namespace) -> None:
     cache_dir = Path(args.cache)
+    index = AudioCacheIndex(cache_dir)
+    index.load()
+    index.scan()
+
     if args.hash is not None:
         hash_value = int(args.hash)
+        audio_path = index.find(hash_value)
     else:
-        resolved = _resolve_hash_for_text_key(args.text_key, None, None)
-        if resolved is None:
-            print("无法解析 TextKey 对应的音频 Hash")
-            return
-        hash_value = resolved
+        from ludiglot.core.config import AppConfig
 
-    audio_path = _find_audio(cache_dir, hash_value)
+        cfg = AppConfig(
+            data_root=None,
+            en_json=Path(),
+            zh_json=Path(),
+            db_path=Path(),
+            image_path=Path(),
+            audio_cache_path=cache_dir,
+            audio_cache_index_path=cache_dir / "audio_index.json",
+        )
+        resolver = AudioResolver(cfg, audio_index=index)
+        resolution = resolver.resolve(args.text_key)
+        audio_path = (
+            resolver.get_cached_path(resolution.hash_value, resolution.event_name, trusted_only=False)
+            if resolution
+            else None
+        )
+        hash_value = resolution.hash_value if resolution else None
+
     if audio_path is None:
-        print(f"未找到音频文件：{hash_value}.*")
+        target = hash_value if hash_value is not None else args.text_key
+        print(f"未找到音频文件：{target}")
         return
-    player = AudioPlayer()
-    player.play(str(audio_path))
-
+    AudioPlayer().play(str(audio_path))
 
 def cmd_audio_extract(args: argparse.Namespace) -> None:
     wem_root = Path(args.wem_root)
@@ -748,11 +392,12 @@ def cmd_audio_build(args: argparse.Namespace) -> None:
         vgmstream_path = cfg.vgmstream_path
     else:
         vgmstream_path = default_vgmstream_path()
-    wwiser_path = cfg.wwiser_path or default_wwiser_path()
-    bnk_root = cfg.audio_bnk_root
-    txtp_cache = cfg.audio_txtp_cache
 
     index_path = Path(args.index_path) if args.index_path else cfg.audio_cache_index_path
+    cfg.audio_wem_root = wem_root
+    cfg.audio_cache_path = cache_dir
+    cfg.audio_cache_index_path = index_path
+    cfg.vgmstream_path = vgmstream_path
     index = build_audio_index(cache_dir, index_path=index_path, max_mb=args.max_mb)
 
     if args.full_convert:
@@ -779,11 +424,12 @@ def cmd_audio_build(args: argparse.Namespace) -> None:
         )
 
     if args.test_hash or args.test_text_key:
+        resolver = _build_audio_resolver(cfg, index)
         if args.test_hash:
             hash_val = int(args.test_hash)
-            audio_path = (index.find(hash_val) if index else None) or _find_audio(cache_dir, hash_val)
-            if not audio_path:
-                audio_path = _ensure_audio_for_hash(cache_dir, wem_root, vgmstream_path, hash_val, index)
+            audio_path = resolver.get_cached_path(hash_val, trusted_only=False)
+            if audio_path is None:
+                audio_path = resolver.ensure_playable_audio(hash_val, None, None)
             if audio_path:
                 AudioPlayer().play(str(audio_path))
             else:
@@ -839,6 +485,7 @@ def cmd_run(args: argparse.Namespace) -> None:
         glm_ollama_model=getattr(cfg, "ocr_glm_ollama_model", None),
         glm_max_tokens=getattr(cfg, "ocr_glm_max_tokens", None),
         glm_timeout=getattr(cfg, "ocr_glm_timeout", None),
+        glm_prompt=getattr(cfg, "ocr_glm_prompt", None),
         allow_paddle=(getattr(cfg, "ocr_backend", "auto") == "paddle"),
     )
     try:
@@ -862,24 +509,18 @@ def cmd_run(args: argparse.Namespace) -> None:
         )
         cache_index.load()
         cache_index.scan()
-    wwiser_path = cfg.wwiser_path or default_wwiser_path()
-    lines = engine.recognize_with_confidence(cfg.image_path, backend=cfg.ocr_backend)
+    ocr_result = engine.recognize_pipeline(cfg.image_path, backend=cfg.ocr_backend)
+    lines = ocr_result.lines
 
     if not lines:
         print("OCR 未识别到文本")
         return
 
-    searcher = FuzzySearcher()
+    matcher = TextMatcher(db, gender_preference=cfg.gender_preference)
     for text, conf in lines:
-        key = normalize_en(text)
-        if not key:
+        result = matcher.match([(text, conf)])
+        if not result:
             continue
-        if key in db:
-            result = db[key]
-        else:
-            best, score = searcher.search(key, db.keys())
-            result = db.get(best, {})
-            result = {**result, "_score": round(score, 3)}
 
         print(f"[OCR {conf:.2f}] {text}")
         print(json.dumps(result, ensure_ascii=False, indent=2))
@@ -889,8 +530,8 @@ def cmd_run(args: argparse.Namespace) -> None:
             text_key = match.get("text_key")
             if text_key:
                 _play_audio_for_key(
-                    text_key, 
-                    cfg, 
+                    text_key,
+                    cfg,
                     index=cache_index,
                     audio_event=match.get("audio_event"),
                     audio_hash=match.get("audio_hash")
@@ -909,11 +550,8 @@ def cmd_gui(args: argparse.Namespace) -> None:
         print("="*70 + "\n")
         return
     
-    # 在启动GUI前先在终端中检测和处理WutheringData / Pak 数据
+    # 在启动 GUI 前先在终端中检测并自动构建数据库
     if not _check_and_setup_game_data(config_path):
-        print("\n❌ 启动已取消。")
-        return
-    if not _check_and_setup_wuthering_data(config_path):
         print("\n❌ 启动已取消。")
         return
     

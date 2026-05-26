@@ -77,35 +77,45 @@ class VoiceEventIndex:
         self._token_map: Dict[str, Set[int]] = {}
 
     def load_or_build(self) -> None:
-        roots = [p for p in [self.bnk_root, self.txtp_root] if p]
-        latest = 0.0
-        if roots:
-            latest = _latest_mtime(self._iter_files(roots))
-
-        cache = None
-        if self.cache_path and self.cache_path.exists():
-            try:
-                raw = json.loads(self.cache_path.read_text(encoding="utf-8"))
-                if isinstance(raw, dict) and float(raw.get("mtime", -1)) >= latest:
-                    names = raw.get("names")
-                    if isinstance(names, list):
-                        cache = EventIndexCache(mtime=float(raw.get("mtime")), names=[str(n) for n in names])
-            except Exception:
-                cache = None
+        latest = self._resource_latest_mtime()
+        cache = self._load_cache(latest)
 
         if cache is None:
-            names, latest = self._build_names(latest)
-            self.names = names
-            if self.cache_path:
-                self.cache_path.parent.mkdir(parents=True, exist_ok=True)
-                self.cache_path.write_text(
-                    json.dumps({"mtime": latest, "names": self.names}, ensure_ascii=False, indent=2),
-                    encoding="utf-8",
-                )
+            self.names, latest = self._build_names(latest)
+            self._write_cache(latest)
         else:
             self.names = cache.names
 
         self._build_token_index()
+
+    def _resource_latest_mtime(self) -> float:
+        roots = [p for p in [self.bnk_root, self.txtp_root] if p]
+        if not roots:
+            return 0.0
+        return _latest_mtime(self._iter_files(roots))
+
+    def _load_cache(self, latest: float) -> EventIndexCache | None:
+        if not self.cache_path or not self.cache_path.exists():
+            return None
+        try:
+            raw = json.loads(self.cache_path.read_text(encoding="utf-8"))
+            if not isinstance(raw, dict) or float(raw.get("mtime", -1)) < latest:
+                return None
+            names = raw.get("names")
+            if not isinstance(names, list):
+                return None
+            return EventIndexCache(mtime=float(raw.get("mtime")), names=[str(n) for n in names])
+        except Exception:
+            return None
+
+    def _write_cache(self, latest: float) -> None:
+        if not self.cache_path:
+            return
+        self.cache_path.parent.mkdir(parents=True, exist_ok=True)
+        self.cache_path.write_text(
+            json.dumps({"mtime": latest, "names": self.names}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
 
     def _iter_files(self, roots: Iterable[Path]) -> Iterable[Path]:
         for root in roots:

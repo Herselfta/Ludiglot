@@ -4,11 +4,12 @@ import json
 import shutil
 import sys
 import threading
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 from PyQt6.QtCore import Qt, pyqtSignal, QObject, QTimer, QPoint, QRect, QSize, QAbstractNativeEventFilter, QEvent, QEventLoop
-from PyQt6.QtGui import QFont, QTextOption, QColor, QPalette, QAction, QActionGroup, QCursor, QPainter, QPixmap, QGuiApplication
+from PyQt6.QtGui import QFont, QTextOption, QColor, QPalette, QAction, QActionGroup, QCursor, QPainter, QPixmap, QGuiApplication, QImage
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
     QLabel, QPushButton, QTextEdit, QMenu, QComboBox, QSizePolicy,
@@ -16,17 +17,6 @@ from PyQt6.QtWidgets import (
     QRubberBand, QSystemTrayIcon
 )
 
-from ludiglot.adapters.wuthering_waves.audio_strategy import WutheringAudioStrategy
-from ludiglot.core.audio_extract import (
-    convert_single_wem_to_wav,
-    convert_txtp_to_wav,
-    default_wwiser_path,
-    find_bnk_for_event,
-    find_wem_by_event_name,
-    find_txtp_for_event,
-    find_wem_by_hash,
-    generate_txtp_for_bnk,
-)
 from ludiglot.core.audio_mapper import AudioCacheIndex
 from ludiglot.core.audio_player import AudioPlayer
 from ludiglot.core.capture import (
@@ -46,20 +36,17 @@ from ludiglot.core.capture import (
     capture_region_to_image_native,
 )
 from ludiglot.core.config import AppConfig, load_config
-from ludiglot.core.ocr import OCREngine, group_ocr_lines
-from ludiglot.core.search import FuzzySearcher
-from ludiglot.core.smart_match import build_smart_candidates
+from ludiglot.core.ocr import OCREngine
 from ludiglot.core.text_builder import (
     build_text_db,
     build_text_db_from_root_all,
-    load_plot_audio_map,
-    normalize_en,
     save_text_db,
 )
 from ludiglot.core.voice_map import build_voice_map_from_configdb, collect_all_voice_event_names
 from ludiglot.core.voice_event_index import VoiceEventIndex
 from ludiglot.core.matcher import TextMatcher
-from ludiglot.core.audio_resolver import resolve_external_wem_root
+from ludiglot.core.audio_resolver import AudioResolver, resolve_external_wem_root
+from ludiglot.core.skill_param_resolver import SkillParamResolver
 
 
 class PersistentMenu(QMenu):
@@ -81,6 +68,15 @@ class UiSignals(QObject):
     log = pyqtSignal(str)
 
 
+@dataclass
+class DesktopSnapshot:
+    image: Any
+    left: int
+    top: int
+    monitors: list[dict]
+    screen_pixmaps: list[QPixmap]
+
+
 class OverlayWindow(QMainWindow):
     """无边框、置顶覆盖层窗口（MVP）。"""
 
@@ -94,9 +90,9 @@ class OverlayWindow(QMainWindow):
         self.signals = UiSignals()
         self.log_path = Path(__file__).resolve().parents[3] / "log" / "gui.log"
         self._install_terminal_logger()
-        # self.searcher = FuzzySearcher() # TextMatcher now handles this
         self.matcher: TextMatcher | None = None
         self.audio_resolver: AudioResolver | None = None
+        self.skill_param_resolver: SkillParamResolver | None = None
         self.engine = OCREngine(
             lang=config.ocr_lang,
             use_gpu=config.ocr_gpu,
@@ -105,6 +101,7 @@ class OverlayWindow(QMainWindow):
             glm_ollama_model=getattr(config, "ocr_glm_ollama_model", None),
             glm_max_tokens=getattr(config, "ocr_glm_max_tokens", None),
             glm_timeout=getattr(config, "ocr_glm_timeout", None),
+            glm_prompt=getattr(config, "ocr_glm_prompt", None),
             allow_paddle=(getattr(config, "ocr_backend", "auto") == "paddle"),
         )
         self.engine.set_logger(self.signals.log.emit, self.signals.status.emit)
@@ -145,6 +142,7 @@ class OverlayWindow(QMainWindow):
         self._hotkey_listener = None
         self._win_hotkey_filter = None
         self._win_hotkey_ids: list[int] = []
+        self._capture_in_progress = False  # 防止快捷键重复触发捕获
         self._dragging = False
         self._drag_pos: QPoint | None = None
         self._resizing = False
@@ -445,7 +443,7 @@ class OverlayWindow(QMainWindow):
         
         # Update Database 操作
         update_action = QAction("Update Database", self)
-        update_action.setToolTip("拉取 WutheringData 仓库并重建数据库")
+        update_action.setToolTip("从游戏 Pak 重新解包并构建数据库")
         update_action.triggered.connect(self._update_database)
         self.window_menu.addAction(update_action)
         
@@ -1038,59 +1036,85 @@ class OverlayWindow(QMainWindow):
         }
         return weight_map.get(self.current_font_weight, "600")
     
-    def _apply_font_settings(self):
-        """应用字体设置到所有UI元素"""
-        from PyQt6.QtGui import QFont, QTextCursor
-        
-        # 内容字体（原文和翻译）
-        en_font = QFont()
-        en_font.setFamily(self.current_font_en)
+    def _build_content_fonts(self) -> tuple[QFont, QFont]:
+        """构造英文/中文内容字体对象。"""
         # 确保字号合法（避免Qt警告）- 处理所有边界情况
         try:
             size_val = int(self.current_font_size) if self.current_font_size else 13
         except (ValueError, TypeError):
             size_val = 13
         valid_size = max(8, min(72, size_val))
-        en_font.setPointSize(valid_size)
-        
-        # 设置字重
+
         weight_map = {
             "Light": QFont.Weight.Light,
             "Normal": QFont.Weight.Normal,
             "SemiBold": QFont.Weight.DemiBold,
             "Bold": QFont.Weight.Bold,
-            "Heavy": QFont.Weight.Black
+            "Heavy": QFont.Weight.Black,
         }
-        en_font.setWeight(weight_map.get(self.current_font_weight, QFont.Weight.DemiBold))
-        
-        # 设置字距
+        weight_val = weight_map.get(self.current_font_weight, QFont.Weight.DemiBold)
+
+        en_font = QFont()
+        en_font.setFamily(self.current_font_en)
+        en_font.setPointSize(valid_size)
+        en_font.setWeight(weight_val)
         en_font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, self.current_letter_spacing)
-        
-        # 中文字体
+
         cn_font = QFont()
         cn_font.setFamily(self.current_font_cn)
         cn_font.setPointSize(valid_size)
-        cn_font.setWeight(weight_map.get(self.current_font_weight, QFont.Weight.DemiBold))
+        cn_font.setWeight(weight_val)
         cn_font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, self.current_letter_spacing)
-        
-        # 应用到标签
+        return en_font, cn_font
+
+    def _apply_text_document_style(self, editor: QTextEdit, font: QFont, force_char_style: bool) -> None:
+        """对 QTextEdit 文档应用实时字体/行距设置。"""
+        from PyQt6.QtGui import QTextCursor, QTextBlockFormat, QTextCharFormat
+
+        doc = editor.document()
+        doc.setDefaultFont(font)
+
+        cursor = QTextCursor(doc)
+        cursor.select(QTextCursor.SelectionType.Document)
+
+        # 纯文本模式下强制覆盖字符格式，避免被 QSS 固定字号/字重锁死
+        if force_char_style:
+            char_fmt = QTextCharFormat()
+            char_fmt.setFont(font)
+            cursor.mergeCharFormat(char_fmt)
+
+        # Qt 对 QTextEdit 的 QSS line-height 支持有限，改用文档块格式保证实时生效
+        try:
+            line_height_ratio = float(self.current_line_spacing)
+        except (TypeError, ValueError):
+            line_height_ratio = 1.2
+        line_height_percent = int(max(50, min(400, line_height_ratio * 100)))
+        block_fmt = QTextBlockFormat()
+        try:
+            # PyQt6 expects int for heightType; enum object may raise TypeError.
+            height_type = int(QTextBlockFormat.LineHeightTypes.ProportionalHeight.value)
+        except Exception:
+            height_type = int(getattr(QTextBlockFormat, "ProportionalHeight", 1))
+        block_fmt.setLineHeight(float(line_height_percent), height_type)
+        cursor.mergeBlockFormat(block_fmt)
+
+    def _apply_font_settings(self):
+        """应用字体设置到所有UI元素"""
+        en_font, cn_font = self._build_content_fonts()
+
+        # 应用到控件默认字体
         self.source_label.setFont(en_font)
         self.cn_label.setFont(cn_font)
-        
-        # 设置行距（通过CSS）
-        line_height_percent = int(self.current_line_spacing * 100)
-        text_edit_style = f"""
-            QTextEdit {{
-                line-height: {line_height_percent}%;
-            }}
-        """
-        self.source_label.setStyleSheet(text_edit_style)
-        self.cn_label.setStyleSheet(text_edit_style)
 
-        # 重新渲染富文本以应用字号/字重/行距
+        # 重新渲染文本，并对文档层强制应用字体/行距
         self._refresh_text_display()
-        
-        self.signals.log.emit(f"[UI] 字体设置：{self.current_font_size}pt, {self.current_font_weight}, 字距{self.current_letter_spacing}px, 行距{self.current_line_spacing:.1f}x")
+        self._apply_text_document_style(self.source_label, en_font, force_char_style=not self._last_en_is_html)
+        self._apply_text_document_style(self.cn_label, cn_font, force_char_style=not self._last_cn_is_html)
+
+        self.signals.log.emit(
+            f"[UI] 字体设置：{self.current_font_size}pt, {self.current_font_weight}, "
+            f"字距{self.current_letter_spacing}px, 行距{self.current_line_spacing:.1f}x"
+        )
 
     def _refresh_text_display(self) -> None:
         if self._last_en_raw is not None:
@@ -1158,16 +1182,16 @@ class OverlayWindow(QMainWindow):
         self.signals.log.emit(f"[UI] 字体大小调整为 {self.current_font_size}pt")
     
     def _update_database(self) -> None:
-        """更新数据库：拉取 WutheringData 并重建"""
+        """更新数据库：从游戏 Pak 重新解包并构建"""
         from ludiglot.ui.dialogs import StyledDialog, StyledProgressDialog
         from ludiglot.ui.db_updater import DatabaseUpdateThread
         
-        # 检查data_root配置
-        if not self.config.data_root:
+        # 检查 Pak 配置
+        if not (self.config.game_pak_root or self.config.game_install_root):
             StyledDialog.warning(
                 self,
                 "配置错误",
-                "未设置 data_root 路径。\n请在 config/settings.json 中配置 WutheringData 路径。"
+                "未设置游戏路径。\n请在 config/settings.json 中配置 game_pak_root 或 game_install_root。"
             )
             return
         
@@ -1175,8 +1199,8 @@ class OverlayWindow(QMainWindow):
         reply = StyledDialog.question(
             self,
             "更新数据库",
-            f"即将从 GitHub 拉取 WutheringData 并重建数据库。\n\n"
-            f"数据路径: {self.config.data_root}\n"
+            f"即将从游戏 Pak 解包并重建数据库。\n\n"
+            f"游戏路径: {self.config.game_pak_root or self.config.game_install_root}\n"
             f"输出文件: {self.config.db_path}\n\n"
             f"此操作可能需要几分钟。是否继续？"
         )
@@ -1264,6 +1288,8 @@ class OverlayWindow(QMainWindow):
             self.signals.error.emit(f"DB 初始化失败: {exc}")
             return
 
+        self._init_skill_param_resolver()
+
         if self.config.data_root:
             try:
                 cache_path = Path(__file__).resolve().parents[3] / "cache" / "voice_map.json"
@@ -1327,12 +1353,24 @@ class OverlayWindow(QMainWindow):
         if index.names:
             self.signals.log.emit(f"[VOICE] 事件索引: {len(index.names)} 项")
 
+    def _init_skill_param_resolver(self) -> None:
+        self.skill_param_resolver = None
+        if not self.config.data_root:
+            return
+        db_path = self.config.data_root / "ConfigDB" / "db_skill.db"
+        resolver = SkillParamResolver(db_path, logger=self.signals.log.emit)
+        if resolver.available:
+            self.skill_param_resolver = resolver
+            self.signals.log.emit(f"[PARAM] 技能参数解析器已启用: {db_path}")
+
     def _init_matcher(self) -> None:
         if self.db:
-            from ludiglot.core.matcher import TextMatcher
-            from ludiglot.core.audio_resolver import AudioResolver
-
-            self.matcher = TextMatcher(self.db, self.voice_map, self.voice_event_index)
+            self.matcher = TextMatcher(
+                self.db,
+                self.voice_map,
+                self.voice_event_index,
+                gender_preference=self.config.gender_preference,
+            )
             self.matcher.set_logger(self.signals.log.emit)
             self.signals.log.emit("[MATCHER] 匹配服务已初始化")
 
@@ -1540,29 +1578,13 @@ class OverlayWindow(QMainWindow):
             self.time_label.setText(f"{current_sec//60:02d}:{current_sec%60:02d} / {duration_sec//60:02d}:{duration_sec%60:02d}")
 
     def _translate_title(self, title: str) -> str:
-        """尝试将标题（如角色名、招式名）翻译为中文。"""
+        """标题翻译委托给核心匹配器，UI 层只负责调用。"""
         if not self.matcher:
             return ""
         try:
-            cleaned = "".join(ch if ch.isalnum() or ch.isspace() else " " for ch in title).strip()
-            key = normalize_en(cleaned)
-            if not key:
-                return ""
-            result, score = self.matcher.search_key(key)
-            if isinstance(result, dict):
-                # 1. 尝试直接获取
-                cn = result.get("official_cn") or result.get("cn")
-                # 2. 尝试从 matches 列表中获取
-                if not cn:
-                    matches = result.get("matches", [])
-                    if matches:
-                        cn = matches[0].get("official_cn") or matches[0].get("cn")
-                
-                if cn and score >= 0.7:
-                    return str(cn)
+            return self.matcher.resolve_title_cn(title)
         except Exception:
-            pass
-        return ""
+            return ""
 
     def _on_mode_changed(self, mode: str) -> None:
         self.engine.set_mode(mode)
@@ -1585,37 +1607,73 @@ class OverlayWindow(QMainWindow):
         self.capture_requested.emit(True)
 
     def _capture_and_process_async(self, force_select: bool = False) -> None:
+        if self._capture_in_progress:
+            self.signals.log.emit("[HOTKEY] 正在处理中，忽略重复触发")
+            return
+        self._capture_in_progress = True
         import time
         t_start = time.time()
         selected_region: CaptureRegion | None = None
-        self.signals.log.emit("[HOTKEY] 触发捕获")
-        if force_select or self.config.capture_mode == "select":
-            self.signals.status.emit("请选择 OCR 区域…")
-            t_select_start = time.time()
-            selected_region = self._select_region()
-            t_select_end = time.time()
-            self.signals.log.emit(f"[PERF] 区域选择耗时: {(t_select_end - t_select_start):.3f}s")
-            if selected_region is None:
-                self.signals.status.emit("已取消")
-                return
-        threading.Thread(
-            target=self._capture_and_process,
-            args=(selected_region,),
-            daemon=True,
-        ).start()
-        self.signals.log.emit(f"[PERF] 异步调用总耗时: {(time.time() - t_start):.3f}s")
+        snapshot: DesktopSnapshot | None = None
+        thread_started = False
+        try:
+            # 新一轮 OCR 前先停止当前播放，避免旧音频与新结果串音
+            self.stop_audio(emit_status=False)
+            self.last_text_key = None
+            self.last_hash = None
+            self.last_event_name = None
+            self.signals.log.emit("[HOTKEY] 触发捕获")
+            if force_select or self.config.capture_mode == "select":
+                self.signals.status.emit("冻结屏幕…")
+                t_snap_start = time.time()
+                try:
+                    snapshot = self._capture_desktop_snapshot()
+                except Exception as exc:
+                    snapshot = None
+                    self.signals.log.emit(f"[CAPTURE] 预截图失败，回退实时框选: {exc}")
+                t_snap_end = time.time()
+                if snapshot is not None:
+                    self.signals.log.emit(f"[PERF] 屏幕快照耗时: {(t_snap_end - t_snap_start):.3f}s")
+                self.signals.status.emit("请选择 OCR 区域…")
+                t_select_start = time.time()
+                selected_region = self._select_region(snapshot)
+                t_select_end = time.time()
+                self.signals.log.emit(f"[PERF] 区域选择耗时: {(t_select_end - t_select_start):.3f}s")
+                if selected_region is None:
+                    self.signals.status.emit("已取消")
+                    return
+            threading.Thread(
+                target=self._capture_and_process,
+                args=(selected_region, snapshot),
+                daemon=True,
+            ).start()
+            thread_started = True
+            self.signals.log.emit(f"[PERF] 异步调用总耗时: {(time.time() - t_start):.3f}s")
+        except Exception as exc:
+            self.signals.log.emit(f"[CAPTURE] 触发捕获异常: {exc}")
+            self.signals.status.emit("捕获失败")
+        finally:
+            # 仅在未成功启动后台线程时（后台线程会自己清除标志）清除
+            if not thread_started:
+                self._capture_in_progress = False
 
-    def _capture_and_process(self, selected_region: CaptureRegion | None) -> None:
+    def _capture_and_process(self, selected_region: CaptureRegion | None, snapshot: DesktopSnapshot | None) -> None:
         import time
         t_total_start = time.time()
-        
+        try:
+            self._do_capture_and_process(selected_region, snapshot, t_total_start)
+        finally:
+            self._capture_in_progress = False
+
+    def _do_capture_and_process(self, selected_region: CaptureRegion | None, snapshot: DesktopSnapshot | None, t_total_start: float) -> None:
+        import time
         self.signals.status.emit("捕获中…")
         
         # 1. 截图 (In-Memory)
         t_capture_start = time.time()
         img_obj = None
         try:
-            img_obj = self._capture_image_to_memory(selected_region)
+            img_obj = self._capture_image_to_memory(selected_region, snapshot)
         except Exception as exc:
             self.signals.error.emit(f"截图失败: {exc}")
             return
@@ -1658,18 +1716,14 @@ class OverlayWindow(QMainWindow):
                 except Exception as exc:
                     self.signals.log.emit(f"[OCR] 保存输入失败: {exc}")
             
-            # Pass PIL Image directly
-            if self.config.ocr_backend == "tesseract":
-                # Tesseract usually prefers path, but our updated engine handles object
-                box_lines = self.engine.recognize_with_boxes(
-                    img_obj, prefer_tesseract=True, backend=self.config.ocr_backend
-                )
-            else:
-                box_lines = self.engine.recognize_with_boxes(
-                    img_obj, backend=self.config.ocr_backend
-                )
-                
-            backend = getattr(self.engine, "last_backend", None) or "paddle"
+            ocr_result = self.engine.recognize_pipeline(
+                img_obj,
+                prefer_tesseract=self.config.ocr_backend == "tesseract",
+                backend=self.config.ocr_backend,
+            )
+            box_lines = ocr_result.boxes
+            lines = ocr_result.lines
+            backend = ocr_result.backend or "paddle"
             backend_label = {
                 "windows": "WindowsOCR",
                 "glm_ollama": "GLM-OCR (Ollama)",
@@ -1692,11 +1746,11 @@ class OverlayWindow(QMainWindow):
 
         # 3. 文本分组和质量检查
         t_group_start = time.time()
-        lines = group_ocr_lines(box_lines, lang=self.engine.lang)
         if self.config.ocr_backend == "auto" and self._needs_tesseract(lines):
             self.signals.log.emit("[OCR] 质量较差，切换 Tesseract")
-            box_lines = self.engine.recognize_with_boxes(img_obj, prefer_tesseract=True)
-            lines = group_ocr_lines(box_lines, lang=self.engine.lang)
+            ocr_result = self.engine.recognize_pipeline(img_obj, prefer_tesseract=True)
+            box_lines = ocr_result.boxes
+            lines = ocr_result.lines
         t_group_end = time.time()
         self.signals.log.emit(f"[PERF] 文本分组耗时: {(t_group_end - t_group_start):.3f}s")
 
@@ -1771,6 +1825,18 @@ class OverlayWindow(QMainWindow):
                 capture_fullscreen(self.config.image_path)
                 return
             if self.config.capture_mode == "select":
+                snapshot = None
+                try:
+                    snapshot = self._capture_desktop_snapshot()
+                except Exception:
+                    snapshot = None
+                if snapshot is not None:
+                    region = self._select_region(snapshot)
+                    if region is None:
+                        raise RuntimeError("未选择区域")
+                    img = self._crop_snapshot(snapshot, region)
+                    img.save(self.config.image_path)
+                    return
                 region = self._select_region()
                 if region is None:
                     raise RuntimeError("未选择区域")
@@ -1843,7 +1909,7 @@ class OverlayWindow(QMainWindow):
             self.signals.log.emit(f"[PRE] 预处理失败: {e}")
             return image_path
 
-    def _capture_image_to_memory(self, selected_region: CaptureRegion | None) -> Any:
+    def _capture_image_to_memory(self, selected_region: CaptureRegion | None, snapshot: DesktopSnapshot | None = None) -> Any:
         try:
             win_input = str(getattr(self.config, "ocr_windows_input", "auto")).lower()
             use_raw = (
@@ -1867,6 +1933,9 @@ class OverlayWindow(QMainWindow):
                     return img_obj
                 return img_obj
             if selected_region is not None:
+                if snapshot is not None:
+                    img = self._crop_snapshot(snapshot, selected_region)
+                    return _to_raw(img) if use_raw else img
                 if backend == "winrt":
                     img = capture_region_to_image_native(selected_region)
                     return _to_raw(img) if use_raw else img
@@ -1915,6 +1984,17 @@ class OverlayWindow(QMainWindow):
                 return capture_fullscreen_to_raw() if use_raw else capture_fullscreen_to_image()
                 
             if self.config.capture_mode == "select":
+                if snapshot is None:
+                    try:
+                        snapshot = self._capture_desktop_snapshot()
+                    except Exception:
+                        snapshot = None
+                if snapshot is not None:
+                    region = self._select_region(snapshot)
+                    if region is None:
+                        raise RuntimeError("未选择区域")
+                    img = self._crop_snapshot(snapshot, region)
+                    return _to_raw(img) if use_raw else img
                 region = self._select_region()
                 if region is None:
                     raise RuntimeError("未选择区域")
@@ -1937,138 +2017,6 @@ class OverlayWindow(QMainWindow):
        pass
 
 
-    def _build_candidates(self, lines: list[tuple[str, float]]) -> list[tuple[str, float]]:
-        texts = [text.strip() for text, _ in lines if text and text.strip()]
-        if not texts:
-            return []
-        # 丢弃明显低质量行，减少断章取义
-        filtered = [(text, conf) for text, conf in lines if conf >= 0.45 or len(text) >= 20]
-        if not filtered:
-            filtered = lines
-        joined = " ".join(text for text, _ in filtered)
-        joined_words = [w for w in joined.split() if w]
-        joined_len = len(normalize_en(joined))
-        high_conf_tokens: list[str] = []
-        for text, conf in filtered:
-            if conf < 0.6 or not text:
-                continue
-            cleaned = text.strip()
-            if not cleaned:
-                continue
-            if len(cleaned) == 1 and cleaned.lower() not in {"a", "i"}:
-                continue
-            high_conf_tokens.append(cleaned)
-        joined_high = " ".join(high_conf_tokens) if high_conf_tokens else joined
-        best = max(lines, key=lambda item: item[1])
-        longest = max(texts, key=len)
-        avg_conf = sum(conf for _, conf in lines) / max(len(lines), 1)
-        candidates: list[tuple[str, float]] = [
-            (joined_high, avg_conf),
-            (joined, avg_conf),
-        ]
-        # 从整段文本生成滑动窗口候选，增强长句匹配
-        candidates.extend(self._window_candidates(joined, avg_conf))
-        # 仅在置信度足够且非长文本场景时才引入单行候选，避免噪声行支配结果
-        if best[1] >= 0.6 and (len(joined_words) < 6 and joined_len < 40):
-            candidates.append(best)
-        if best[1] >= 0.6 and len(longest) >= 8 and (len(joined_words) < 6 and joined_len < 40):
-            candidates.append((longest, best[1]))
-
-        # 单行短文本：拆词与重排，提升“角色名/属性名”命中
-        if len(lines) == 1:
-            raw = lines[0][0]
-            cleaned = self._clean_ocr_line(raw)
-            if cleaned:
-                tokens = cleaned.split()
-                if tokens:
-                    # 长文本不拆分单词，避免单词误命中
-                    if len(tokens) > 3 or len(cleaned) >= 24:
-                        tokens = []
-                    # 单词候选
-                    for token in tokens:
-                        if len(token) >= 3:
-                            candidates.append((token, lines[0][1]))
-                    # 两词组合
-                    if len(tokens) >= 2:
-                        pair = f"{tokens[0]} {tokens[1]}"
-                        candidates.append((pair, lines[0][1]))
-                        candidates.append((f"{tokens[1]} {tokens[0]}", lines[0][1]))
-                    # 全部清洗后的文本
-                    candidates.append((cleaned, lines[0][1]))
-        # 去重
-        seen = set()
-        unique: list[tuple[str, float]] = []
-        for text, conf in candidates:
-            if text in seen:
-                continue
-            seen.add(text)
-            unique.append((text, conf))
-        return unique
-
-    def _clean_ocr_line(self, text: str) -> str:
-        # 去掉图标/分隔符噪声，保留字母数字与空格
-        cleaned = "".join(ch if ch.isalnum() or ch.isspace() else " " for ch in text)
-        cleaned = " ".join(cleaned.split())
-        return cleaned.strip()
-
-    def _is_list_mode(self, lines: list[tuple[str, float]]) -> bool:
-        if len(lines) < 4:
-            return False
-        cleaned = [self._clean_ocr_line(text) for text, _ in lines if text]
-        cleaned = [c for c in cleaned if c]
-        # 忽略明显非列表项的长行/数字行
-        filtered = []
-        for c in cleaned:
-            if not c:
-                continue
-            if len(c.split()) > 3 or len(c) > 20:
-                continue
-            digit_ratio = sum(ch.isdigit() for ch in c) / max(len(c), 1)
-            if digit_ratio > 0.4:
-                continue
-            filtered.append(c)
-        if len(filtered) < 3:
-            return False
-        lengths = [len(c) for c in filtered]
-        max_len = max(lengths)
-        avg_words = sum(len(c.split()) for c in filtered) / max(len(filtered), 1)
-        return max_len <= 16 and avg_words <= 2.2
-
-    def _has_voice_match(self, result: dict) -> bool:
-        """检查匹配结果是否有对应的语音文件。"""
-        if not isinstance(result, dict):
-            return False
-        matches = result.get('matches', [])
-        if not matches:
-            return False
-        text_key = matches[0].get('text_key', '')
-        if not text_key:
-            return False
-        # 检查语音映射或缓存
-        event_name = f"vo_{text_key}"
-        if self.voice_map and event_name in self.voice_map:
-            return True
-        if self.voice_event_index:
-            events = self.voice_event_index.find_candidates(text_key=text_key, voice_event=event_name, limit=1)
-            if events:
-                return True
-        return False
-    
-    def _result_has_voice(self, result: dict) -> bool:
-        """_has_voice_match 的别名，保持兼容性"""
-        return self._has_voice_match(result)
-
-    def _stat_alias_map(self) -> dict[str, str]:
-        return {
-            "hp": "mainhp",
-            "atk": "mainatk",
-            "def": "maindef",
-            "energyregen": "mainenergyregen",
-            "critrate": "maincritrate",
-            "critdmg": "maincritdmg",
-            "critdamage": "maincritdmg",
-            "critdmgbonus": "maincritdmg",
-        }
 
     def _needs_tesseract(self, lines: list[tuple[str, float]]) -> bool:
         if len(lines) < 3:
@@ -2089,554 +2037,6 @@ class OverlayWindow(QMainWindow):
         alpha = sum(ch.isalpha() or ch.isspace() for ch in joined)
         ratio = alpha / max(len(joined), 1)
         return ratio < 0.65
-
-    def _lookup_best(self, lines: list[tuple[str, float]]) -> Dict[str, Any] | None:
-        """智能匹配算法：支持混合单行标题和多行长文本的场景。
-        
-        策略：
-        1. 检测每行是否为短标题（单行单条目）
-        2. 检测是否为长文本（多行描述）
-        3. 如果混合：分段匹配，第一行返回标题，后续行返回长文本
-        4. 优先返回有语音的条目
-        """
-        best_result: Dict[str, Any] | None = None
-        best_score = -1.0
-        best_text = ""
-        best_conf = 0.0
-
-        context_text = " ".join(self._clean_ocr_line(text) for text, _ in lines if text)
-        context_words = [w for w in context_text.split() if w]
-        context_len = len(normalize_en(context_text))
-
-        # 先评估每一行的匹配置信度和特征
-        alias_map = self._stat_alias_map()
-        line_info: list[dict] = []
-        for idx, (text, conf) in enumerate(lines):
-            cleaned = self._clean_ocr_line(text)
-            if not cleaned:
-                continue
-            key = normalize_en(cleaned)
-            if not key:
-                continue
-            key = alias_map.get(key, key)
-            result, score = self._search_db(key)
-            
-            # 判断行特征
-            word_count = len(cleaned.split())
-            is_short = word_count <= 3 and len(cleaned) <= 20
-            is_title_like = is_short and not any(ch in cleaned for ch in [',', '.', '!', '?'])
-            
-            line_info.append({
-                'idx': idx,
-                'text': text,
-                'cleaned': cleaned,
-                'key': key,
-                'conf': conf,
-                'score': score,
-                'result': result,
-                'word_count': word_count,
-                'is_short': is_short,
-                'is_title_like': is_title_like,
-            })
-        
-        if not line_info:
-            return None
-        
-        # 检测多独立条目：如果有多行且每行都有较好的独立匹配，返回多条目
-        multi_items = []
-        
-        for idx, line in enumerate(line_info):
-            cleaned = line['cleaned']
-            
-            # 检测是否为时间格式（如 "8d 8h", "3h 45m", "2d" 等）
-            import re
-            time_pattern = r'^\d+[dhms](\s+\d+[dhms])*$'
-            is_time_format = bool(re.match(time_pattern, cleaned.lower().strip()))
-            
-            if is_time_format:
-                # 时间数字附加到上一个条目
-                if multi_items:
-                    multi_items[-1]['time_suffix'] = cleaned
-                    self.signals.log.emit(f"[FILTER] 时间格式附加到上一条目: {cleaned}")
-                else:
-                    self.signals.log.emit(f"[FILTER] 时间格式但无前置条目，跳过: {cleaned}")
-                continue
-            
-            # 跳过纯数字行
-            digit_ratio = sum(ch.isdigit() for ch in cleaned) / max(len(cleaned), 1)
-            if digit_ratio > 0.8:  # 纯数字
-                self.signals.log.emit(f"[FILTER] 跳过纯数字行: {cleaned} (digit_ratio={digit_ratio:.2f})")
-                continue
-            
-            # 检查是否有高质量的独立匹配
-            matched_key = line['result'].get('_matched_key', '') if isinstance(line['result'], dict) else ''
-            key_len = len(line['key'])
-            matched_len = len(matched_key)
-            
-            # 检测特殊字符污染（如 Bésides, we' e 包含特殊字符）
-            import re
-            special_char_count = len(re.findall(r'[^\w\s\-]', cleaned))  # 非字母数字空格连字符
-            special_char_ratio = special_char_count / max(len(cleaned), 1)
-            has_special_pollution = special_char_ratio > 0.15  # 超过15%特殊字符视为污染
-            
-            # 高质量匹配标准：
-            # 1. 分数足够高 (>0.75) 且无特殊字符污染 或
-            # 2. 匹配长度相近（50%-200%范围）且分数中等 (>0.55)
-            # 3. 长文本（>50字符）且分数>0.60（提高长文本阈值避免误匹配）
-            # 4. 短文本（<15字符）需要更高分数 (>0.85) 避免误匹配
-            is_high_score = line['score'] >= 0.75 and not has_special_pollution
-            is_length_match = matched_len >= key_len * 0.5 and matched_len <= key_len * 2.0
-            is_long_text = key_len > 50 and line['score'] >= 0.60  # 长文本也需要较高分数
-            is_short_text_strict = key_len < 15 and line['score'] >= 0.85  # 短文本严格要求
-            is_good_match = is_high_score or (is_length_match and line['score'] >= 0.55) or is_long_text or is_short_text_strict
-            
-            if has_special_pollution and line['score'] < 0.85:
-                self.signals.log.emit(f"[FILTER] 跳过特殊字符污染: {cleaned} (special_ratio={special_char_ratio:.2f}, score={line['score']:.3f})")
-                continue
-            
-            if is_good_match:
-                multi_items.append(line)
-                self.signals.log.emit(f"[FILTER] 保留条目: {cleaned} (score={line['score']:.3f}, len={key_len})")
-            else:
-                self.signals.log.emit(f"[FILTER] 跳过低质量匹配: {cleaned} (score={line['score']:.3f}, matched_len={matched_len}, key_len={key_len})")
-        
-        # 如果有3+个独立的高质量匹配，返回多条目模式
-        if len(multi_items) >= 3:
-            self.signals.log.emit(f"[MATCH] 检测到 {len(multi_items)} 个独立条目")
-            items = []
-            for line in multi_items:
-                matches = line['result'].get("matches") if isinstance(line['result'], dict) else None
-                match = matches[0] if matches else {}
-                
-                # 获取官方原文和译文，如果有时间后缀则直接附加
-                official_en = match.get("official_en") or ""
-                official_cn = match.get("official_cn") or ""
-                time_suffix = line.get('time_suffix')
-                if time_suffix:
-                    # 如果原文末尾是冒号，直接附加时间；否则用空格隔开
-                    if official_en:
-                        if official_en.rstrip().endswith(':'):
-                            official_en = f"{official_en} {time_suffix}"
-                        else:
-                            official_en = f"{official_en}: {time_suffix}"
-                    if official_cn:
-                        if official_cn.rstrip().endswith('：'):
-                            official_cn = f"{official_cn}{time_suffix}"
-                        else:
-                            official_cn = f"{official_cn}：{time_suffix}"
-                
-                items.append({
-                    "ocr": line['cleaned'],
-                    "query_key": line['key'],
-                    "score": round(line['score'], 3),
-                    "text_key": match.get("text_key"),
-                    "official_en": official_en,
-                    "official_cn": official_cn,
-                })
-            return {
-                "_multi": True,
-                "items": items,
-                # 使用官方原文而非OCR文本或query_key
-                "_official_en": " / ".join([i.get("official_en") or i.get("ocr") or "" for i in items if i.get("official_en") or i.get("ocr")]),
-                "_official_cn": " / ".join([i.get("official_cn") or "" for i in items if i.get("official_cn")]),
-                "_query_key": " / ".join([i["query_key"] for i in items if i.get("query_key")]),
-                "_ocr_text": " / ".join([i["ocr"] for i in items if i.get("ocr")]),
-            }
-        
-        # 智能分段：检测混合内容（第一行是标题，后续行是长文本）
-        # 只在没有多个独立匹配时使用，避免误判
-        if len(line_info) >= 2 and len(multi_items) < 3:
-            first_line = line_info[0]
-            rest_lines = line_info[1:]
-            
-            # 如果第一行是短标题且后续行构成长文本
-            if first_line['is_title_like']:
-                rest_text = " ".join(l['cleaned'] for l in rest_lines)
-                rest_key = normalize_en(rest_text)
-                rest_result, rest_score = self._search_db(rest_key)
-                
-                # 如果后续行形成了高分匹配的长文本
-                if rest_score >= 0.5 and len(rest_text.split()) >= 5:
-                    # 检查是否有语音
-                    rest_has_voice = self._has_voice_match(rest_result)
-                    first_has_voice = self._has_voice_match(first_line['result'])
-                    
-                    # 验证匹配质量：长文本应该有足够长度的matched_key
-                    matched_key = rest_result.get('_matched_key', '')
-                    is_good_match = len(matched_key) >= len(rest_key) * 0.6  # 匹配项应至少是查询的60%长度
-                    
-                    # 优先返回有语音的内容或高质量长文本匹配
-                    should_use_rest = (
-                        is_good_match and (
-                            len(rest_key) > 100 
-                            or rest_has_voice 
-                            or (not first_has_voice and rest_score > first_line['score'])
-                        )
-                    )
-                    
-                    if should_use_rest:
-                        self.signals.log.emit(
-                            f"[MATCH] 混合内容：第一行=标题({first_line['cleaned']}), "
-                            f"后续行=长文本(score={rest_score:.3f}, matched_len={len(matched_key)}, 有语音={rest_has_voice})"
-                        )
-                        rest_result['_score'] = round(rest_score, 3)
-                        rest_result['_query_key'] = rest_key
-                        rest_result['_ocr_text'] = rest_text
-                        rest_result['_ocr_conf'] = sum(l['conf'] for l in rest_lines) / len(rest_lines)
-                        rest_result['_first_line'] = first_line['cleaned']  # 保留标题信息
-                        return rest_result
-        
-        # 原有逻辑：处理列表模式和其他场景
-        line_scores: list[tuple[str, float, dict]] = [
-            (l['cleaned'], l['score'], l['result']) for l in line_info
-        ]
-
-        # 列表模式：多数行高分时返回多条，避免只命中一行
-        if self._is_list_mode(lines) and line_scores:
-            short_line_scores = []
-            for cleaned, score, result in line_scores:
-                if len(cleaned.split()) > 3 or len(cleaned) > 20:
-                    continue
-                digit_ratio = sum(ch.isdigit() for ch in cleaned) / max(len(cleaned), 1)
-                if digit_ratio > 0.4:
-                    continue
-                short_line_scores.append((cleaned, score, result))
-            strong_lines = [(c, s, r) for c, s, r in short_line_scores if s >= 0.9]
-            if len(strong_lines) >= 3:
-                items = []
-                for cleaned, score, result in strong_lines:
-                    matches = result.get("matches") if isinstance(result, dict) else None
-                    match = matches[0] if matches else {}
-                    items.append(
-                        {
-                            "ocr": cleaned,
-                            "query_key": normalize_en(cleaned),
-                            "score": round(score, 3),
-                            "text_key": match.get("text_key"),
-                            "official_cn": match.get("official_cn"),
-                        }
-                    )
-                return {
-                    "_multi": True,
-                    "items": items,
-                    "_query_key": " / ".join([i["query_key"] for i in items if i.get("query_key")]),
-                    "_ocr_text": " / ".join([i["ocr"] for i in items if i.get("ocr")]),
-                }
-
-        if self._is_list_mode(lines) and line_scores and all(s >= 0.95 for _, s, _ in line_scores):
-            items = []
-            for cleaned, score, result in line_scores:
-                matches = result.get("matches") if isinstance(result, dict) else None
-                match = matches[0] if matches else {}
-                items.append(
-                    {
-                        "ocr": cleaned,
-                        "query_key": normalize_en(cleaned),
-                        "score": round(score, 3),
-                        "text_key": match.get("text_key"),
-                        "official_cn": match.get("official_cn"),
-                    }
-                )
-            return {
-                "_multi": True,
-                "items": items,
-                "_query_key": " / ".join([i["query_key"] for i in items if i.get("query_key")]),
-                "_ocr_text": " / ".join([i["ocr"] for i in items if i.get("ocr")]),
-            }
-
-        # 否则优先进行“行拼接”候选（处理标题+描述等混合情况）
-        stitched_lines: list[tuple[str, float]] = []
-        idx = 0
-        while idx < len(lines):
-            text, conf = lines[idx]
-            cleaned = self._clean_ocr_line(text)
-            if not cleaned:
-                idx += 1
-                continue
-            key = normalize_en(cleaned)
-            score = 0.0
-            if key:
-                _, score = self._search_db(alias_map.get(key, key))
-            if score >= 0.95:
-                stitched_lines.append((cleaned, conf))
-                idx += 1
-                continue
-            # 低置信度行，优先与下一行拼接
-            if idx + 1 < len(lines):
-                next_clean = self._clean_ocr_line(lines[idx + 1][0])
-                if next_clean:
-                    stitched_lines.append((f"{cleaned} {next_clean}", (conf + lines[idx + 1][1]) / 2.0))
-                    idx += 2
-                    continue
-            stitched_lines.append((cleaned, conf))
-            idx += 1
-
-        smart_result = build_smart_candidates(lines)
-        candidates = smart_result.get('candidates', [])
-        strategy = smart_result.get('strategy', 'unknown')
-        self.signals.log.emit(f"[SEARCH] 智能匹配策略={strategy}, 评估 {len(candidates)} 个候选...")
-
-        import time
-        start_time = time.time()
-
-        for text, conf in candidates:
-            # 如果已经找到高度匹配的结果，且文本长度适中，提前结束
-            if best_score > 0.96 and len(best_text.split()) > 5:
-                break
-
-            key = normalize_en(text)
-            if not key:
-                continue
-
-            # 长文本场景：过滤过短候选，避免命中单词/短语
-            # 严格的长度匹配约束：如果OCR文本很长，不应该匹配到很短的数据库条目
-            if (context_words and len(context_words) >= 6) or (context_len >= 40):
-                # 过滤掉词数太少的候选
-                if len(text.split()) <= 3:
-                    continue
-                # 过滤掉字符长度太短的候选
-                if len(key) < 20:
-                    continue
-            
-            result, score = self._search_db(key)
-            matched_key = result.get("_matched_key") if isinstance(result, dict) else None
-            
-            # 基础分逻辑：综合考虑相似度、长度和词数
-            word_count = max(len(text.split()), 1)
-            length_bonus = min(len(key) / 100.0, 1.0)
-            word_bonus = min(word_count / 8.0, 1.0)
-            weighted_score = score * (0.6 + 0.2 * length_bonus + 0.2 * word_bonus)
-
-            # 避免长文本误命中短条目 - 改进版
-            # 使用绝对长度差和比例相结合的方式判断
-            if matched_key:
-                key_len = len(key)
-                matched_len = len(matched_key)
-                length_diff = abs(key_len - matched_len)
-                length_ratio = matched_len / max(key_len, 1)  # 匹配条目长度 / 查询长度
-                
-                # 场景1: 长查询(>25字符) 匹配到 短条目(<20字符) → 严重不匹配
-                if key_len > 25 and matched_len < 20:
-                    weighted_score *= 0.2  # 严厉惩罚
-                    self.signals.log.emit(f"[MATCH] 长查询匹配短条目惩罚: query_len={key_len}, matched_len={matched_len}, ratio={length_ratio:.2f}")
-                
-                # 场景2: 长度差异过大（>15字符 且 比例<0.6）
-                elif length_diff > 15 and length_ratio < 0.6:
-                    weighted_score *= 0.4
-                    self.signals.log.emit(f"[MATCH] 长度差异惩罚: diff={length_diff}, ratio={length_ratio:.2f}")
-                
-                # 场景3: 查询长度是匹配的2倍以上
-                elif key_len > matched_len * 2:
-                    weighted_score *= 0.5
-                    self.signals.log.emit(f"[MATCH] 长度比例惩罚: query_len={key_len}, matched_len={matched_len}")
-                
-                # 场景4: 轻度长度不匹配
-                elif key_len > matched_len * 1.5 and score < 0.97:
-                    weighted_score *= 0.75
-            
-            # 新增：优先匹配有语音的条目（对话优先于任务名/角色名）
-            matches = result.get("matches") if isinstance(result, dict) else []
-            has_audio = False
-            if matches:
-                first_match = matches[0]
-                audio_hash = first_match.get("audio_hash")
-                audio_event = first_match.get("audio_event")
-                has_audio = bool(audio_hash or audio_event)
-            
-            # 如果有语音，给予加分（在相似度接近时优先选择有语音的条目）
-            if has_audio:
-                weighted_score *= 1.15  # 给有语音的条目加15%的权重
-                self.signals.log.emit(f"[MATCH] 语音条目加成: has_audio=True, weighted={weighted_score:.3f}")
-            
-            if weighted_score > best_score:
-                best_score = weighted_score
-                best_result = result
-                best_text = text
-                best_conf = conf
-                best_result["_score"] = round(score, 3)
-                best_result["_query_key"] = key
-                best_result["_ocr_text"] = best_text
-                best_result["_ocr_conf"] = round(best_conf, 3)
-                best_result["_weighted"] = round(weighted_score, 3)
-        
-        elapsed = time.time() - start_time
-        if best_result:
-            self.signals.log.emit(f"[SEARCH] 耗时: {elapsed:.2f}s, 最佳匹配: {best_result.get('_query_key')} (score={best_result.get('_score')})")
-        else:
-            self.signals.log.emit(f"[SEARCH] 耗时: {elapsed:.2f}s, 未找到合适匹配")
-
-        return best_result
-
-    def _window_candidates(self, text: str, conf: float) -> list[tuple[str, float]]:
-        words = [w for w in text.split() if w]
-        if len(words) < 10:
-            return []
-        windows: list[tuple[str, float]] = []
-        min_len = 8
-        max_len = 24
-        step = 4
-        for start in range(0, max(len(words) - min_len + 1, 1), step):
-            for length in (min_len, 12, 16, 20, max_len):
-                if start + length > len(words):
-                    continue
-                segment = " ".join(words[start : start + length])
-                windows.append((segment, conf))
-            if len(windows) >= 60:
-                break
-        return windows
-
-    def _search_db(self, key: str) -> tuple[Dict[str, Any], float]:
-        # 1. 直接匹配
-        if key in self.db:
-            result = dict(self.db[key])
-            result["_matched_key"] = key
-            return result, 1.0
-
-        # 1.5 子串匹配优化：处理标题+描述混合，或截屏不全导致的匹配失败
-        if len(key) >= 10:
-            # 1.5.1 前缀匹配 (OCR 是库文本的前半部分)
-            prefix_hits = [k for k in self.db.keys() if k.startswith(key)]
-            if prefix_hits:
-                best_prefix = min(prefix_hits, key=len)
-                result = dict(self.db.get(best_prefix, {}))
-                result["_matched_key"] = best_prefix
-                return result, 0.99
-            
-            # 1.5.2 包含匹配 (OCR 包含了整个库项)
-            # 例如 OCR: "The quick brown fox jumps..." 包含了库项 "brown fox"
-            # 但要避免长查询匹配到短语：query_len=408, matched="ensemblesylph"(13) ❌
-            contain_in_ocr = [k for k in self.db.keys() if len(k) >= 10 and k in key]
-            if contain_in_ocr:
-                best_k = max(contain_in_ocr, key=len) # 取包含的最具体(最长)项
-                # 关键修复：长查询(>100)不允许匹配到短语(<50)
-                # 新增：匹配项长度应至少是查询的40%，避免部分词组误匹配
-                length_ratio = len(best_k) / len(key)
-                if not (len(key) > 100 and len(best_k) < 50) and length_ratio >= 0.4:
-                    result = dict(self.db.get(best_k, {}))
-                    result["_matched_key"] = best_k
-                    self.signals.log.emit(
-                        f"[MATCH] 包含匹配：query_len={len(key)}, matched_len={len(best_k)}, ratio={length_ratio:.2f}"
-                    )
-                    return result, 0.95  # 降低评分以反映不完整匹配
-                else:
-                    self.signals.log.emit(
-                        f"[MATCH] 跳过短语匹配：query_len={len(key)}, matched_len={len(best_k)}, ratio={length_ratio:.2f}"
-                    )
-
-            # 1.5.3 被包含匹配 (库文本包含了 OCR 内容 - **部分截屏核心场景**)
-            # 用户场景：截取了极长文本的一部分 → 应匹配包含该部分的完整库文本
-            # 限制条件：只对足够长的查询启用（避免短文本误匹配）
-            # 例如："Signs of a Silent Star" (20字符) 不应该匹配到包含它的长描述文本
-            if len(key) >= 50:  # 只对50+字符的查询启用被包含匹配
-                contain_hits = [k for k in self.db.keys() if key in k]
-                if contain_hits:
-                    # 优先选择最短的包含项（最精确的匹配）
-                    best_contain = min(contain_hits, key=len)
-                    # 额外检查：匹配项不应该太长（避免误匹配到无关长文本）
-                    if len(best_contain) <= len(key) * 3:
-                        result = dict(self.db.get(best_contain, {}))
-                        result["_matched_key"] = best_contain
-                        self.signals.log.emit(
-                            f"[MATCH] 部分截屏匹配成功：query_len={len(key)}, matched_len={len(best_contain)}"
-                        )
-                        return result, 0.98
-            
-            # 1.5.4 长查询松散匹配（处理文本版本差异）
-            # 场景：OCR识别"标题+描述"拆分后，或数据库/游戏文本版本不一致
-            # 例如 query="press basicattack...", db_key="basicattack..."（略有差异）
-            if len(key) >= 100:  # 只对长查询执行此检查
-                try:
-                    from rapidfuzz import fuzz
-                    # 查找长度相近且内容相关的候选
-                    min_len = int(len(key) * 0.7)
-                    max_len = int(len(key) * 5.0)  # 放宽上限，允许更长的完整描述
-                    # 使用query中间50字符作为锚点（避免开头可能缺失的问题）
-                    anchor_fragment = key[50:100] if len(key) >= 100 else key[:50]
-                    loose_candidates = [k for k in self.db.keys() if min_len <= len(k) <= max_len and anchor_fragment in k]
-                    
-                    self.signals.log.emit(f"[MATCH] 松散匹配：query_len={len(key)}, 候选数量={len(loose_candidates)}")
-                    
-                    if loose_candidates:
-                        # 使用token_set_ratio找最相似的
-                        best_loose = max(loose_candidates, key=lambda k: fuzz.token_set_ratio(key, k))
-                        similarity = fuzz.token_set_ratio(key, best_loose) / 100.0
-                        
-                        self.signals.log.emit(f"[MATCH] 最佳候选：key_len={len(best_loose)}, similarity={similarity:.3f}")
-                        
-                        if similarity >= 0.45:  # 降低到45%以处理文本版本差异
-                            result = dict(self.db.get(best_loose, {}))
-                            result["_matched_key"] = best_loose
-                            self.signals.log.emit(
-                                f"[MATCH] 松散匹配成功：query_len={len(key)}, matched_len={len(best_loose)}, similarity={similarity:.3f}"
-                            )
-                            return result, similarity
-                except Exception as e:
-                    self.signals.log.emit(f"[MATCH] 松散匹配失败: {e}")
-        
-        try:
-            from rapidfuzz import fuzz, process
-        except Exception:
-            best, score = self.searcher.search(key, self.db.keys())
-            result = dict(self.db.get(best, {}))
-            result["_matched_key"] = best
-            return result, score
-
-        key_len = len(key)
-        
-        # 2. 短查询优先精确匹配策略
-        # 对于短文本（<20字符），优先在长度接近的条目中查找，避免误匹配到长条目
-        if key_len < 20:
-            # 严格的长度过滤：±40%
-            min_len = int(key_len * 0.6)
-            max_len = int(key_len * 1.4)
-            strict_candidates = [k for k in self.db.keys() if min_len <= len(k) <= max_len]
-            
-            if strict_candidates:
-                hit = process.extractOne(key, strict_candidates, scorer=fuzz.ratio)
-                if hit:
-                    best_item, fuzzy_score, _ = hit
-                    score = fuzzy_score / 100.0
-                    # 如果在严格范围内找到高分匹配，直接返回
-                    if score >= 0.85:
-                        result = dict(self.db.get(str(best_item), {}))
-                        result["_matched_key"] = str(best_item)
-                        self.signals.log.emit(
-                            f"[MATCH] 短查询精确匹配：query_len={key_len}, matched_len={len(best_item)}, score={score:.3f}"
-                        )
-                        return result, float(score)
-        
-        # 3. 常规长度过滤候选集
-        min_len = int(key_len * 0.5)
-        max_len = int(key_len * 1.5)
-        candidates = [k for k in self.db.keys() if min_len <= len(k) <= max_len]
-        if not candidates:
-            candidates = list(self.db.keys())
-
-        def _extract(cands: list[str]) -> tuple[str, float]:
-            if key_len < 20:
-                hit = process.extractOne(key, cands, scorer=fuzz.ratio)
-            else:
-                hit = process.extractOne(key, cands, scorer=fuzz.token_set_ratio)
-            if hit is None:
-                return "", 0.0
-            best_item, score, _ = hit
-            return str(best_item), float(score) / 100.0
-
-        best_item, score = _extract(candidates)
-
-        # 3. 若得分偏低，放宽长度限制再次搜索（适配“标题+长描述”场景）
-        if score < 0.85:
-            wide_max = int(key_len * 3.0)
-            wide_candidates = [k for k in self.db.keys() if len(k) >= min_len and len(k) <= wide_max]
-            if not wide_candidates:
-                wide_candidates = list(self.db.keys())
-            wide_item, wide_score = _extract(wide_candidates)
-            if wide_score > score:
-                best_item, score = wide_item, wide_score
-
-        result = dict(self.db.get(str(best_item), {}))
-        result["_matched_key"] = str(best_item)
-        return result, float(score)
 
     def _is_voice_eligible(self, text_key: str | None) -> bool:
         if not text_key:
@@ -2662,6 +2062,8 @@ class OverlayWindow(QMainWindow):
         
         try:
             t1 = time.time()
+            # 进入新结果渲染前停止旧播放，保证后续播放状态与当前结果一致
+            self.stop_audio(emit_status=False)
             self.last_match = result
             self.last_hash = None
             self.last_event_name = None
@@ -2670,20 +2072,43 @@ class OverlayWindow(QMainWindow):
             if result.get("_multi"):
                 t2 = time.time()
                 items = result.get("items", [])
+                ocr_context = (result.get("_ocr_context") or result.get("_ocr_text")) if isinstance(result, dict) else None
                 left = []
                 right = []
+                left_raw = []
+                right_raw = []
                 for item in items:
                     # 使用数据库官方原文，如果不存在则fallback到OCR
-                    en = item.get("official_en") or item.get("ocr") or ""
-                    cn = item.get("official_cn") or item.get("text_key") or ""
-                    if en:
-                        left.append(en)
-                    if cn:
-                        right.append(cn)
+                    text_key = item.get("text_key")
+                    en_raw = item.get("official_en") or item.get("ocr") or ""
+                    cn_raw = item.get("official_cn") or item.get("text_key") or ""
+
+                    if en_raw:
+                        left_raw.append(en_raw)
+                        left.append(
+                            self._resolve_display_placeholders(
+                                en_raw,
+                                lang="en",
+                                ocr_context=ocr_context,
+                                text_key=text_key,
+                            )
+                        )
+                    if cn_raw:
+                        right_raw.append(cn_raw)
+                        right.append(
+                            self._resolve_display_placeholders(
+                                cn_raw,
+                                lang="cn",
+                                ocr_context=ocr_context,
+                                text_key=text_key,
+                            )
+                        )
                     self.signals.log.emit(
                         f"[ITEM] {item.get('ocr')} -> {item.get('text_key')} (score={item.get('score')})"
                     )
                 # 使用换行分隔多个条目，检测是否包含HTML标签
+                en_joined_raw = "\n".join(left_raw)
+                cn_joined_raw = "\n".join(right_raw) if right_raw else "（未找到中文匹配）"
                 en_joined = "\n".join(left)
                 cn_joined = "\n".join(right) if right else "（未找到中文匹配）"
                 self.signals.log.emit(f"[PERF] 多条目处理: {(time.time()-t2)*1000:.1f}ms")
@@ -2718,11 +2143,44 @@ class OverlayWindow(QMainWindow):
                 official_cn = result.get('_official_cn') or ''
                 self.signals.log.emit(f"[MATCH] 官方原文: {official_en}")
                 self.signals.log.emit(f"[MATCH] 官方译文: {official_cn}")
+                # [EN]/[CN] 记录匹配原文（保留标记与占位符，不做展示替换）
+                self.signals.log.emit(f"[EN] {en_joined_raw}")
+                self.signals.log.emit(f"[CN] {cn_joined_raw}")
                 self.signals.log.emit(f"[QUERY] OCR识别: {result.get('_ocr_text')} -> {result.get('_query_key')}")
-                self.signals.log.emit("[WINDOW] 禁用音频控件（多条目模式）")
-                # 多条目模式不支持音频播放
-                self.play_pause_btn.setEnabled(False)
-                self.audio_slider.setEnabled(False)
+                # 检查是否有高置信度音频
+                has_audio = result.get('_has_audio', False)
+                if has_audio:
+                    # 查找第一个有音频的条目
+                    audio_item = None
+                    for item in items:
+                        if item.get('score', 0) >= 0.85 and item.get('text_key'):
+                            # 尝试查找音频
+                            text_key = item['text_key']
+                            event_name = f"vo_{text_key}"
+                            if self.voice_map and event_name in self.voice_map:
+                                audio_item = item
+                                break
+                            elif self.voice_event_index:
+                                events = self.voice_event_index.find_candidates(text_key=text_key, voice_event=event_name, limit=1)
+                                if events:
+                                    audio_item = item
+                                    break
+                    
+                    if audio_item:
+                        self.signals.log.emit(f"[WINDOW] 多条目模式：检测到高置信度音频，启用音频控件")
+                        self.play_pause_btn.setEnabled(True)
+                        self.audio_slider.setEnabled(True)
+                        # 尝试播放音频
+                        self._play_audio_for_key(audio_item['text_key'])
+                    else:
+                        self.signals.log.emit("[WINDOW] 禁用音频控件（多条目模式，无可用音频）")
+                        self.play_pause_btn.setEnabled(False)
+                        self.audio_slider.setEnabled(False)
+                else:
+                    self.signals.log.emit("[WINDOW] 禁用音频控件（多条目模式）")
+                    # 多条目模式默认不支持音频播放
+                    self.play_pause_btn.setEnabled(False)
+                    self.audio_slider.setEnabled(False)
                 self.signals.log.emit("[WINDOW] 准备显示多条目结果")
                 
                 t5 = time.time()
@@ -2748,23 +2206,38 @@ class OverlayWindow(QMainWindow):
         t6 = time.time()
         en_text = ""
         cn_text = ""
+        en_log_raw = ""
+        cn_log_raw = ""
         text_key = None
         audio_hash = None
         audio_event = None
         
         # 检查是否有标题信息（混合内容场景）
         first_line = result.get("_first_line")
+        speaker_name = result.get("_speaker_name", "")
         
         if matches:
             # 使用数据库官方英文原文（保留HTML标记）
             en_text = matches[0].get("official_en", "")
             cn_text = matches[0].get("official_cn", "")
+            en_log_raw = en_text or ""
+            cn_log_raw = cn_text or ""
             text_key = matches[0].get("text_key")
             audio_hash = matches[0].get("audio_hash")
             audio_event = matches[0].get("audio_event")
             
+            # 说话者前缀：「Name:」样式，显示于正文上方（CN 侧尝试查库翻译人名）
+            if speaker_name:
+                t_title = time.time()
+                speaker_cn = self._translate_title(speaker_name)
+                self.signals.log.emit(f"[PERF] 说话者名翻译: {(time.time()-t_title)*1000:.1f}ms")
+                display_speaker_en = speaker_name
+                display_speaker_cn = speaker_cn or speaker_name
+                en_text = f"<span style='color: #d4af37; font-weight: bold;'>{display_speaker_en}:</span>\n{en_text}"
+                cn_text = f"<span style='color: #d4af37; font-weight: bold;'>{display_speaker_cn}:</span>\n{cn_text}"
+                self.signals.log.emit(f"[DISPLAY] 说话者前缀: {display_speaker_en} -> {display_speaker_cn}, 内容: {text_key}")
             # 如果有标题，添加到显示开头（不加【】）
-            if first_line:
+            elif first_line:
                 t_title = time.time()
                 title_cn = self._translate_title(first_line)
                 self.signals.log.emit(f"[PERF] 标题翻译: {(time.time()-t_title)*1000:.1f}ms")
@@ -2773,6 +2246,9 @@ class OverlayWindow(QMainWindow):
                 en_text = f"<span style='color: #d4af37; font-weight: bold;'>{first_line}</span>\n{en_text}"
                 cn_text = f"<span style='color: #d4af37; font-weight: bold;'>{display_title}</span>\n{cn_text}"
                 self.signals.log.emit(f"[DISPLAY] 标题: {first_line} -> {display_title}, 内容: {text_key}")
+        ocr_context = (result.get("_ocr_context") or result.get("_ocr_text")) if isinstance(result, dict) else None
+        en_text = self._resolve_display_placeholders(en_text, lang="en", ocr_context=ocr_context, text_key=text_key)
+        cn_text = self._resolve_display_placeholders(cn_text, lang="cn", ocr_context=ocr_context, text_key=text_key)
         self.signals.log.emit(f"[PERF] 提取文本内容: {(time.time()-t6)*1000:.1f}ms")
 
         # 音频识别逻辑：委托给 AudioResolver
@@ -2806,17 +2282,17 @@ class OverlayWindow(QMainWindow):
                 self._last_en_raw = en_text
                 self._last_en_is_html = True
             else:
-                score_info = f"\nscore={score}" if score is not None else ""
-                self.source_label.setPlainText(f"{en_text}{score_info}")
-                self._last_en_raw = f"{en_text}{score_info}"
+                self.source_label.setPlainText(en_text)
+                self._last_en_raw = en_text
                 self._last_en_is_html = False
         else:
             # 兜底：使用OCR文本
             ocr_original = result.get('_ocr_text', query_key)
-            score_info = f" score={score}" if score is not None else ""
-            self.source_label.setPlainText(f"{ocr_original}{score_info}")
-            self._last_en_raw = f"{ocr_original}{score_info}"
+            self.source_label.setPlainText(ocr_original)
+            self._last_en_raw = ocr_original
             self._last_en_is_html = False
+            if not en_log_raw:
+                en_log_raw = ocr_original
         self.signals.log.emit(f"[PERF] 设置英文显示: {(time.time()-t8)*1000:.1f}ms")
         
         # 渲染中文文本（支持HTML标记）
@@ -2832,11 +2308,23 @@ class OverlayWindow(QMainWindow):
                 self.cn_label.setPlainText(cn_text)
                 self._last_cn_raw = cn_text
                 self._last_cn_is_html = False
-            self.signals.log.emit(f"[CN] {cn_text[:100]}..." if len(cn_text) > 100 else f"[CN] {cn_text}")
+            if not cn_log_raw:
+                cn_log_raw = cn_text
         else:
             self.cn_label.setPlainText("（未找到中文匹配）")
             self._last_cn_raw = "（未找到中文匹配）"
             self._last_cn_is_html = False
+            if not cn_log_raw:
+                cn_log_raw = "（未找到中文匹配）"
+
+        # [EN]/[CN] 记录匹配原文（保留标记与占位符，不做展示替换）
+        self.signals.log.emit(f"[EN] {en_log_raw}")
+        self.signals.log.emit(f"[CN] {cn_log_raw}")
+
+        # 每次渲染结果后立刻同步文档级字体/行距，确保所有设置实时生效
+        en_font, cn_font = self._build_content_fonts()
+        self._apply_text_document_style(self.source_label, en_font, force_char_style=not self._last_en_is_html)
+        self._apply_text_document_style(self.cn_label, cn_font, force_char_style=not self._last_cn_is_html)
         self.signals.log.emit(f"[PERF] 设置中文显示: {(time.time()-t9)*1000:.1f}ms")
         
         # 设置音频控件状态
@@ -2877,34 +2365,75 @@ class OverlayWindow(QMainWindow):
             lang: "en" 或 "cn"，用于选择对应语言的字体
         """
         import re
-        
-        # 游戏预设颜色名映射
-        color_names = {
-            "Highlight": "#fbbf24",  # 黄色高亮
-            "Title": "#a79969",      # 暗金色标题（技能名称）
-            "Wind": "#55ffb5",       # 气动-青蓝色
-            "Fire": "#ef4444",       # 热熔-红色
-            "Thunder": "#8b5cf6",    # 导电-紫色
-            "Ice": "#06b6d4",        # 冷凝-青色
-            "Light": "#fbbf24",      # 衍射-黄色
-            "Dark": "#8b5cf6",       # 湮灭-紫色
+        text = self._resolve_display_placeholders(text, lang=lang)
+
+        # 游戏预设颜色名映射（全部转小写匹配）
+        named_colors = {
+            "highlight": "#fbbf24",
+            "highlightb": "#f59e0b",
+            "title": "#a79969",
+            "wind": "#55ffb5",
+            "fire": "#ef4444",
+            "thunder": "#8b5cf6",
+            "ice": "#06b6d4",
+            "light": "#fbbf24",
+            "dark": "#8b5cf6",
+            "blue": "#60a5fa",
+            "blued": "#3b82f6",
+            "green": "#34d399",
+            "greend": "#10b981",
+            "yellow": "#fbbf24",
+            "yellowd": "#ffd12f",
+            "red": "#ef4444",
+            "redd": "#e2524c",
+            "reda": "#f87171",
+            "white": "#f8fafc",
+            "rare2": "#60a5fa",
+            "rare3": "#a78bfa",
+            "rare4": "#f59e0b",
+            "rare5": "#fbbf24",
+            "threathigh": "#ef4444",
+            "purpled": "#8b5cf6",
         }
-        
-        # 替换 <color=Name>...</color>（预设颜色）
-        for name, hex_color in color_names.items():
-            text = re.sub(
-                rf'<color={name}>(.*?)</color>',
-                rf'<span style="color: {hex_color}">\1</span>',
-                text,
-                flags=re.DOTALL | re.IGNORECASE
-            )
-        
-        # 替换 <color=#RRGGBB>...</color>（十六进制颜色）
+
+        def _resolve_color_token(token: str) -> str:
+            t = str(token or "").strip()
+            if not t:
+                return "#fbbf24"
+            # 支持 #RRGGBB / #RRGGBBAA / RRGGBB / RRGGBBAA
+            m = re.fullmatch(r"#?([0-9a-fA-F]{6}|[0-9a-fA-F]{8})", t)
+            if m:
+                return f"#{m.group(1)}"
+            key = t.lower()
+            if key in named_colors:
+                return named_colors[key]
+            # 常见命名兜底
+            if "yellow" in key:
+                return "#fbbf24"
+            if "red" in key:
+                return "#ef4444"
+            if "blue" in key:
+                return "#60a5fa"
+            if "green" in key:
+                return "#34d399"
+            if "purple" in key:
+                return "#8b5cf6"
+            if "white" in key:
+                return "#f8fafc"
+            return "#fbbf24"
+
+        def _replace_color_tag(m: re.Match[str]) -> str:
+            color_token = m.group(1)
+            content = m.group(2)
+            css_color = _resolve_color_token(color_token)
+            return f'<span style="color: {css_color}">{content}</span>'
+
+        # 统一替换 <color=...>...</color>
         text = re.sub(
-            r'<color=(#[0-9a-fA-F]{6,8})>(.*?)</color>',
-            r'<span style="color: \1">\2</span>',
+            r'<color=([^>]+)>(.*?)</color>',
+            _replace_color_tag,
             text,
-            flags=re.DOTALL
+            flags=re.DOTALL | re.IGNORECASE,
         )
         
         # 替换 <te href=xxx>...</te>（游戏术语链接 → 下划线+黄色）
@@ -2935,7 +2464,7 @@ class OverlayWindow(QMainWindow):
         font_family = self.current_font_en if lang == "en" else self.current_font_cn
         # 包装为完整HTML文档
         font_size_pt = int(self.current_font_size) if self.current_font_size else 13
-        line_height = float(self.current_line_spacing) if self.current_line_spacing else 1.2
+        line_height_percent = int((float(self.current_line_spacing) if self.current_line_spacing else 1.2) * 100)
         letter_spacing = float(self.current_letter_spacing) if self.current_letter_spacing else 0.0
         font_weight = self._font_weight_css()
 
@@ -2948,7 +2477,7 @@ class OverlayWindow(QMainWindow):
         body {{
             font-family: "{font_family}";
             color: #e2e8f0;
-            line-height: {line_height};
+            line-height: {line_height_percent}%;
             margin: 8px;
             padding: 0;
             font-size: {font_size_pt}pt;
@@ -2963,6 +2492,157 @@ class OverlayWindow(QMainWindow):
 </html>
 '''
         return html
+
+    def _extract_numeric_values_from_context(self, ocr_context: str) -> list[str]:
+        import re
+        if not isinstance(ocr_context, str) or not ocr_context:
+            return []
+        values: list[str] = []
+        pattern = re.compile(
+            r"\d+\s*[dhms](?:\s+\d+\s*[dhms])*"
+            r"|\d+(?:\.\d+)?\s?(?:kb|mb|gb|tb)"
+            r"|\d+(?:\.\d+)?%"
+            r"|\d+(?:\.\d+)+"
+            r"|\d+",
+            flags=re.IGNORECASE,
+        )
+        time_pat = re.compile(r"^\d+\s*[dhms](?:\s+\d+\s*[dhms])*$", flags=re.IGNORECASE)
+        for m in pattern.finditer(ocr_context):
+            token = m.group(0).strip()
+            if not token:
+                continue
+            if time_pat.fullmatch(token):
+                token = re.sub(r"\s+", " ", token)
+            else:
+                token = re.sub(r"\s+", "", token)
+            values.append(token)
+        return values
+
+    def _resolve_display_placeholders(
+        self,
+        text: str,
+        lang: str = "en",
+        ocr_context: str | None = None,
+        text_key: str | None = None,
+    ) -> str:
+        """解析游戏文本占位符，输出用于GUI展示的最终文本。"""
+        import re
+        if not isinstance(text, str) or not text:
+            return text
+
+        out = text
+        lang_norm = str(lang or "en").strip().lower()
+        is_cn = lang_norm in {"cn", "zh", "zh-cn", "zh_hans", "zh-hans"}
+        player_name = "漂泊者" if is_cn else "Rover"
+
+        # 主角名字占位符统一替换为 Rover
+        out = out.replace("{PlayerName}", player_name)
+        out = re.sub(
+            r"\{Cus:Var,\s*VarType=Global\s+Key=main_team_name\}",
+            player_name,
+            out,
+            flags=re.IGNORECASE,
+        )
+
+        # 数值索引占位符：技能文本优先使用 ConfigDB 参数，其他文本走 OCR 提取。
+        placeholder_indexes = [int(i) for i in re.findall(r"\{(\d+)\}", out)]
+        placeholder_count = (max(placeholder_indexes) + 1) if placeholder_indexes else 0
+        ocr_values = self._extract_numeric_values_from_context(ocr_context or "")
+        numeric_values = list(ocr_values)
+
+        if placeholder_count > 0 and text_key and self.skill_param_resolver:
+            db_values = self.skill_param_resolver.resolve_values(text_key, placeholder_count)
+            if db_values:
+                if len(db_values) >= placeholder_count:
+                    numeric_values = list(db_values)
+                elif not numeric_values:
+                    numeric_values = list(db_values)
+                elif len(numeric_values) < placeholder_count:
+                    merged = list(db_values)
+                    for token in numeric_values:
+                        if len(merged) >= placeholder_count:
+                            break
+                        merged.append(token)
+                    numeric_values = merged
+
+        template_for_numeric = out
+        time_pat = re.compile(r"^\d+\s*[dhms](?:\s+\d+\s*[dhms])*$", flags=re.IGNORECASE)
+
+        def _render_time_value(token: str) -> str:
+            m = re.findall(r"(\d+)\s*([dhms])", token, flags=re.IGNORECASE)
+            if not m:
+                return token
+            if is_cn:
+                unit_map = {"d": "天", "h": "小时", "m": "分钟", "s": "秒"}
+                return "".join(f"{n}{unit_map.get(u.lower(), u)}" for n, u in m)
+            return " ".join(f"{n}{u.lower()}" for n, u in m)
+
+        def _replace_indexed_placeholder(m: re.Match[str]) -> str:
+            idx = int(m.group(1))
+            if 0 <= idx < len(numeric_values):
+                val = numeric_values[idx]
+                if time_pat.fullmatch(val):
+                    val = _render_time_value(val)
+                # 模板若本身是 "{0}%"，且回填值已带%，避免出现 "%%"
+                if val.endswith("%"):
+                    next_ch = template_for_numeric[m.end(): m.end() + 1]
+                    if next_ch == "%":
+                        val = val[:-1]
+                return val
+            # 未知运行时参数，显示可读占位，避免原样 {0}
+            return f"<{idx}>"
+
+        out = re.sub(r"\{(\d+)\}", _replace_indexed_placeholder, out)
+
+        # 输入提示占位符：优先显示 PC 按键文案，兜底 Press
+        def _replace_input_token(m: re.Match[str]) -> str:
+            body = m.group(1) or ""
+            pc = re.search(r"\bPC=([^,\s;{}]+)", body, flags=re.IGNORECASE)
+            touch = re.search(r"\bTouch=([^,\s;{}]+)", body, flags=re.IGNORECASE)
+            gamepad = re.search(r"\bGamepad=([^,\s;{}]+)", body, flags=re.IGNORECASE)
+            token = (pc.group(1) if pc else "") or (touch.group(1) if touch else "") or (gamepad.group(1) if gamepad else "") or "Press"
+            token = token.strip()
+            if token.islower():
+                token = token.capitalize()
+            return token or "Press"
+
+        out = re.sub(
+            r"\{Cus:Ipt,([^{}]+)\}",
+            _replace_input_token,
+            out,
+            flags=re.IGNORECASE,
+        )
+
+        # 性别占位符：按配置选择 male/female 对应文案
+        pref = str(getattr(self.config, "gender_preference", "female") or "female").strip().lower()
+        target = "male" if pref == "male" else "female"
+
+        def _replace_gender_token(m: re.Match[str]) -> str:
+            body = m.group(1) or ""
+            body_norm = body.strip().lower()
+
+            # {TA} 是中文文案特有占位符，仅在中文展示时替换
+            if body_norm == "ta":
+                if is_cn:
+                    return "他" if target == "male" else "她"
+                return m.group(0)
+
+            parts = [p.strip() for p in body.split(";") if p.strip()]
+            kv: dict[str, str] = {}
+            for part in parts:
+                if "=" not in part:
+                    continue
+                k, v = part.split("=", 1)
+                kv[k.strip().lower()] = v.strip()
+            if "male" in kv and "female" in kv:
+                male_val = kv.get("male", "")
+                female_val = kv.get("female", "")
+                if male_val or female_val:
+                    return male_val if target == "male" else female_val
+            return m.group(0)
+
+        out = re.sub(r"\{([^{}]{1,120})\}", _replace_gender_token, out)
+        return out
 
 
     def _show_error(self, message: str) -> None:
@@ -3003,10 +2683,11 @@ class OverlayWindow(QMainWindow):
         self.setWindowState(self.windowState() & ~Qt.WindowState.WindowMinimized | Qt.WindowState.WindowActive)
         QApplication.processEvents()  # 立即处理事件
 
-    def stop_audio(self) -> None:
+    def stop_audio(self, emit_status: bool = True) -> None:
         if hasattr(self, "player"):
             self.player.stop()
-            self.signals.status.emit("已停止播放")
+            if emit_status:
+                self.signals.status.emit("已停止播放")
             
             # 重置音频控制UI
             if hasattr(self, 'audio_timer'):
@@ -3020,6 +2701,28 @@ class OverlayWindow(QMainWindow):
                 self.audio_slider.setEnabled(False)
             if hasattr(self, 'time_label'):
                 self.time_label.setText("00:00 / 00:00")
+
+    def _play_audio_for_key(self, text_key: str) -> None:
+        """根据 text_key 解析音频并播放（供多条目模式调用）。"""
+        if not text_key:
+            return
+        self.last_text_key = text_key
+        self.last_hash = None
+        self.last_event_name = None
+        if self.audio_resolver:
+            event_name = f"vo_{text_key}"
+            res = self.audio_resolver.resolve(text_key, db_event=event_name, db_hash=None)
+            if res:
+                self.last_hash = res.hash_value
+                self.last_event_name = res.event_name
+                self.signals.log.emit(
+                    f"[AUDIO] text_key={text_key} hash={self.last_hash} ({res.source_type})"
+                )
+            else:
+                self.signals.log.emit(f"[AUDIO] text_key={text_key} 未找到对应音频，跳过播放")
+                return
+        if self.config.play_audio and self.last_hash is not None:
+            self.play_audio()
 
     def play_audio(self) -> None:
         if self.last_hash is None or not self.config.audio_cache_path:
@@ -3046,26 +2749,48 @@ class OverlayWindow(QMainWindow):
                     
                     # 如果是 cache，直接获取路径
                     if res.source_type == 'cache':
-                        path = self.audio_resolver.audio_index.find(res.hash_value)
+                        path = self.audio_resolver.get_cached_path(
+                            res.hash_value,
+                            res.event_name,
+                            trusted_only=True,
+                        )
+                        if path is None:
+                            print("[DEBUG] play_audio: trusted cache missing, will regenerate", flush=True)
                     elif res.source_type == 'wem' or res.source_type == 'bnk':
                         # 需要触发提取逻辑
                         print("[DEBUG] Triggering ensure_playable_audio (1)...", flush=True)
                         path = self.audio_resolver.ensure_playable_audio(
-                            self.last_hash, self.last_text_key, self.last_event_name, log_callback=self.signals.log.emit
+                            self.last_hash,
+                            self.last_text_key,
+                            self.last_event_name,
+                            log_callback=self.signals.log.emit,
+                            skip_cache=True,
                         )
             
-            # 兜底：如果 resolver 没搞定，尝试原始 index
+            # 兜底：如果 resolver 没搞定，仅允许可信缓存命中
             if path is None and self.last_hash:
-                if self.audio_index:
+                if self.audio_resolver:
+                    path = self.audio_resolver.get_cached_path(
+                        self.last_hash,
+                        self.last_event_name,
+                        trusted_only=True,
+                    )
+                elif self.audio_index:
                     path = self.audio_index.find(self.last_hash)
             
             if path is None and self.audio_resolver:
                 print("[DEBUG] Triggering ensure_playable_audio (fallback)...", flush=True)
                 path = self.audio_resolver.ensure_playable_audio(
-                    self.last_hash, self.last_text_key, self.last_event_name, log_callback=self.signals.log.emit
+                    self.last_hash,
+                    self.last_text_key,
+                    self.last_event_name,
+                    log_callback=self.signals.log.emit,
+                    skip_cache=True,
                 )
             
             if path is None:
+                # 没有新音频时，确保旧音频不继续播放
+                self.stop_audio(emit_status=False)
                 self.signals.status.emit("未找到对应音频文件")
                 print("[DEBUG] play_audio: path not found", flush=True)
                 return
@@ -3430,9 +3155,117 @@ class OverlayWindow(QMainWindow):
                 pass
         self._win_hotkey_ids = []
 
-    def _select_region(self) -> CaptureRegion | None:
+    def _pil_to_pixmap(self, img, target_size: QSize | None = None) -> QPixmap:
+        try:
+            from PIL import Image
+        except Exception as exc:
+            raise RuntimeError("缺少 Pillow，无法生成截图背景") from exc
+        if not isinstance(img, Image.Image):
+            raise RuntimeError("无效截图对象，无法生成截图背景")
+        if img.mode != "RGBA":
+            img = img.convert("RGBA")
+        data = img.tobytes("raw", "RGBA")
+        qimage = QImage(data, img.width, img.height, QImage.Format.Format_RGBA8888)
+        qimage = qimage.copy()
+        pixmap = QPixmap.fromImage(qimage)
+        if target_size and (pixmap.width() != target_size.width() or pixmap.height() != target_size.height()):
+            pixmap = pixmap.scaled(
+                target_size,
+                Qt.AspectRatioMode.IgnoreAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+        return pixmap
+
+    def _build_screen_pixmaps(self, desktop_img, monitors: list[dict]) -> list[QPixmap]:
+        screens = QGuiApplication.screens()
+        if not monitors:
+            return []
+        all_mon = monitors[0]
+        pixmaps: list[QPixmap] = []
+        for idx, screen in enumerate(screens):
+            if idx + 1 < len(monitors):
+                mon = monitors[idx + 1]
+                crop_left = mon["left"] - all_mon["left"]
+                crop_top = mon["top"] - all_mon["top"]
+                crop_right = crop_left + mon["width"]
+                crop_bottom = crop_top + mon["height"]
+                crop = desktop_img.crop((crop_left, crop_top, crop_right, crop_bottom))
+            else:
+                crop = desktop_img
+            pixmaps.append(self._pil_to_pixmap(crop, screen.geometry().size()))
+        return pixmaps
+
+    def _capture_desktop_snapshot(self) -> DesktopSnapshot:
+        backend = str(getattr(self.config, "capture_backend", "mss")).lower()
+        try:
+            import mss
+        except Exception as exc:
+            raise RuntimeError("缺少 mss，无法截图") from exc
+        try:
+            from PIL import Image, ImageGrab
+        except Exception as exc:
+            raise RuntimeError("缺少 Pillow，无法截图") from exc
+
+        with mss.mss() as sct:
+            monitors = sct.monitors
+            if not monitors:
+                raise RuntimeError("未检测到屏幕")
+            all_mon = monitors[0]
+            if backend == "winrt":
+                bbox = (
+                    all_mon["left"],
+                    all_mon["top"],
+                    all_mon["left"] + all_mon["width"],
+                    all_mon["top"] + all_mon["height"],
+                )
+                img = ImageGrab.grab(bbox=bbox, all_screens=True)
+            else:
+                sct_img = sct.grab(all_mon)
+                img = Image.frombytes("RGB", sct_img.size, sct_img.bgra, "raw", "BGRX")
+
+        # If capture backend scales differently, normalize monitor coords to image space
+        scale_x = img.width / max(all_mon["width"], 1)
+        scale_y = img.height / max(all_mon["height"], 1)
+        if abs(scale_x - 1.0) > 0.01 or abs(scale_y - 1.0) > 0.01:
+            scaled_monitors: list[dict] = []
+            for mon in monitors:
+                scaled_monitors.append(
+                    {
+                        "left": int(mon["left"] * scale_x),
+                        "top": int(mon["top"] * scale_y),
+                        "width": int(mon["width"] * scale_x),
+                        "height": int(mon["height"] * scale_y),
+                    }
+                )
+            monitors = scaled_monitors
+            all_mon = monitors[0]
+
+        screen_pixmaps = self._build_screen_pixmaps(img, monitors)
+        return DesktopSnapshot(
+            image=img,
+            left=int(all_mon["left"]),
+            top=int(all_mon["top"]),
+            monitors=monitors,
+            screen_pixmaps=screen_pixmaps,
+        )
+
+    def _crop_snapshot(self, snapshot: DesktopSnapshot, region: CaptureRegion):
+        img = snapshot.image
+        left = region.left - snapshot.left
+        top = region.top - snapshot.top
+        right = left + region.width
+        bottom = top + region.height
+
+        # Clamp to desktop bounds to avoid errors
+        left = max(0, min(left, img.width))
+        top = max(0, min(top, img.height))
+        right = max(left, min(right, img.width))
+        bottom = max(top, min(bottom, img.height))
+        return img.crop((left, top, right, bottom))
+
+    def _select_region(self, snapshot: DesktopSnapshot | None = None) -> CaptureRegion | None:
         """选择屏幕区域并转换为物理像素坐标（适配多屏不同DPI）。"""
-        selector = ScreenSelector()
+        selector = ScreenSelector(snapshot.screen_pixmaps if snapshot else None)
         rect = selector.get_region()
         
         if rect is None or rect.width() <= 0 or rect.height() <= 0:
@@ -3451,7 +3284,38 @@ class OverlayWindow(QMainWindow):
                 target_screen = screen
                 target_index = idx
                 break
-        
+
+        if snapshot is not None:
+            try:
+                if snapshot.monitors and target_index + 1 < len(snapshot.monitors):
+                    mss_mon = snapshot.monitors[target_index + 1]
+                    screen_geo = target_screen.geometry()
+                    scale_x = mss_mon["width"] / max(screen_geo.width(), 1)
+                    scale_y = mss_mon["height"] / max(screen_geo.height(), 1)
+
+                    rel_x = rect.x() - screen_geo.x()
+                    rel_y = rect.y() - screen_geo.y()
+
+                    phy_x_local = int(rel_x * scale_x)
+                    phy_y_local = int(rel_y * scale_y)
+                    phy_w = int(rect.width() * scale_x)
+                    phy_h = int(rect.height() * scale_y)
+
+                    final_x = int(mss_mon["left"] + phy_x_local)
+                    final_y = int(mss_mon["top"] + phy_y_local)
+
+                    print(f"[框选] 快照映射: MSS Monitor[{target_index+1}]={mss_mon}")
+                    print(f"[框选] 快照缩放: sx={scale_x:.3f}, sy={scale_y:.3f}")
+                    print(f"[框选] 最终物理坐标: ({final_x}, {final_y}, {phy_w}, {phy_h})")
+                    return CaptureRegion(
+                        left=final_x,
+                        top=final_y,
+                        width=phy_w,
+                        height=phy_h,
+                    )
+            except Exception as e:
+                print(f"[框选] 快照映射失败: {e}，回退到实时坐标映射")
+
         dpr = target_screen.devicePixelRatio()
         dpr_override = getattr(self.config, "capture_force_dpr", None)
         if dpr_override is not None:
@@ -3577,9 +3441,10 @@ class ScreenOverlay(QWidget):
     """单屏幕覆盖窗口"""
     region_selected = pyqtSignal(QRect)
 
-    def __init__(self, screen, parent=None):
+    def __init__(self, screen, background: QPixmap | None = None, parent=None):
         super().__init__(parent)
         self._screen = screen
+        self._background = background
         self.setGeometry(screen.geometry()) # 逻辑坐标
         
         self.setWindowFlags(
@@ -3598,6 +3463,8 @@ class ScreenOverlay(QWidget):
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
         if not painter.isActive(): return
+        if self._background is not None:
+            painter.drawPixmap(self.rect(), self._background)
         painter.fillRect(self.rect(), QColor(0, 0, 0, 80)) # 半透明遮罩
         painter.end()
 
@@ -3634,7 +3501,7 @@ class ScreenSelector(QObject):
     """全屏选区控制器，管理多屏覆盖窗口。"""
     region_selected_signal = pyqtSignal(QRect)
 
-    def __init__(self) -> None:
+    def __init__(self, backgrounds: list[QPixmap] | None = None) -> None:
         super().__init__()
         self._overlays: list[ScreenOverlay] = []
         self._selected_rect: QRect | None = None
@@ -3642,8 +3509,9 @@ class ScreenSelector(QObject):
 
         # 为每个屏幕创建一个覆盖窗口
         screens = QGuiApplication.screens()
-        for screen in screens:
-            overlay = ScreenOverlay(screen)
+        for idx, screen in enumerate(screens):
+            bg = backgrounds[idx] if backgrounds and idx < len(backgrounds) else None
+            overlay = ScreenOverlay(screen, bg)
             overlay.region_selected.connect(self._on_region_selected)
             self._overlays.append(overlay)
             

@@ -1,5 +1,6 @@
 import subprocess
 import os
+import tempfile
 from pathlib import Path
 
 class NativeExtractor:
@@ -28,17 +29,43 @@ class NativeExtractor:
         # Ensure output directory exists
         Path(output_dir).mkdir(parents=True, exist_ok=True)
 
-        cmd = [
-            str(self.tool_path),
-            str(game_dir),
-            aes_key,
-            str(output_dir),
-            filter_keyword  # e.g. "ConfigDB" or "Audio"
-        ]
+        all_keys = [k.strip() for k in aes_key.split(";") if k.strip()]
+        if not all_keys:
+            print("[Native] No AES keys provided.")
+            return False
 
-        print(f"[Native] Calling FModelCLI with filter: {filter_keyword}...")
+        overall_success = True
         
+        # Windows command line length limit is 32767. 400+ keys can exceed this limit.
+        # FModelCLI now supports `@filepath` argument for keys to bypass it.
+        # Use project cache directory for temporary key storage if available
+        cache_dir = Path("cache")
+        if not cache_dir.exists():
+            cache_dir = Path(tempfile.gettempdir())
+            
+        tmp_path = None
         try:
+            with tempfile.NamedTemporaryFile(
+                mode="w", 
+                suffix=".txt", 
+                prefix="native_aes_keys_",
+                dir=cache_dir,
+                delete=False, 
+                encoding="utf-8"
+            ) as tmp_file:
+                tmp_file.write("\n".join(all_keys))
+                tmp_path = tmp_file.name
+
+            cmd = [
+                str(self.tool_path),
+                str(game_dir),
+                f"@{tmp_path}",
+                str(output_dir),
+                filter_keyword  # e.g. "ConfigDB" or "Audio"
+            ]
+
+            print(f"[Native] Calling FModelCLI with filter: {filter_keyword} and {len(all_keys)} keys...")
+            
             # Live log output
             process = subprocess.Popen(
                 cmd, 
@@ -58,11 +85,18 @@ class NativeExtractor:
             
             if process.returncode == 0:
                 print(f"[Native] Extraction success for {filter_keyword}")
-                return True
             else:
                 print(f"[Native] Extraction failed with code {process.returncode}")
-                return False
+                overall_success = False
                 
         except Exception as e:
             print(f"[Native] Exception during execution: {e}")
-            return False
+            overall_success = False
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
+
+        return overall_success

@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict
 
-from ludiglot.core.text_builder import find_multitext_paths
+from ludiglot.adapters.wuthering_waves.data_mapper import WutheringDataMapper
 
 
 @dataclass
@@ -38,6 +38,7 @@ class AppConfig:
     ocr_glm_ollama_model: str | None = None
     ocr_glm_max_tokens: int | None = None
     ocr_glm_timeout: float | None = None
+    ocr_glm_prompt: str | None = None
     ocr_debug_dump_input: bool = False
     ocr_raw_capture: bool = False
     ocr_windows_input: str = "auto"  # auto | raw | png
@@ -136,7 +137,7 @@ def load_config(path: Path) -> AppConfig:
              else:
                  raise FileNotFoundError(
                      f"数据目录不存在: {data_root}\n"
-                     "请在 settings.json 中设置正确的 'data_root' 指向 WutheringData 目录。"
+                     "建议配置 game_pak_root 或 game_install_root 使用 Pak 解包流程。"
                  )
 
     en_json = raw.get("en_json")
@@ -145,9 +146,9 @@ def load_config(path: Path) -> AppConfig:
     # 只有在需要重建或者没有 DB 的时候，才强制要求 MultiText 路径
     if (not has_db or auto_rebuild) and (not en_json or not zh_json) and data_root and data_root.exists():
         try:
-            resolved_en, resolved_zh = find_multitext_paths(data_root)
-            en_json = en_json or str(resolved_en)
-            zh_json = zh_json or str(resolved_zh)
+            data_paths = WutheringDataMapper(data_root).parse()
+            en_json = en_json or str(data_paths.en_text)
+            zh_json = zh_json or str(data_paths.zh_text)
         except FileNotFoundError:
             if not has_db: raise
     
@@ -171,6 +172,9 @@ def load_config(path: Path) -> AppConfig:
     ocr_glm_endpoint = raw.get("ocr_glm_endpoint")
     legacy_glm_model = raw.get("ocr_glm_model")
     ocr_glm_ollama_model = raw.get("ocr_glm_ollama_model") or legacy_glm_model
+    ocr_glm_prompt = raw.get("ocr_glm_prompt")
+    if ocr_glm_prompt is not None:
+        ocr_glm_prompt = str(ocr_glm_prompt).strip() or None
     ocr_glm_max_tokens = raw.get("ocr_glm_max_tokens")
     ocr_glm_timeout = raw.get("ocr_glm_timeout")
     try:
@@ -263,6 +267,10 @@ def load_config(path: Path) -> AppConfig:
     capture_backend = str(raw.get("capture_backend", "mss")).lower()
     if capture_backend not in {"mss", "winrt"}:
         capture_backend = "mss"
+    
+    gender_preference = str(raw.get("gender_preference", "female")).strip().lower()
+    if gender_preference not in {"female", "male"}:
+        gender_preference = "female"
 
     return AppConfig(
         data_root=data_root,
@@ -293,6 +301,7 @@ def load_config(path: Path) -> AppConfig:
         ocr_glm_ollama_model=str(ocr_glm_ollama_model) if ocr_glm_ollama_model else None,
         ocr_glm_max_tokens=ocr_glm_max_tokens,
         ocr_glm_timeout=ocr_glm_timeout,
+        ocr_glm_prompt=ocr_glm_prompt,
         ocr_debug_dump_input=bool(raw.get("ocr_debug_dump_input", False)),
         ocr_raw_capture=bool(raw.get("ocr_raw_capture", False)),
         ocr_windows_input=ocr_windows_input,
@@ -313,6 +322,7 @@ def load_config(path: Path) -> AppConfig:
         audio_cache_max_mb=int(raw.get("audio_cache_max_mb", 2048)),
         scan_audio_on_start=bool(raw.get("scan_audio_on_start", True)),
         play_audio=bool(raw.get("play_audio", False)),
+        gender_preference=gender_preference,
         capture_mode=raw.get("capture_mode", "image"),
         capture_backend=capture_backend,
         window_title=raw.get("window_title"),

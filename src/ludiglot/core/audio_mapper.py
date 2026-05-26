@@ -23,6 +23,13 @@ class AudioEntry:
     mtime: float
 
 
+@dataclass
+class AudioCacheScanPlan:
+    entries: Dict[int, AudioEntry]
+    remove_paths: list[Path]
+    create_cache_dir: bool = False
+
+
 class AudioCacheIndex:
     def __init__(
         self,
@@ -77,9 +84,10 @@ class AudioCacheIndex:
         self.index_path.parent.mkdir(parents=True, exist_ok=True)
         self.index_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    def scan(self) -> None:
+    def plan_scan(self) -> AudioCacheScanPlan:
         if not self.cache_dir.exists():
-            self.cache_dir.mkdir(parents=True, exist_ok=True)
+            return AudioCacheScanPlan(entries={}, remove_paths=[], create_cache_dir=True)
+
         entries: Dict[int, AudioEntry] = {}
         for path in self.cache_dir.rglob("*"):
             if not path.is_file():
@@ -97,8 +105,31 @@ class AudioCacheIndex:
                 size=stat.st_size,
                 mtime=stat.st_mtime,
             )
-        self.entries = entries
-        self._enforce_size_limit()
+
+        remove_paths: list[Path] = []
+        if self.max_bytes > 0:
+            total = sum(entry.size for entry in entries.values())
+            if total > self.max_bytes:
+                ordered = sorted(entries.values(), key=lambda e: e.mtime)
+                for entry in ordered:
+                    remove_paths.append(entry.path)
+                    total -= entry.size
+                    entries.pop(entry.hash_value, None)
+                    if total <= self.max_bytes:
+                        break
+
+        return AudioCacheScanPlan(entries=entries, remove_paths=remove_paths)
+
+    def scan(self) -> None:
+        plan = self.plan_scan()
+        if plan.create_cache_dir:
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
+        for path in plan.remove_paths:
+            try:
+                path.unlink(missing_ok=True)
+            except Exception:
+                pass
+        self.entries = plan.entries
         self.save()
 
     def validate(self) -> None:

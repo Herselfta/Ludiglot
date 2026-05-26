@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import base64
+from dataclasses import dataclass
 import io
 import json
 import os
@@ -34,22 +35,23 @@ except ImportError:
     HAS_NUMPY = False
 
 PaddleOCR = None
-GLM_OCR_OUTPUT_SCHEMA = (
-    '{"lines":["<line1>","<line2>"]}'
-)
-
-DEFAULT_GLM_OCR_PROMPT = (
-    "You are an OCR engine. Extract all readable text from the image.\n"
-    "Rules:\n"
-    "- Return only the recognized text.\n"
-    "- Preserve line breaks as in the image.\n"
-    "- Do not add any commentary or formatting.\n"
-    "Output ONLY the following JSON, do not include any other text:\n"
-    + GLM_OCR_OUTPUT_SCHEMA
-    + "\n"
-)
+# The GLM-OCR model expects task-directive prompts, NOT descriptive instructions.
+# Passing descriptive rules causes the model to hallucinate them as OCR output.
+# Official prompts (from zai-org/GLM-OCR SDK config.yaml):
+#   "Text Recognition:"    – general text / subtitles
+#   "Table Recognition:"   – tabular data
+#   "Formula Recognition:" – math formulas
+DEFAULT_GLM_OCR_PROMPT = "Text Recognition:"
 DEFAULT_GLM_OCR_TIMEOUT = 30.0
-DEFAULT_GLM_OCR_MAX_TOKENS = 128
+# <=0 means "follow Ollama default behavior" (do not send num_predict).
+DEFAULT_GLM_OCR_MAX_TOKENS = 0
+
+
+@dataclass(frozen=True)
+class OcrPipelineResult:
+    boxes: List[Dict[str, object]]
+    lines: List[Tuple[str, float]]
+    backend: str | None
 
 
 class OCREngine:
@@ -67,6 +69,7 @@ class OCREngine:
         glm_ollama_model: str | None = None,
         glm_timeout: float | None = None,
         glm_max_tokens: int | None = None,
+        glm_prompt: str | None = None,
         allow_paddle: bool = True,
     ) -> None:
         self.lang = lang
@@ -110,11 +113,16 @@ class OCREngine:
             self.glm_timeout = DEFAULT_GLM_OCR_TIMEOUT
         max_tokens_raw = glm_max_tokens if glm_max_tokens is not None else os.getenv("LUDIGLOT_GLM_OCR_MAX_TOKENS")
         try:
-            self.glm_max_tokens = int(max_tokens_raw) if max_tokens_raw is not None else DEFAULT_GLM_OCR_MAX_TOKENS
+            if max_tokens_raw is None:
+                self.glm_max_tokens = DEFAULT_GLM_OCR_MAX_TOKENS
+            else:
+                mt = int(max_tokens_raw)
+                self.glm_max_tokens = mt if mt > 0 else 0
         except Exception:
             self.glm_max_tokens = DEFAULT_GLM_OCR_MAX_TOKENS
 
-        self.glm_prompt = DEFAULT_GLM_OCR_PROMPT
+        prompt = str(glm_prompt).strip() if glm_prompt is not None else ""
+        self.glm_prompt = prompt or DEFAULT_GLM_OCR_PROMPT
         self._glm_ollama_last_error = None
         self._log_callback: Callable[[str], None] | None = None
         self._status_callback: Callable[[str], None] | None = None
@@ -572,284 +580,98 @@ class OCREngine:
         cleaned = str(text).strip()
         if not cleaned:
             return []
-        try:
-            prompt_text = str(self.glm_prompt or "").strip()
-        except Exception:
-            prompt_text = ""
-        if prompt_text and prompt_text in cleaned:
-            cleaned = cleaned.rsplit(prompt_text, 1)[-1].strip()
 
-        def _normalize_line(value: str) -> str:
-            normalized = re.sub(r"^([-*•]\\s+|\\d+[\\.)]\\s+)", "", value.strip())
-            normalized = re.sub(r"\\s+", " ", normalized)
-            normalized = normalized.lower()
-            normalized = normalized.rstrip(":")
-            return normalized
+        # strip markdown fences if model wraps plain output with ```...```
+        cleaned = re.sub(r"^\s*```[A-Za-z0-9_-]*\s*", "", cleaned)
+        cleaned = re.sub(r"\s*```\s*$", "", cleaned)
 
-        prompt_lines: list[str] = []
-        for line in str(self.glm_prompt).splitlines():
-            line = line.strip()
+        # remove common LLM special tokens
+        cleaned = re.sub(r"<\|[^>]*\|>", "", cleaned)
+        cleaned = re.sub(r"<\|[^>]*", "", cleaned)
+
+        # normalize escaped newlines from JSON-like payload
+        cleaned = cleaned.replace("\\r\\n", "\n").replace("\\n", "\n").replace("\\r", "\n")
+
+        lines_out: list[str] = []
+        for raw_line in cleaned.splitlines():
+            line = _sanitize_ocr_fragment(raw_line)
+            # Strip markdown heading markers (# ## ###) produced by "Text Recognition:"
+            line = re.sub(r"^#{1,6}\s+", "", line).strip()
+            # Strip markdown list markers and numbered lists
+            line = re.sub(r"^([-*•]\s+|\d+[.)]\s+)", "", line).strip()
+            # Strip inline bold/italic markers (**text**, __text__, *text*, _text_)
+            line = re.sub(r"\*{1,3}([^\*]+)\*{1,3}", r"\1", line)
+            line = re.sub(r"_{1,3}([^_]+)_{1,3}", r"\1", line)
+            # Skip horizontal rules
+            if re.fullmatch(r"[-=_*]{3,}", line):
+                continue
             if not line:
                 continue
-            line = re.sub(r"^([-*•]\\s+|\\d+[\\.)]\\s+)", "", line).strip()
-            if line:
-                prompt_lines.append(line)
-        prompt_norm = {_normalize_line(line) for line in prompt_lines if line}
-
-        def _strip_image_tokens(value: str) -> str:
-            stripped = re.sub(r"<\\|image[^|>]*\\|>", "", value)
-            stripped = re.sub(r"<\\|image[^>]*", "", stripped)
-            stripped = stripped.replace("<|endoftext|>", "")
-            stripped = stripped.replace("<|begin_of_text|>", "")
-            stripped = stripped.replace("<|assistant|>", "")
-            stripped = stripped.replace("<|user|>", "")
-            stripped = stripped.replace("<|system|>", "")
-            stripped = stripped.replace("<|bos|>", "")
-            stripped = stripped.replace("<|eos|>", "")
-            stripped = stripped.replace("<|im_start|>", "")
-            stripped = stripped.replace("<|im_end|>", "")
-            return stripped.strip()
-
-        def _filter_prompt_lines(lines: list[str]) -> list[str]:
-            if not lines:
-                return []
-            def _is_token_fragment(value: str) -> bool:
-                v = value.strip()
-                if not v:
-                    return True
-                if v.startswith("```"):
-                    return True
-                if re.fullmatch(r"[{}\[\]\s,:-]+", v):
-                    return True
-                compact = re.sub(r"[\s\[\]{},:]", "", v).strip("\"'").lower()
-                if compact == "lines":
-                    return True
-                if "<|" in v or "|>" in v:
-                    if len(v) <= 8:
-                        return True
-                    if not re.search(r"[A-Za-z0-9]", v):
-                        return True
-                if all(ch in "<|>-." for ch in v):
-                    return True
-                return False
-
-            def _is_schema_placeholder(value: str) -> bool:
-                v = value.strip()
-                if not v:
-                    return True
-                if re.fullmatch(r"<line\\d+>", v, flags=re.IGNORECASE):
-                    return True
-                if re.fullmatch(r"<line\\d+", v, flags=re.IGNORECASE):
-                    return True
-                if v.lower().startswith("<line") and len(v) <= 10:
-                    return True
-                return False
-
-            def _looks_like_schema_json(value: str) -> bool:
-                v = value.strip()
-                if not v.startswith("{"):
-                    return False
-                low = v.lower()
-                if "\"lines\"" in low and "<line" in low:
-                    return True
-                if "'lines'" in low and "<line" in low:
-                    return True
-                if "lines" in low and "<line" in low and "[" in low and "]" in low:
-                    return True
-                return False
-
-            def _looks_like_prompt_line(norm_line: str) -> bool:
-                if not norm_line:
-                    return False
-                if norm_line in prompt_norm:
-                    return True
-                if len(norm_line) >= 12:
-                    for p in prompt_norm:
-                        if p.startswith(norm_line) or norm_line.startswith(p):
-                            return True
-                return False
-
-            filtered: list[str] = []
-            for line in lines:
-                cleaned_line = _strip_image_tokens(str(line))
-                if not cleaned_line:
-                    continue
-                if _is_token_fragment(cleaned_line):
-                    continue
-                if _is_schema_placeholder(cleaned_line):
-                    continue
-                if _looks_like_schema_json(cleaned_line):
-                    continue
-                norm = _normalize_line(cleaned_line)
-                if _looks_like_prompt_line(norm):
-                    continue
-                filtered.append(cleaned_line)
-            return filtered
-
-        def _split_text_value(value: str) -> list[str]:
-            parts = []
-            raw_value = str(value)
-            # normalize escaped newlines when JSON parsing fails or returns raw strings
-            raw_value = raw_value.replace("\\r\\n", "\n").replace("\\n", "\n").replace("\\r", "\n")
-            for seg in raw_value.splitlines():
-                seg = seg.strip()
+            line = re.sub(r"\s+", " ", line).strip()
+            if line == str(self.glm_prompt).strip():
+                continue
+            if re.fullmatch(r"[{}\[\],:]+", line):
+                continue
+            split_lines = self._split_glm_compound_line(line)
+            for seg in split_lines:
+                seg = re.sub(r"\s+", " ", str(seg or "")).strip()
                 if seg:
-                    parts.append(seg)
-            return parts
+                    lines_out.append(seg)
 
-        def _extract_from_obj(obj: object) -> list[str]:
-            out: list[str] = []
-            if isinstance(obj, dict):
-                if isinstance(obj.get("lines"), list):
-                    for item in obj.get("lines", []):
-                        if isinstance(item, str):
-                            out.extend(_split_text_value(item))
-                        elif isinstance(item, dict) and item.get("text"):
-                            out.extend(_split_text_value(item.get("text")))
-                elif obj.get("text"):
-                    out.extend(_split_text_value(obj.get("text")))
-            elif isinstance(obj, list):
-                for item in obj:
-                    if isinstance(item, str):
-                        out.extend(_split_text_value(item))
-                    elif isinstance(item, dict) and item.get("text"):
-                        out.extend(_split_text_value(item.get("text")))
-            return out
+        # Fallback: preserve one-line content if no explicit line breaks remain.
+        if not lines_out:
+            one = _sanitize_ocr_fragment(cleaned)
+            one = re.sub(r"\s+", " ", one).strip()
+            if one:
+                lines_out.append(one)
+        return lines_out
 
-        def _parse_json_payload(raw: str) -> list[str]:
-            if not raw:
-                return []
-            raw_str = str(raw).strip()
-            if not raw_str:
-                return []
-
-            candidates: list[list[str]] = []
-
-            def _score(lines: list[str]) -> tuple[int, int]:
-                return (len(lines), sum(len(x) for x in lines))
-
-            def _push(lines: list[str]) -> None:
-                if not lines:
-                    return
-                filtered = _filter_prompt_lines(lines)
-                if filtered:
-                    candidates.append(filtered)
-
-            def _unwrap_obj(obj: object) -> object:
-                if isinstance(obj, str):
-                    inner = obj.strip()
-                    if inner.startswith("{") or inner.startswith("["):
-                        try:
-                            return json.loads(inner)
-                        except Exception:
-                            return obj
-                return obj
-
-            def _try_obj(obj: object) -> None:
-                obj = _unwrap_obj(obj)
-                extracted = _extract_from_obj(obj)
-                if extracted:
-                    _push(extracted)
-
-            try:
-                _try_obj(json.loads(raw_str))
-            except Exception:
-                # Best-effort attempt to parse the entire payload as JSON; if this fails,
-                # continue with incremental JSON fragment decoding below.
-                # Attempt full JSON parse; if this fails, continue with incremental decoding
-                pass
-
-            decoder = json.JSONDecoder()
-            idx = 0
-            length = len(raw_str)
-            while idx < length:
-                next_brace = raw_str.find("{", idx)
-                next_bracket = raw_str.find("[", idx)
-                if next_brace == -1 and next_bracket == -1:
-                    break
-                if next_brace == -1:
-                    start = next_bracket
-                elif next_bracket == -1:
-                    start = next_brace
-                else:
-                    start = min(next_brace, next_bracket)
-                try:
-                    obj, end = decoder.raw_decode(raw_str[start:])
-                    _try_obj(obj)
-                    idx = start + (end if end > 0 else 1)
-                except Exception:
-                    idx = start + 1
-            # line-level JSON
-            for line in raw_str.splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                if not (line.startswith("{") and ("\"lines\"" in line or "\"text\"" in line or "'lines'" in line or "'text'" in line)):
-                    continue
-                try:
-                    _try_obj(json.loads(line))
-                except Exception:
-                    continue
-            # try unescape JSON string content (e.g., \"lines\": ...)
-            if "\\\"" in raw_str and ("lines" in raw_str.lower() or "text" in raw_str.lower()):
-                try:
-                    unescaped = raw_str.encode("utf-8", "backslashreplace").decode("unicode_escape")
-                except Exception:
-                    unescaped = raw_str.replace("\\\"", "\"").replace("\\\\", "\\")
-                if unescaped and unescaped != raw_str:
-                    try:
-                        _try_obj(json.loads(unescaped))
-                    except Exception:
-                        # Attempt JSON parse on unescaped payload; if this fails, continue with regex extraction
-                        pass
-                    # try regex extraction on unescaped payload
-                    raw_str = unescaped
-            # regex fallback for malformed JSON (e.g., unescaped newlines in strings)
-            low = raw_str.lower()
-            if "\"lines\"" in low or "'lines'" in low:
-                match_body = None
-                m = re.search(r"[\"']lines[\"']\s*:\s*\[(.*?)]", raw_str, flags=re.S)
-                if m:
-                    match_body = m.group(1)
-                target = match_body if match_body is not None else raw_str
-                matches = re.findall(r"\"((?:\\.|[^\"\\])*)\"", target, flags=re.S)
-                if not matches:
-                    matches = re.findall(r"'((?:\\.|[^'\\])*)'", target, flags=re.S)
-                if matches:
-                    out: list[str] = []
-                    for m in matches:
-                        if m.lower() in ("lines", "text"):
-                            continue
-                        try:
-                            # unescape JSON string content
-                            decoded = json.loads(f"\"{m.replace('\"', '\\\"')}\"")
-                        except Exception:
-                            decoded = m
-                        out.extend(_split_text_value(decoded))
-                    _push(out)
-            if candidates:
-                candidates.sort(key=_score, reverse=True)
-                return candidates[0]
+    def _split_glm_compound_line(self, line: str) -> List[str]:
+        """
+        尝试拆分 GLM 把「短标题 + 长正文」误并为一行的情况。
+        仅做保守拆分，避免误切正常句子。
+        """
+        s = str(line or "").strip()
+        if not s:
             return []
 
-        parsed_lines = _parse_json_payload(cleaned)
-        if parsed_lines:
-            return parsed_lines
+        if len(s) < 48:
+            return [s]
+        if not re.search(r"[.!?…]", s):
+            return [s]
 
-        lines = [line.strip() for line in cleaned.splitlines() if line.strip()]
-        cleaned_lines: list[str] = []
-        for line in lines:
-            normalized = re.sub(r"^([-*•]\s+|\d+[.)]\s+)", "", line).strip()
-            if normalized:
-                cleaned_lines.append(normalized)
-        cleaned_lines = _filter_prompt_lines(cleaned_lines)
-        if cleaned_lines and len(cleaned_lines) == 1:
-            candidate = cleaned_lines[0].strip()
-            if candidate.startswith("{") and ("\"lines\"" in candidate or "\"text\"" in candidate):
-                parsed_again = _parse_json_payload(candidate)
-                if parsed_again:
-                    return parsed_again
-        return cleaned_lines
+        # 例： "Luuk Herssen The Academy has its theories..."
+        m = re.match(
+            r"^([A-Z][A-Za-z'’\-]{1,24}(?:\s+[A-Z][A-Za-z'’\-]{1,24}){0,3})\s+([A-Z].+)$",
+            s,
+        )
+        if not m:
+            return [s]
+
+        title = m.group(1).strip()
+        body = m.group(2).strip()
+        if not title or not body:
+            return [s]
+
+        title_words = title.split()
+        if len(title_words) > 4:
+            return [s]
+        if len(body) < 30:
+            return [s]
+        if not re.search(r"[.!?…]", body):
+            return [s]
+
+        # 避免拆分普通句首（如 "The Academy ..."）
+        low = {w.lower() for w in title_words}
+        common_sentence_starters = {
+            "the", "a", "an", "this", "that", "these", "those", "there", "here",
+            "when", "while", "if", "after", "before", "in", "on", "at", "from",
+            "to", "for", "with", "without", "and", "or", "but",
+        }
+        if low & common_sentence_starters:
+            return [s]
+
+        return [title, body]
 
     def _glm_build_boxes(self, lines: List[str]) -> List[Dict[str, object]]:
         if not lines:
@@ -876,12 +698,28 @@ class OCREngine:
             self._set_glm_ollama_error("输入转换失败")
             return []
 
-        payload = {
+        b64_img = base64.b64encode(image_bytes).decode("ascii")
+
+        # glm-ocr uses a custom RENDERER/PARSER in Ollama and requires
+        # /api/generate (not /api/chat which triggers GGML_ASSERT crashes).
+        # Ollama 0.17+ auto-reduces num_ctx based on VRAM; glm-ocr's MRoPE
+        # fails when num_ctx < 8192 – always force a safe minimum.
+        # (ollama/ollama issues #14171 / #14401)
+        payload: Dict[str, Any] = {
             "model": self.glm_ollama_model,
             "prompt": self.glm_prompt,
-            "images": [base64.b64encode(image_bytes).decode("ascii")],
+            "images": [b64_img],
             "stream": False,
+            "options": {"num_ctx": 8192},
         }
+        try:
+            max_tokens = int(self.glm_max_tokens or 0)
+        except Exception:
+            max_tokens = 0
+        if max_tokens > 0:
+            payload["options"]["num_predict"] = max_tokens
+            self._emit_log(f"[OCR] GLM num_predict={max_tokens}")
+
         url = f"{self.glm_endpoint}/api/generate"
         req = urllib.request.Request(
             url,
@@ -916,11 +754,12 @@ class OCREngine:
                 self._emit_log(f"[OCR] GLM-OCR 错误：{response_obj.get('error')}")
                 self._set_glm_ollama_error("响应错误", Exception(str(response_obj.get("error"))))
                 return []
-            text = response_obj.get("response") or response_obj.get("message") or ""
+            text = response_obj.get("response", "")
         else:
             text = raw
 
         lines = self._glm_extract_lines(text)
+
         if not lines:
             self._set_glm_ollama_error("输出解析为空")
             return []
@@ -1903,10 +1742,25 @@ class OCREngine:
         image_path: str | Path,
         backend: str | None = None,
     ) -> List[Tuple[str, float]]:
-        box_lines = self.recognize_with_boxes(image_path, backend=backend)
-        if not box_lines:
-            return []
-        return group_ocr_lines(box_lines, lang=self.lang)
+        return self.recognize_pipeline(image_path, backend=backend).lines
+
+    def recognize_pipeline(
+        self,
+        image_input: Union[str, Path, Any],
+        prefer_tesseract: bool = False,
+        backend: str | None = None,
+    ) -> OcrPipelineResult:
+        boxes = self.recognize_with_boxes(
+            image_input,
+            prefer_tesseract=prefer_tesseract,
+            backend=backend,
+        )
+        lines = group_ocr_lines(boxes, lang=self.lang) if boxes else []
+        return OcrPipelineResult(
+            boxes=boxes,
+            lines=lines,
+            backend=self.last_backend,
+        )
 
     def recognize_with_boxes(
         self,
@@ -2196,6 +2050,30 @@ class OCREngine:
         return best_lines
 
 
+def _sanitize_ocr_fragment(text: str) -> str:
+    """清洗 OCR 常见伪标签噪声（如 <br>/<span> 等样式标记）。"""
+    if not text:
+        return ""
+    s = str(text)
+    # 常见实体先解码
+    s = s.replace("&lt;", "<").replace("&gt;", ">").replace("&nbsp;", " ")
+    # 处理 HTML 实体形式
+    s = re.sub(r"(?i)&lt;\s*/?\s*br\s*/?&gt;", " ", s)
+    # 处理真实标签或半截标签（包含 <brthe 这类缺失 > 的情况）
+    s = re.sub(r"(?i)<\s*/?\s*br\s*/?>?", " ", s)
+    s = re.sub(r"(?i)</\s*br\s*>?", " ", s)
+    # 清理 span 标签（含缺失 > 的脏数据）
+    s = re.sub(r"(?is)</\s*span\s*>?", " ", s)
+    s = re.sub(r"(?is)<\s*span\b[^<>]*[\"']\s*", " ", s)  # malformed opener like <span ...;"text
+    s = re.sub(r"(?is)<\s*span\b[^>]*>", " ", s)
+    s = re.sub(r"(?is)</\s*span\b", " ", s)
+    # 兜底清理常规 HTML 风格标签（仅字母开头，避免误删 <0> 占位）
+    s = re.sub(r"(?is)<\s*/?\s*[a-z][a-z0-9:_-]*(?:\s+[^<>]*)?>", " ", s)
+    s = s.replace("<span", " ").replace("</span", " ")
+    s = re.sub(r"\s+", " ", s)
+    return s
+
+
 def group_ocr_lines(box_lines: List[Dict[str, object]], lang: str = "en") -> List[Tuple[str, float]]:
     """
     对 OCR 原始结果进行几何分行。
@@ -2211,7 +2089,7 @@ def group_ocr_lines(box_lines: List[Dict[str, object]], lang: str = "en") -> Lis
     merged_lines: List[List[Dict[str, Any]]] = []
     
     for item in lines_sorted:
-        text = str(item.get("text", "")).strip()
+        text = _sanitize_ocr_fragment(str(item.get("text", ""))).strip()
         if not text:
             continue
             
@@ -2293,11 +2171,11 @@ def group_ocr_lines(box_lines: List[Dict[str, object]], lang: str = "en") -> Lis
             # No, within paragraph logic, lines are ordered Y, words ordered X.
             # Concatenation is correct reading order.
             
-            valid_items = [t for t in all_items if str(t.get("text", "")).strip()]
+            valid_items = [t for t in all_items if _sanitize_ocr_fragment(str(t.get("text", ""))).strip()]
             if not valid_items:
                 continue
                 
-            tokens = [str(t.get("text", "")).strip() for t in valid_items]
+            tokens = [_sanitize_ocr_fragment(str(t.get("text", ""))).strip() for t in valid_items]
             full_text = " ".join(tokens)
             
             confs = [float(t.get("conf", 1.0)) for t in valid_items]

@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Dict, Iterable, Tuple, Any
 
 from ludiglot.core.voice_map import build_voice_map_from_configdb
-from ludiglot.core.wwise_hash import WwiseHash
 
 
 
@@ -17,12 +16,185 @@ def normalize_en(text: str) -> str:
 
 _TAG_RE = re.compile(r"</?[^>]+>")
 _BRACE_RE = re.compile(r"\{[^}]+\}")
+_PRINTABLE_ASCII_RE = re.compile(rb"[\x20-\x7E]{4,}")
+_TEXT_KEY_TOKEN_RE = re.compile(r"^[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9.]+)+$")
+
+# 性别占位符正则：匹配 {Male=xxx;Female=yyy} 或 {Female=xxx;Male=yyy} 格式
+_GENDER_PLACEHOLDER_RE = re.compile(
+    r"\{(?:Male=([^;]+);Female=([^}]+)|Female=([^;]+);Male=([^}]+))\}",
+    re.IGNORECASE
+)
+_PLAYER_NAME_PLACEHOLDER_RE = re.compile(
+    r"\{PlayerName\}|\{Cus:Var,\s*VarType=Global\s+Key=main_team_name\}",
+    re.IGNORECASE,
+)
+
+
+def expand_player_name_placeholder(text: str, player_name: str) -> str:
+    return _PLAYER_NAME_PLACEHOLDER_RE.sub(player_name, text)
+
+
+def has_player_name_placeholder(text: str) -> bool:
+    return bool(_PLAYER_NAME_PLACEHOLDER_RE.search(text))
+
+
+def _strip_remaining_placeholders(text: str) -> str:
+    return _BRACE_RE.sub("", _TAG_RE.sub("", text))
+
+
+def _add_unique(items: list[str], value: str) -> None:
+    if value and value not in items:
+        items.append(value)
+
+
+
+def expand_gender_placeholder(text: str, gender: str) -> str:
+    """
+    将性别占位符展开为具体的性别变体。
+    
+    参数:
+        text: 原始文本，可能包含 {Male=He;Female=She} 格式的占位符
+        gender: "male" 或 "female"
+    
+    返回:
+        展开后的文本
+    """
+    def replace_match(m):
+        # 匹配格式：{Male=xxx;Female=yyy} 或 {Female=xxx;Male=yyy}
+        male_first, female_first = m.group(1), m.group(2)
+        female_second, male_second = m.group(3), m.group(4)
+        
+        if male_first is not None:
+            # 格式: {Male=xxx;Female=yyy}
+            return male_first if gender == "male" else female_first
+        else:
+            # 格式: {Female=xxx;Male=yyy}
+            return male_second if gender == "male" else female_second
+    
+    return _GENDER_PLACEHOLDER_RE.sub(replace_match, text)
+
+
+def has_gender_placeholder(text: str) -> bool:
+    """检查文本是否包含性别占位符。"""
+    return bool(_GENDER_PLACEHOLDER_RE.search(text))
 
 
 def clean_en_text(text: str) -> str:
     text = _TAG_RE.sub("", text)
     text = _BRACE_RE.sub("", text)
     return text
+
+
+def _iter_utf16le_ascii_runs(blob: bytes, min_len: int = 4) -> Iterable[str]:
+    run: list[str] = []
+    i = 0
+    n = len(blob)
+    while i + 1 < n:
+        lo = blob[i]
+        hi = blob[i + 1]
+        if hi == 0 and 32 <= lo <= 126:
+            run.append(chr(lo))
+        else:
+            if len(run) >= min_len:
+                yield "".join(run)
+            run.clear()
+        i += 2
+    if len(run) >= min_len:
+        yield "".join(run)
+
+
+def _extract_blob_text_candidates(blob: bytes) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+
+    for m in _PRINTABLE_ASCII_RE.finditer(blob):
+        s = m.group(0).decode("ascii", errors="ignore").strip()
+        if not s:
+            continue
+        if len(s) > 240:
+            continue
+        if all(ch in "0123456789abcdefABCDEF" for ch in s) and len(s) >= 8:
+            continue
+        if s not in seen:
+            seen.add(s)
+            out.append(s)
+
+    for s in _iter_utf16le_ascii_runs(blob):
+        s = s.strip()
+        if not s or len(s) > 240:
+            continue
+        if s not in seen:
+            seen.add(s)
+            out.append(s)
+
+    return out
+
+
+def _is_probably_human_text(text: str) -> bool:
+    if len(text) < 12:
+        return False
+    if any(sep in text for sep in ("/", "\\", "\t", "\n", "\r")):
+        return False
+    low = text.lower()
+    if low.startswith("game/") or low.endswith((".uasset", ".png", ".jpg", ".atlas")):
+        return False
+    words = [w for w in text.split(" ") if w]
+    if len(words) < 3:
+        return False
+    letters = sum(ch.isalpha() for ch in text)
+    if letters < 8:
+        return False
+    return True
+
+
+def _is_text_key_like(text: str) -> bool:
+    if not text or " " in text:
+        return False
+    if any(sep in text for sep in ("/", "\\", "\t", "\n", "\r")):
+        return False
+    if len(text) < 8 or len(text) > 160:
+        return False
+    low = text.lower()
+    if any(hint in low for hint in ("_text", "_title", "_name", "_desc", "summary")):
+        return True
+    return bool(_TEXT_KEY_TOKEN_RE.fullmatch(text))
+
+
+def _pick_text_from_blob(blob: bytes) -> str | None:
+    candidates = _extract_blob_text_candidates(blob)
+    if not candidates:
+        return None
+
+    human_candidates = [c for c in candidates if _is_probably_human_text(c)]
+    if human_candidates:
+        human_candidates.sort(key=lambda s: (len(s.split()), len(s)), reverse=True)
+        return human_candidates[0]
+
+    key_candidates = [c for c in candidates if _is_text_key_like(c)]
+    if key_candidates:
+        def _key_score(s: str) -> tuple[int, int]:
+            low = s.lower()
+            if "title" in low:
+                pri = 4
+            elif "name" in low:
+                pri = 3
+            elif "summary" in low:
+                pri = 2
+            elif "describe" in low or "desc" in low:
+                pri = 1
+            elif "_text" in low:
+                pri = 0
+            else:
+                pri = -1
+            return pri, len(s)
+
+        key_candidates.sort(
+            key=_key_score,
+            reverse=True,
+        )
+        return key_candidates[0]
+
+    return None
 
 
 def _extract_map(obj: object) -> Dict[str, str]:
@@ -93,228 +265,129 @@ def _load_sqlite_map(path: Path) -> Dict[str, str]:
                 # 即使截断，sqlite3 有时也能读到前面的数据，继续尝试
 
         conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        try:
+            cursor = conn.cursor()
 
-        cursor = conn.cursor()
-        
-        # 探测表名
-        cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
-        tables = [r[0] for r in cursor.fetchall()]
-        if not tables:
-            return {}
-        
-        # 优先使用 lang_text 或通用表名
-        table_name = None
-        for cand in ["Table", "data", "lang_text", "text"]:
-            if cand in tables:
-                table_name = cand
-                break
-        if not table_name: table_name = tables[0]
-
-        # 探测列名
-        cursor.execute(f"PRAGMA table_info({table_name})")
-        cols = {r[1].lower(): r[1] for r in cursor.fetchall()}
-        
-        id_col = cols.get("textid") or cols.get("textmapid") or cols.get("key") or cols.get("id")
-        text_col = cols.get("text") or cols.get("content") or cols.get("value")
-        
-        if not id_col or not text_col:
-            # 这种情况下尝试猜测第一列和第二列
-            cursor.execute(f"SELECT * FROM {table_name} LIMIT 1")
-            row = cursor.fetchone()
-            if row and len(row) >= 2:
-                id_col = list(cols.values())[0]
-                text_col = list(cols.values())[1]
-            else:
+            # 探测表名
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            tables = [r[0] for r in cursor.fetchall()]
+            if not tables:
                 return {}
 
-        cursor.execute(f"SELECT {id_col}, {text_col} FROM {table_name}")
-        mapping = {str(r[0]): str(r[1]) for r in cursor.fetchall() if r[0] and r[1]}
-        conn.close()
-        return mapping
+            # 优先语言常见表，但会遍历所有表
+            preferred = ["Table", "data", "lang_text", "text", "MultiText"]
+            table_order = [t for t in preferred if t in tables] + [t for t in tables if t not in preferred]
+
+            mapping: Dict[str, str] = {}
+
+            for table_name in table_order:
+                try:
+                    cursor.execute(f"PRAGMA table_info({table_name})")
+                    cols_info = cursor.fetchall()
+                except Exception:
+                    continue
+
+                if not cols_info:
+                    continue
+
+                cols = {r[1].lower(): r[1] for r in cols_info}
+                decl_types = {r[1].lower(): (r[2] or "") for r in cols_info}
+
+                id_col = cols.get("textid") or cols.get("textmapid") or cols.get("key") or cols.get("id")
+                text_col = cols.get("text") or cols.get("content") or cols.get("value")
+                blob_col = next(
+                    (r[1] for r in cols_info if "blob" in (r[2] or "").lower() or r[1].lower() == "bindata"),
+                    None,
+                )
+
+                # 1) 标准文本表（优先）
+                if id_col and text_col and "blob" not in decl_types.get(text_col.lower(), "").lower():
+                    try:
+                        cursor.execute(f"SELECT {id_col}, {text_col} FROM {table_name}")
+                        for k, v in cursor.fetchall():
+                            if k is None or v is None or isinstance(v, (bytes, bytearray)):
+                                continue
+                            text = str(v).strip()
+                            if not text:
+                                continue
+                            mapping.setdefault(str(k), text)
+                    except Exception:
+                        pass
+                    continue
+
+                # 2) BinData/FlatBuffers 启发式提取
+                if id_col and blob_col:
+                    try:
+                        cursor.execute(f"SELECT {id_col}, {blob_col} FROM {table_name}")
+                        for k, blob in cursor.fetchall():
+                            if k is None or not isinstance(blob, (bytes, bytearray)):
+                                continue
+                            picked = _pick_text_from_blob(blob)
+                            if picked:
+                                mapping.setdefault(str(k), picked)
+                    except Exception:
+                        pass
+                    continue
+
+                # 3) 极端兜底：猜测前两列是 key/value
+                if len(cols_info) >= 2:
+                    c0 = cols_info[0][1]
+                    c1 = cols_info[1][1]
+                    c1_type = (cols_info[1][2] or "").lower()
+                    if "blob" in c1_type:
+                        continue
+                    try:
+                        cursor.execute(f"SELECT {c0}, {c1} FROM {table_name}")
+                        for k, v in cursor.fetchall():
+                            if k is None or v is None or isinstance(v, (bytes, bytearray)):
+                                continue
+                            text = str(v).strip()
+                            if not text:
+                                continue
+                            mapping.setdefault(str(k), text)
+                    except Exception:
+                        pass
+
+            return mapping
+        finally:
+            conn.close()
     except Exception as e:
         print(f"警告: 无法读取 SQLite 数据库 {path.name}: {e}")
         return {}
 
 
 
-def _iter_items(payload: object) -> Iterable[dict]:
-    if isinstance(payload, list):
-        for item in payload:
-            if isinstance(item, dict):
-                yield item
-        return
-    if isinstance(payload, dict):
-        for key in ("Data", "data", "Items", "items", "List", "list"):
-            value = payload.get(key)
-            if isinstance(value, list):
-                for item in value:
-                    if isinstance(item, dict):
-                        yield item
-                return
-
-
 def load_plot_audio_map(data_root: Path) -> Dict[str, str]:
-    json_path = data_root / "ConfigDB" / "PlotAudio.json"
-    db_path = data_root / "ConfigDB" / "db_plot_audio.db"
-    
-    mapping: Dict[str, str] = {}
-    
-    # 1. 尝试 JSON
-    if json_path.exists():
-        try:
-            payload = json.loads(json_path.read_text(encoding="utf-8"))
-            for item in _iter_items(payload):
-                text_key = (
-                    item.get("TextKey")
-                    or item.get("TextMapId")
-                    or item.get("TextId")
-                    or item.get("Key")
-                    or item.get("Content")
-                )
-                file_name = (
-                    item.get("FileName")
-                    or item.get("AudioEventName")
-                    or item.get("AudioEvent")
-                    or item.get("Voice")
-                )
-                if text_key and file_name:
-                    mapping[str(text_key)] = str(file_name)
-        except Exception:
-            pass
-            
-    # 2. 尝试 SQLite
-    if db_path.exists():
-        try:
-            import sqlite3
-            import re
-            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-            cursor = conn.cursor()
-            cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
-            tables = [r[0] for r in cursor.fetchall()]
-            
-            # 匹配 vo_ 或 play_vo_ 开头的音频事件名（BLOB 扫描用）
-            audio_pat = re.compile(rb'(?:play_vo_|vo_)[a-zA-Z0-9_]{3,}')
-            
-            for tbl in tables:
-                cursor.execute(f"PRAGMA table_info({tbl})")
-                cols_info = cursor.fetchall()
-                cols = {r[1].lower(): r[1] for r in cols_info}
-                
-                # 寻找 ID 列
-                tk_col = cols.get("id") or cols.get("textkey") or cols.get("key") or cols.get("textmapid") or cols.get("textid") or cols.get("content")
-                
-                # 寻找音频列
-                fn_col = cols.get("filename") or cols.get("audioeventname") or cols.get("audioevent") or cols.get("voice")
-                
-                # 寻找 BLOB 列
-                blob_col = next((c[1] for c in cols_info if "blob" in (c[2] or "").lower() or c[1].lower() == "bindata"), None)
-                
-                if tk_col:
-                    if fn_col:
-                        # 情况 A：存在平铺列
-                        cursor.execute(f"SELECT {tk_col}, {fn_col} FROM {tbl}")
-                        for r in cursor.fetchall():
-                            if r[0] and r[1]:
-                                mapping[str(r[0])] = str(r[1])
-                                
-                    if blob_col and (not fn_col or tbl.lower() == "plotaudio"):
-                        # 情况 B：扫描 BLOB (针对 plotaudio 表或缺失平铺列的情况)
-                        cursor.execute(f"SELECT {tk_col}, {blob_col} FROM {tbl}")
-                        for tid, blob in cursor.fetchall():
-                            if not tid or not isinstance(blob, (bytes, bytearray)):
-                                continue
-                            matches = audio_pat.findall(blob)
-                            if matches:
-                                event_name = matches[0].decode('ascii', errors='ignore').strip()
-                                if event_name:
-                                    mapping[str(tid)] = event_name
-            conn.close()
-        except Exception:
-            pass
-            
-    return mapping
+    from ludiglot.adapters.wuthering_waves.data_mapper import WutheringDataMapper
 
-# The old logic is replaced by the updated load_plot_audio_map
-
-
-def _parse_event_name(value: str) -> str:
-    segment = value.rsplit("/", 1)[-1]
-    if "." in segment:
-        segment = segment.split(".")[-1]
-    return segment
-
+    return WutheringDataMapper(data_root).load_plot_audio_map()
 
 def _resolve_audio_hash(
     text_key: str,
     plot_audio: Dict[str, str] | None,
     voice_map: Dict[str, list[str]] | None,
 ) -> tuple[str | None, str | None]:
+    from ludiglot.adapters.wuthering_waves.audio_strategy import WutheringAudioStrategy
+
+    strategy = WutheringAudioStrategy()
     event_name: str | None = None
     if plot_audio and text_key in plot_audio:
         event_name = plot_audio[text_key]
     elif voice_map and text_key in voice_map and voice_map[text_key]:
         event_name = voice_map[text_key][0]
     if event_name:
-        event_name = _parse_event_name(event_name)
+        event_name = strategy.parse_event_name(event_name)
     else:
         event_name = f"vo_{text_key}"
-    audio_hash = WwiseHash().hash_str(event_name)
+    audio_hash = str(strategy.hash_name(event_name))
     return audio_hash, event_name
 
 
-def _candidate_paths(root: Path, rel_paths: Iterable[str]) -> list[Path]:
-    return [root / rel for rel in rel_paths]
-
-
 def find_multitext_paths(data_root: Path) -> Tuple[Path, Path]:
-    candidates_en = _candidate_paths(
-        data_root,
-        [
-            "ConfigDB/en/lang_text.db",
-            "TextMap/en/MultiText.json",
-            "TextMap/en/Multitext.json",
-        ],
-    )
-    candidates_zh = _candidate_paths(
-        data_root,
-        [
-            "ConfigDB/zh-Hans/lang_text.db",
-            "TextMap/zh-Hans/MultiText.json",
-            "TextMap/zh-CN/MultiText.json",
-            "TextMap/zh-Hans/Multitext.json",
-        ],
-    )
-    en_path = next((p for p in candidates_en if p.exists()), None)
-    zh_path = next((p for p in candidates_zh if p.exists()), None)
+    from ludiglot.adapters.wuthering_waves.data_mapper import WutheringDataMapper
 
-
-    if en_path is None or zh_path is None:
-        # 兜底：在 TextMap 下搜索 MultiText.json
-        text_map_root = data_root / "TextMap"
-        if text_map_root.exists():
-            for path in text_map_root.rglob("MultiText*.json"):
-                rel = path.as_posix().lower()
-                if "textmap/en" in rel and en_path is None:
-                    en_path = path
-                if "textmap/zh" in rel and zh_path is None:
-                    zh_path = path
-                if en_path and zh_path:
-                    break
-
-    if en_path is None or zh_path is None:
-        raise FileNotFoundError(
-            f"无法在所选目录中找到游戏文本数据 ({data_root})\n\n"
-            "诊断细节:\n"
-            f"- 英文路径匹配: {candidates_en[0] if candidates_en else 'N/A'}\n"
-            f"- 中文路径匹配: {candidates_zh[0] if candidates_zh else 'N/A'}\n\n"
-            "建议解决方法:\n"
-            "1. 请确保您已克隆 WutheringData (https://github.com/Dimbreath/WutheringData)\n"
-            "2. 检查 config/settings.json 中的 'data_root' 是否指向正确的路径\n"
-            "3. 如果您是手动下载的，请确保保留了 TextMap/en/MultiText.json 这种目录结构\n"
-            "详情请参阅 docs/DataManagement.md"
-        )
-    return en_path, zh_path
-
+    paths = WutheringDataMapper(data_root).parse()
+    return paths.en_text, paths.zh_text
 
 def build_text_db_from_root(data_root: Path) -> Dict[str, dict]:
     en_json, zh_json = find_multitext_paths(data_root)
@@ -324,22 +397,23 @@ def build_text_db_from_root(data_root: Path) -> Dict[str, dict]:
 
 
 def build_text_db_from_root_all(data_root: Path) -> Dict[str, dict]:
-    # 语言对定义
-    langs = [("en", "zh-Hans"), ("en", "zh-CN")]
-    
-    # 探测可能的数据目录
-    roots = [
-        data_root / "ConfigDB",
-        data_root / "Client" / "Content" / "Aki" / "ConfigDB",
-        data_root / "TextMap",
-        data_root / "Client" / "Content" / "Aki" / "TextMap",
-    ]
+    from ludiglot.adapters.wuthering_waves.data_mapper import WutheringDataMapper
+
+    mapper = WutheringDataMapper(data_root)
+    roots = mapper.text_source_roots()
 
     plot_audio = load_plot_audio_map(data_root)
     # 启用缓存，确保 voice_map 可读
     cache_path = data_root.parent / "cache" / "voice_map_v6.json"
     voice_map = build_voice_map_from_configdb(data_root, cache_path=cache_path)
     db: Dict[str, dict] = {}
+
+    def merge_partial(partial: Dict[str, dict]) -> None:
+        for key, payload in partial.items():
+            if key not in db:
+                db[key] = payload
+            else:
+                db[key]["matches"].extend(payload.get("matches", []))
 
     def scan_pair(en_dir: Path, zh_dir: Path):
         if not en_dir.exists() or not zh_dir.exists():
@@ -352,18 +426,30 @@ def build_text_db_from_root_all(data_root: Path) -> Dict[str, dict]:
                     continue
                 try:
                     partial = build_text_db(en_path, zh_path, plot_audio=plot_audio, voice_map=voice_map)
-                    for key, payload in partial.items():
-                        if key not in db:
-                            db[key] = payload
-                        else:
-                            db[key]["matches"].extend(payload.get("matches", []))
+                    merge_partial(partial)
                 except Exception:
                     continue
 
     for r in roots:
         if not r.exists(): continue
-        for en, zh in langs:
-            scan_pair(r / en, r / zh)
+        for pair in mapper.language_pairs:
+            scan_pair(r / pair.en, r / pair.zh)
+
+    for db_path in mapper.root_blob_db_paths():
+        try:
+            en_map = _load_sqlite_map(db_path)
+            if not en_map:
+                continue
+            partial = build_text_db_from_maps(
+                en_map,
+                {},
+                db_path.name,
+                plot_audio=plot_audio,
+                voice_map=voice_map,
+            )
+            merge_partial(partial)
+        except Exception:
+            continue
 
     # 兜底：如果完全没有扫到，或者扫出的是空的，尝试使用 MultiText 逻辑兜底
     if not db:
@@ -410,15 +496,6 @@ def build_text_db_from_maps(
         if not isinstance(zh_text, str):
             zh_text = ""
 
-        cleaned_en = clean_en_text(en_text) if en_text else ""
-        cleaned_zh = clean_en_text(zh_text) if zh_text else ""
-
-        key_en = normalize_en(cleaned_en) if cleaned_en else ""
-        key_zh = normalize_en(cleaned_zh) if cleaned_zh else ""
-
-        if not key_en and not key_zh:
-            continue
-
         audio_hash, audio_event = _resolve_audio_hash(text_key, plot_audio, voice_map)
         match = {
             "text_key": text_key,
@@ -431,8 +508,49 @@ def build_text_db_from_maps(
             "terms": [],
         }
 
-        add_match(key_en, text_key, match)
-        add_match(key_zh, text_key, match)
+        # 生成规范化键列表
+        keys_to_add: list[str] = []
+        
+        # 原有逻辑：清理HTML标签和所有花括号占位符
+        cleaned_en = clean_en_text(en_text) if en_text else ""
+        cleaned_zh = clean_en_text(zh_text) if zh_text else ""
+        
+        key_en = normalize_en(cleaned_en) if cleaned_en else ""
+        key_zh = normalize_en(cleaned_zh) if cleaned_zh else ""
+        
+        if key_en:
+            _add_unique(keys_to_add, key_en)
+        if key_zh:
+            _add_unique(keys_to_add, key_zh)
+
+        if en_text and has_player_name_placeholder(en_text):
+            for player_name in ("Rover", ""):
+                expanded = expand_player_name_placeholder(en_text, player_name)
+                expanded_key = normalize_en(_strip_remaining_placeholders(expanded))
+                _add_unique(keys_to_add, expanded_key)
+        if zh_text and has_player_name_placeholder(zh_text):
+            for player_name in ("漂泊者", ""):
+                expanded = expand_player_name_placeholder(zh_text, player_name)
+                expanded_key = normalize_en(_strip_remaining_placeholders(expanded))
+                _add_unique(keys_to_add, expanded_key)
+
+        # 新增：为包含性别占位符的文本生成 male 和 female 变体的键
+        if en_text and has_gender_placeholder(en_text):
+            for gender in ("male", "female"):
+                expanded = expand_gender_placeholder(en_text, gender)
+                expanded_key = normalize_en(_strip_remaining_placeholders(expanded))
+                _add_unique(keys_to_add, expanded_key)
+        if zh_text and has_gender_placeholder(zh_text):
+            for gender in ("male", "female"):
+                expanded = expand_gender_placeholder(zh_text, gender)
+                expanded_key = normalize_en(_strip_remaining_placeholders(expanded))
+                _add_unique(keys_to_add, expanded_key)
+        
+        if not keys_to_add:
+            continue
+
+        for k in keys_to_add:
+            add_match(k, text_key, match)
     return db
 
 

@@ -46,8 +46,9 @@
 1. **环境准备**：确保安装了 Python 3.10+。
 2. **克隆项目**：`git clone ...`
 3. **一键初始化**：运行 `.\setup.ps1`（创建虚拟环境、安装依赖）。
-4. **解包数据**：运行后在菜单点击 "Update Database" 或执行 `python -m ludiglot pak-update`。
-5. **启动程序**：执行 `.\run.ps1` (PowerShell) 或 `run.bat` (CMD)。
+4. **配置游戏路径**：编辑 `config/settings.json` 的 `game_install_root`、区服和语言。
+5. **完全重建数据**：执行 `.\.venv\Scripts\python.exe -m ludiglot pak-update`。
+6. **启动程序**：执行 `.\run.ps1` (PowerShell) 或 `run.bat` (CMD)。
 
 *详见 **[快速开始指南](docs/usage/quick-start.md)** 获取完整步骤。*
 
@@ -77,7 +78,7 @@ Ludiglot/
 
 - 核心框架：[PyQt6](https://www.riverbankcomputing.com/software/pyqt/)
 - 资源提取：[FModelCLI](https://github.com/Herselfta/FModelCLI) (基于 [FModel](https://github.com/4sval/FModel) / [CUE4Parse](https://github.com/FabianFG/CUE4Parse))
-- 数据来源：[ClostroOffi/wuwa-aes-archive](https://github.com/ClostroOffi/wuwa-aes-archive)
+- 数据来源：[yarik0chka/wuwa-keys](https://github.com/yarik0chka/wuwa-keys)
 - 工具组件：`vgmstream`, `wwiser`, `PaddleOCR`
 
 ---

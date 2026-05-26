@@ -1,21 +1,18 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 import shutil
-import subprocess
 import sys
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Callable
 from urllib.request import urlopen
 
 from ludiglot.core.aes_archive import parse_aes_archive, select_keys, list_versions
 
 
-AES_ARCHIVE_URL = "https://raw.githubusercontent.com/ClostroOffi/wuwa-aes-archive/main/readme.md"
+AES_ARCHIVE_URL = "https://raw.githubusercontent.com/yarik0chka/wuwa-keys/main/keys.json"
 _PAKCHUNK_RE = re.compile(r"pakchunk[-_]?([0-9]+)", re.IGNORECASE)
 
 
@@ -27,6 +24,31 @@ class GamePakOptions:
     languages: list[str]
     audio_languages: list[str]
     extract_audio: bool
+
+
+@dataclass(frozen=True)
+class ExtractionStep:
+    filter: str
+    message: str
+    warn_on_failure: str | None = None
+
+
+@dataclass(frozen=True)
+class DirectoryMove:
+    source: Path
+    target: Path
+
+
+@dataclass(frozen=True)
+class GamePakUpdatePlan:
+    data_root: Path
+    extraction_steps: list[ExtractionStep]
+    directory_moves: list[DirectoryMove]
+    staged_fonts_dir: Path
+    fonts_target: Path
+    cleanup_paths: list[Path]
+    audio_wem_root: Path | None
+    audio_bnk_root: Path | None
 
 
 class GamePakUpdateError(RuntimeError):
@@ -141,6 +163,51 @@ def _match_paks(pak_dir: Path, pak_name: str) -> list[Path]:
         if pattern.lower() in path.name.lower():
             matches.append(path)
     return matches
+
+
+def build_game_pak_update_plan(data_root: Path, options: GamePakOptions) -> GamePakUpdatePlan:
+    staged_root = data_root / "Client" / "Content" / "Aki"
+    extraction_steps = [
+        ExtractionStep("Config/Json", "[PAK] 正在提取通用配置 (Config/Json) ..."),
+        ExtractionStep("ConfigDB/", "[PAK] 正在提取通用配置数据库 (ConfigDB 根目录) ..."),
+    ]
+    for lang in options.languages:
+        extraction_steps.append(
+            ExtractionStep(
+                f"ConfigDB/{lang}",
+                f"[PAK] 正在提取 ConfigDB/{lang} ...",
+                f"[PAK] ⚠️  ConfigDB/{lang} 提取报告失败 (可能是 FModelCLI 返回码非0，但不影响整体流程)",
+            )
+        )
+    for lang in options.languages:
+        extraction_steps.append(
+            ExtractionStep(f"TextMap/{lang}", f"[PAK] 正在提取 TextMap/{lang} ...")
+        )
+    extraction_steps.append(ExtractionStep("UI/Framework/LGUI/Font/", "[PAK] 正在提取 Fonts ..."))
+    if options.extract_audio:
+        for audio_lang in options.audio_languages:
+            extraction_steps.extend(
+                [
+                    ExtractionStep(f"Event/{audio_lang}/", f"[PAK] 正在提取语音资源 ({audio_lang}) ..."),
+                    ExtractionStep(f"Media/{audio_lang}/", f"[PAK] 正在提取语音资源 ({audio_lang}) ..."),
+                    ExtractionStep(f"WwiseExternalSource/{audio_lang}_", f"[PAK] 正在提取语音资源 ({audio_lang}) ..."),
+                ]
+            )
+
+    media_lang = options.audio_languages[0] if options.audio_languages else "zh"
+    return GamePakUpdatePlan(
+        data_root=data_root,
+        extraction_steps=extraction_steps,
+        directory_moves=[
+            DirectoryMove(staged_root / folder, data_root / folder)
+            for folder in ("ConfigDB", "TextMap", "WwiseAudio_Generated", "Config")
+        ],
+        staged_fonts_dir=staged_root / "UI" / "Framework" / "LGUI" / "Font",
+        fonts_target=data_root / "Fonts",
+        cleanup_paths=[data_root / "Client", data_root / "Audio_Extract_Temp", data_root / "Audio"],
+        audio_wem_root=(data_root / "WwiseAudio_Generated" / "Media" / media_lang) if options.extract_audio else None,
+        audio_bnk_root=(data_root / "WwiseAudio_Generated" / "Event" / media_lang) if options.extract_audio else None,
+    )
 
 
 def _choose_options(entries, cfg) -> GamePakOptions:
@@ -270,94 +337,35 @@ def update_from_game_paks(cfg, config_path: Path, output_db_path: Path, progress
 
     keys_str = ";".join(aes_keys)
 
-    # 1. 解包通用配置数据
-    # 分离通用数据与语言特定数据，只提取必要文件
-    _log(progress, f"[PAK] 正在提取通用配置 (Config/Json) ...")
-    native_extractor.run_extraction(pak_root, keys_str, data_root, "Config/Json")
-    
-    _log(progress, f"[PAK] 正在提取通用配置数据库 (ConfigDB 根目录) ...")
-    # 提取 ConfigDB 根目录下的所有文件 (包含 .json 和 .db)
-    native_extractor.run_extraction(pak_root, keys_str, data_root, "ConfigDB/")
-    
-    # 2. 解包语言特定数据
-    for lang in options.languages:
-        _log(progress, f"[PAK] 正在提取 ConfigDB/{lang} ...")
-        filter_str = f"ConfigDB/{lang}"
-        success = native_extractor.run_extraction(pak_root, keys_str, data_root, filter_str)
-        if not success:
-            _log(progress, f"[PAK] ⚠️  ConfigDB/{lang} 提取报告失败 (可能是 FModelCLI 返回码非0，但不影响整体流程)")
-    
-    # TextMap Extraction (per language)
-    for lang in options.languages:
-        _log(progress, f"[PAK] 正在提取 TextMap/{lang} ...")
-        filter_str = f"TextMap/{lang}"
-        native_extractor.run_extraction(pak_root, keys_str, data_root, filter_str)
+    plan = build_game_pak_update_plan(data_root, options)
 
-    # Font Extraction
-    _log(progress, "[PAK] 正在提取 Fonts ...")
-    font_filter = "UI/Framework/LGUI/Font/"
-    native_extractor.run_extraction(pak_root, keys_str, data_root, font_filter)
+    for step in plan.extraction_steps:
+        _log(progress, step.message)
+        success = native_extractor.run_extraction(pak_root, keys_str, plan.data_root, step.filter)
+        if not success and step.warn_on_failure:
+            _log(progress, step.warn_on_failure)
 
-    # Audio Extraction (if requested)
     if options.extract_audio:
-        # 直接解包到 data_root，与 ConfigDB 逻辑保持一致
-        # FModel 会生成 Client/Content/Aki/WwiseAudio_Generated 结构
-        # 后续的移动逻辑会将其处理到 data 根目录
-        
-        for audio_lang in options.audio_languages:
-            _log(progress, f"[PAK] 正在提取语音资源 ({audio_lang}) ...")
-            
-            # 1. Localized Event/Media folders
-            native_extractor.run_extraction(pak_root, keys_str, data_root, f"Event/{audio_lang}/")
-            native_extractor.run_extraction(pak_root, keys_str, data_root, f"Media/{audio_lang}/")
-            
-            # 2. External Source with prefix
-            native_extractor.run_extraction(pak_root, keys_str, data_root, f"WwiseExternalSource/{audio_lang}_")
-            
-        _log(progress, f"[PAK] 语音资源提取完成...")
+        _log(progress, "[PAK] 语音资源提取完成...")
 
-    # 整理目录结构：将解包出来的深层目录移动到 data_root 根目录下
-    staged_root = data_root / "Client" / "Content" / "Aki"
-    
-    # 需要移动的文件夹列表
-    to_move = ["ConfigDB", "TextMap", "WwiseAudio_Generated", "Config"]
-    
-    for folder in to_move:
-        # Check staged text or audio folders
-        src = staged_root / folder
-        
-        if not src.exists():
+    for move in plan.directory_moves:
+        if not move.source.exists():
             continue
-            
-        if src.exists():
-            target = data_root / folder
-            if target.exists():
-                shutil.rmtree(target, ignore_errors=True)
-            shutil.move(str(src), str(target))
-            _log(progress, f"[PAK] 已同步 {folder} 到 {target}")
+        if move.target.exists():
+            shutil.rmtree(move.target, ignore_errors=True)
+        shutil.move(str(move.source), str(move.target))
+        _log(progress, f"[PAK] 已同步 {move.target.name} 到 {move.target}")
 
-    # 处理字体
-    staged_fonts_dir = staged_root / "UI" / "Framework" / "LGUI" / "Font"
-    if staged_fonts_dir.exists():
-        fonts_target = data_root / "Fonts"
-        fonts_target.mkdir(parents=True, exist_ok=True)
-        # 提取指定的字体并规范化命名为 .ttf
-        # 用户指定: H7GBKHeavy.ufont, LaguSansBold.ufont
-        for ufont in staged_fonts_dir.glob("*.ufont"):
+    if plan.staged_fonts_dir.exists():
+        plan.fonts_target.mkdir(parents=True, exist_ok=True)
+        for ufont in plan.staged_fonts_dir.glob("*.ufont"):
             ttf_name = ufont.stem + ".ttf"
-            target_file = fonts_target / ttf_name
+            target_file = plan.fonts_target / ttf_name
             shutil.move(str(ufont), str(target_file))
             _log(progress, f"[PAK] 已同步字体: {ufont.name} -> {ttf_name}")
 
-    # 清理多余的嵌套目录
-    # 既然已经同步到了 data 根目录，Client 及其子目录可以安全清理
-    shutil.rmtree(data_root / "Client", ignore_errors=True)
-    
-    # 清理旧版逻辑可能残留的临时目录
-    # 注意：不要删除 cfg.game_audio_root，因为那正是我们刚才同步的目标
-    shutil.rmtree(data_root / "Audio_Extract_Temp", ignore_errors=True)
-    shutil.rmtree(data_root / "Audio", ignore_errors=True)
-
+    for cleanup_path in plan.cleanup_paths:
+        shutil.rmtree(cleanup_path, ignore_errors=True)
 
     # 更新配置文件
     try:
@@ -371,12 +379,10 @@ def update_from_game_paks(cfg, config_path: Path, output_db_path: Path, progress
         raw["game_server"] = options.server
         raw["game_languages"] = options.languages
         raw["game_audio_languages"] = options.audio_languages
-        raw["fonts_root"] = _to_rel_path(config_path, data_root / "Fonts")
-        if options.extract_audio:
-            audio_root = cfg.game_audio_root or (data_root / "Audio")
-            media_lang = options.audio_languages[0] if options.audio_languages else "zh"
-            raw["audio_wem_root"] = _to_rel_path(config_path, data_root / "WwiseAudio_Generated" / "Media" / media_lang)
-            raw["audio_bnk_root"] = _to_rel_path(config_path, data_root / "WwiseAudio_Generated" / "Event" / media_lang)
+        raw["fonts_root"] = _to_rel_path(config_path, plan.fonts_target)
+        if options.extract_audio and plan.audio_wem_root and plan.audio_bnk_root:
+            raw["audio_wem_root"] = _to_rel_path(config_path, plan.audio_wem_root)
+            raw["audio_bnk_root"] = _to_rel_path(config_path, plan.audio_bnk_root)
         config_path.write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception:
         pass

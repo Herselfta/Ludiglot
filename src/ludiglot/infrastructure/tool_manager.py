@@ -13,6 +13,8 @@ class ToolManager:
         self.tools_dir = self.root_dir / "tools"
         self.fmodel_cli_exe = self.tools_dir / "FModelCLI.exe"
         
+        self.dev_fmodel_cli_path = Path("E:/FModelCLI/dist/FModelCLI.exe")
+
         # GitHub Release Info
         self.repo_owner = "Herselfta"
         self.repo_name = "FModelCLI"

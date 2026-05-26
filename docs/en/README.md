@@ -29,8 +29,8 @@
 1. **Prerequisites**: Python 3.10+ installed
 2. **Clone**: `git clone ...`
 3. **Setup**: Run `.\setup.ps1` (creates venv, installs dependencies)
-4. **Configure**: Edit `config/settings.json` with your game path
-5. **Extract Data**: Click "Update Database" in menu or run `python -m ludiglot pak-update`
+4. **Configure**: Edit `config/settings.json` with your game path, server, and languages
+5. **Rebuild Data**: Run `.\.venv\Scripts\python.exe -m ludiglot pak-update`
 6. **Run**: Execute `.\run.ps1`
 
 ---
@@ -65,7 +65,7 @@ This project is licensed under the [MIT License](../../LICENSE).
 
 - [PyQt6](https://www.riverbankcomputing.com/software/pyqt/) - GUI framework
 - [FModelCLI](https://github.com/Herselfta/FModelCLI) - Pak extraction (based on FModel/CUE4Parse)
-- [ClostroOffi/wuwa-aes-archive](https://github.com/ClostroOffi/wuwa-aes-archive) - AES keys
+- [yarik0chka/wuwa-keys](https://github.com/yarik0chka/wuwa-keys) - AES keys
 - [vgmstream](https://github.com/vgmstream/vgmstream) - Game audio decoder
 
 ---

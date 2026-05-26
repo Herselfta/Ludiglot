@@ -26,7 +26,7 @@ class WutheringAudioStrategy:
         candidates = []
         
         # 1. 处理显式提供的 voice_event
-        event_name = self._parse_event_name(voice_event)
+        event_name = self.parse_event_name(voice_event)
         if event_name:
             candidates.append(event_name)
             # 对于已经有明确事件名的情况，只添加基础的前缀变体，不盲目生成 nosub_xx
@@ -191,7 +191,7 @@ class WutheringAudioStrategy:
                 for p in prefixes:
                     candidates.append(f"{p}{swapped}")
 
-    def _parse_event_name(self, voice_event: str | None) -> str | None:
+    def parse_event_name(self, voice_event: str | None) -> str | None:
         if not voice_event:
             return None
         raw = voice_event.strip()
@@ -201,3 +201,6 @@ class WutheringAudioStrategy:
         if "." in segment:
             return segment.split(".")[-1]
         return segment
+
+    def _parse_event_name(self, voice_event: str | None) -> str | None:
+        return self.parse_event_name(voice_event)
