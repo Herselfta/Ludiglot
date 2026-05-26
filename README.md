@@ -24,6 +24,12 @@
 
 ---
 
+## 🖼️ 使用示例
+
+![Ludiglot 使用示例](docs/assets/usage-example.png)
+
+---
+
 ## 📚 项目文档 (Documentation)
 
 ### 📖 [用户手册 (User Guide)](docs/usage/)
