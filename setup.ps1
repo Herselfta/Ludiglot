@@ -473,13 +473,17 @@ if (Test-Path $fmodelCliPath) {
                 if (Test-Path $fmodelCliPath) {
                     Write-Host "    下载完成: $fmodelCliPath" -ForegroundColor Green
                 } else {
-                    Write-Host "    下载失败，请手动下载" -ForegroundColor Yellow
+                    Write-Host "    下载失败，请手动下载: https://github.com/Herselfta/FModelCLI/releases/latest" -ForegroundColor Yellow
+                    Write-Host "    下载 FModelCLI.exe 后放到: $fmodelCliPath" -ForegroundColor Yellow
                 }
             } catch {
-                Write-Host "    下载失败，请手动下载" -ForegroundColor Yellow
+                Write-Host "    下载失败，请手动下载: https://github.com/Herselfta/FModelCLI/releases/latest" -ForegroundColor Yellow
+                Write-Host "    下载 FModelCLI.exe 后放到: $fmodelCliPath" -ForegroundColor Yellow
             }
         } else {
             Write-Host "    已跳过下载 (可稍后在工具菜单触发或手动下载)" -ForegroundColor Gray
+            Write-Host "    手动下载: https://github.com/Herselfta/FModelCLI/releases/latest" -ForegroundColor Gray
+            Write-Host "    下载 FModelCLI.exe 后放到: $fmodelCliPath" -ForegroundColor Gray
         }
     }
 }

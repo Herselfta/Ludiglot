@@ -187,7 +187,11 @@ Wuthering Waves Game/
 
 通常不需要手动安装。Ludiglot 会自动准备 `tools/FModelCLI.exe`，FModelCLI 会自动管理 `tools/.data/vgmstream-cli.exe`。
 
-如果下载受限，请先检查网络代理或手动确认 `tools/` 目录是否可写。
+如果自动下载受限，请先检查网络代理或手动确认 `tools/` 目录是否可写。也可以手动下载：
+
+1. 打开 `https://github.com/Herselfta/FModelCLI/releases/latest`
+2. 下载 `FModelCLI.exe`
+3. 放到项目目录的 `tools/FModelCLI.exe`
 
 ### 重建后没有语音
 
