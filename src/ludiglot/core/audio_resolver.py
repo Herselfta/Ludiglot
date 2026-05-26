@@ -7,7 +7,11 @@ from pathlib import Path
 from typing import NamedTuple, Any, List
 
 from ludiglot.core.config import AppConfig
-from ludiglot.core.voice_map import _resolve_events_for_text_key
+from ludiglot.core.voice_map import (
+    _resolve_events_for_text_key,
+    build_voice_map_from_configdb,
+    collect_all_voice_event_names,
+)
 from ludiglot.core.voice_event_index import VoiceEventIndex
 from ludiglot.core.audio_mapper import AudioCacheIndex
 from ludiglot.adapters.wuthering_waves.audio_strategy import WutheringAudioStrategy
@@ -23,11 +27,44 @@ class AudioResolution(NamedTuple):
     event_name: str
     source_type: str  # 'cache', 'wem', 'bnk', 'unknown'
 
+
+_EVENT_INDEX_CACHE: dict[str, VoiceEventIndex] = {}
+
+
+def get_voice_event_index(config: AppConfig) -> VoiceEventIndex | None:
+    if not config.audio_bnk_root and not config.audio_txtp_cache:
+        return None
+
+    cache_path = config.audio_cache_path / "voice_event_index.json" if config.audio_cache_path else None
+    key = f"{config.audio_bnk_root}|{config.audio_txtp_cache}|{config.data_root}|{cache_path}"
+    cached = _EVENT_INDEX_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    voice_map = build_voice_map_from_configdb(config.data_root) if config.data_root else {}
+    extra_names = collect_all_voice_event_names(config.data_root, voice_map)
+    index = VoiceEventIndex(
+        bnk_root=config.audio_bnk_root,
+        txtp_root=config.audio_txtp_cache,
+        cache_path=cache_path,
+        extra_names=extra_names,
+    )
+    index.load_or_build()
+    _EVENT_INDEX_CACHE.clear()
+    _EVENT_INDEX_CACHE[key] = index
+    return index
+
+
 class AudioResolver:
-    def __init__(self, config: AppConfig, voice_event_index: VoiceEventIndex = None):
+    def __init__(
+        self,
+        config: AppConfig,
+        voice_event_index: VoiceEventIndex = None,
+        audio_index: AudioCacheIndex | None = None,
+    ):
         self.config = config
         self.strategy = WutheringAudioStrategy()
-        self._audio_index: AudioCacheIndex | None = None
+        self._audio_index: AudioCacheIndex | None = audio_index
         self._voice_event_index = voice_event_index
         self._cache_meta_loaded = False
         self._cache_meta: dict[str, dict[str, Any]] = {}
@@ -58,7 +95,7 @@ class AudioResolver:
             events = _resolve_events_for_text_key(text_key, self.config)
         
         if db_event:
-            clean_db_event = self.strategy._parse_event_name(db_event)
+            clean_db_event = self.strategy.parse_event_name(db_event)
             if clean_db_event and clean_db_event not in events:
                 # 如果是通过 text_key 解析出来的，保持其优先级。
                 # 数据库自带的 Event 放在 Stage 0 的末尾，作为参考而非绝对权威。
@@ -177,7 +214,7 @@ class AudioResolver:
     def _normalize_event_name(self, event_name: str | None) -> str:
         if not event_name:
             return ""
-        parsed = self.strategy._parse_event_name(event_name)
+        parsed = self.strategy.parse_event_name(event_name)
         if parsed:
             return parsed.strip().lower()
         return str(event_name).strip().lower()
@@ -256,7 +293,7 @@ class AudioResolver:
             except (TypeError, ValueError):
                 db_hash_int = None
 
-            fallback_event = self.strategy._parse_event_name(db_event) if db_event else None
+            fallback_event = self.strategy.parse_event_name(db_event) if db_event else None
             if not fallback_event:
                 fallback_event = final_candidates[0][0] if final_candidates else "unknown_from_db"
 

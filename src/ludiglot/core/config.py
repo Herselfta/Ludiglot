@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict
 
-from ludiglot.core.text_builder import find_multitext_paths
+from ludiglot.adapters.wuthering_waves.data_mapper import WutheringDataMapper
 
 
 @dataclass
@@ -146,9 +146,9 @@ def load_config(path: Path) -> AppConfig:
     # 只有在需要重建或者没有 DB 的时候，才强制要求 MultiText 路径
     if (not has_db or auto_rebuild) and (not en_json or not zh_json) and data_root and data_root.exists():
         try:
-            resolved_en, resolved_zh = find_multitext_paths(data_root)
-            en_json = en_json or str(resolved_en)
-            zh_json = zh_json or str(resolved_zh)
+            data_paths = WutheringDataMapper(data_root).parse()
+            en_json = en_json or str(data_paths.en_text)
+            zh_json = zh_json or str(data_paths.zh_text)
         except FileNotFoundError:
             if not has_db: raise
     

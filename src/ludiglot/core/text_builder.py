@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Dict, Iterable, Tuple, Any
 
 from ludiglot.core.voice_map import build_voice_map_from_configdb
-from ludiglot.core.wwise_hash import WwiseHash
 
 
 
@@ -358,183 +357,37 @@ def _load_sqlite_map(path: Path) -> Dict[str, str]:
 
 
 
-def _iter_items(payload: object) -> Iterable[dict]:
-    if isinstance(payload, list):
-        for item in payload:
-            if isinstance(item, dict):
-                yield item
-        return
-    if isinstance(payload, dict):
-        for key in ("Data", "data", "Items", "items", "List", "list"):
-            value = payload.get(key)
-            if isinstance(value, list):
-                for item in value:
-                    if isinstance(item, dict):
-                        yield item
-                return
-
-
 def load_plot_audio_map(data_root: Path) -> Dict[str, str]:
-    json_path = data_root / "ConfigDB" / "PlotAudio.json"
-    db_path = data_root / "ConfigDB" / "db_plot_audio.db"
-    
-    mapping: Dict[str, str] = {}
-    
-    # 1. 尝试 JSON
-    if json_path.exists():
-        try:
-            payload = json.loads(json_path.read_text(encoding="utf-8"))
-            for item in _iter_items(payload):
-                text_key = (
-                    item.get("TextKey")
-                    or item.get("TextMapId")
-                    or item.get("TextId")
-                    or item.get("Key")
-                    or item.get("Content")
-                )
-                file_name = (
-                    item.get("FileName")
-                    or item.get("AudioEventName")
-                    or item.get("AudioEvent")
-                    or item.get("Voice")
-                )
-                if text_key and file_name:
-                    mapping[str(text_key)] = str(file_name)
-        except Exception:
-            pass
-            
-    # 2. 尝试 SQLite
-    if db_path.exists():
-        try:
-            import sqlite3
-            import re
-            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-            cursor = conn.cursor()
-            cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
-            tables = [r[0] for r in cursor.fetchall()]
-            
-            # 匹配 vo_ 或 play_vo_ 开头的音频事件名（BLOB 扫描用）
-            audio_pat = re.compile(rb'(?:play_vo_|vo_)[a-zA-Z0-9_]{3,}')
-            
-            for tbl in tables:
-                cursor.execute(f"PRAGMA table_info({tbl})")
-                cols_info = cursor.fetchall()
-                cols = {r[1].lower(): r[1] for r in cols_info}
-                
-                # 寻找 ID 列
-                tk_col = cols.get("id") or cols.get("textkey") or cols.get("key") or cols.get("textmapid") or cols.get("textid") or cols.get("content")
-                
-                # 寻找音频列
-                fn_col = cols.get("filename") or cols.get("audioeventname") or cols.get("audioevent") or cols.get("voice")
-                
-                # 寻找 BLOB 列
-                blob_col = next((c[1] for c in cols_info if "blob" in (c[2] or "").lower() or c[1].lower() == "bindata"), None)
-                
-                if tk_col:
-                    if fn_col:
-                        # 情况 A：存在平铺列
-                        cursor.execute(f"SELECT {tk_col}, {fn_col} FROM {tbl}")
-                        for r in cursor.fetchall():
-                            if r[0] and r[1]:
-                                mapping[str(r[0])] = str(r[1])
-                                
-                    if blob_col and (not fn_col or tbl.lower() == "plotaudio"):
-                        # 情况 B：扫描 BLOB (针对 plotaudio 表或缺失平铺列的情况)
-                        cursor.execute(f"SELECT {tk_col}, {blob_col} FROM {tbl}")
-                        for tid, blob in cursor.fetchall():
-                            if not tid or not isinstance(blob, (bytes, bytearray)):
-                                continue
-                            matches = audio_pat.findall(blob)
-                            if matches:
-                                event_name = matches[0].decode('ascii', errors='ignore').strip()
-                                if event_name:
-                                    mapping[str(tid)] = event_name
-            conn.close()
-        except Exception:
-            pass
-            
-    return mapping
+    from ludiglot.adapters.wuthering_waves.data_mapper import WutheringDataMapper
 
-# The old logic is replaced by the updated load_plot_audio_map
-
-
-def _parse_event_name(value: str) -> str:
-    segment = value.rsplit("/", 1)[-1]
-    if "." in segment:
-        segment = segment.split(".")[-1]
-    return segment
-
+    return WutheringDataMapper(data_root).load_plot_audio_map()
 
 def _resolve_audio_hash(
     text_key: str,
     plot_audio: Dict[str, str] | None,
     voice_map: Dict[str, list[str]] | None,
 ) -> tuple[str | None, str | None]:
+    from ludiglot.adapters.wuthering_waves.audio_strategy import WutheringAudioStrategy
+
+    strategy = WutheringAudioStrategy()
     event_name: str | None = None
     if plot_audio and text_key in plot_audio:
         event_name = plot_audio[text_key]
     elif voice_map and text_key in voice_map and voice_map[text_key]:
         event_name = voice_map[text_key][0]
     if event_name:
-        event_name = _parse_event_name(event_name)
+        event_name = strategy.parse_event_name(event_name)
     else:
         event_name = f"vo_{text_key}"
-    audio_hash = WwiseHash().hash_str(event_name)
+    audio_hash = str(strategy.hash_name(event_name))
     return audio_hash, event_name
 
 
-def _candidate_paths(root: Path, rel_paths: Iterable[str]) -> list[Path]:
-    return [root / rel for rel in rel_paths]
-
-
 def find_multitext_paths(data_root: Path) -> Tuple[Path, Path]:
-    candidates_en = _candidate_paths(
-        data_root,
-        [
-            "ConfigDB/en/lang_text.db",
-            "TextMap/en/MultiText.json",
-            "TextMap/en/Multitext.json",
-        ],
-    )
-    candidates_zh = _candidate_paths(
-        data_root,
-        [
-            "ConfigDB/zh-Hans/lang_text.db",
-            "TextMap/zh-Hans/MultiText.json",
-            "TextMap/zh-CN/MultiText.json",
-            "TextMap/zh-Hans/Multitext.json",
-        ],
-    )
-    en_path = next((p for p in candidates_en if p.exists()), None)
-    zh_path = next((p for p in candidates_zh if p.exists()), None)
+    from ludiglot.adapters.wuthering_waves.data_mapper import WutheringDataMapper
 
-
-    if en_path is None or zh_path is None:
-        # 兜底：在 TextMap 下搜索 MultiText.json
-        text_map_root = data_root / "TextMap"
-        if text_map_root.exists():
-            for path in text_map_root.rglob("MultiText*.json"):
-                rel = path.as_posix().lower()
-                if "textmap/en" in rel and en_path is None:
-                    en_path = path
-                if "textmap/zh" in rel and zh_path is None:
-                    zh_path = path
-                if en_path and zh_path:
-                    break
-
-    if en_path is None or zh_path is None:
-        raise FileNotFoundError(
-            f"无法在所选目录中找到游戏文本数据 ({data_root})\n\n"
-            "诊断细节:\n"
-            f"- 英文路径匹配: {candidates_en[0] if candidates_en else 'N/A'}\n"
-            f"- 中文路径匹配: {candidates_zh[0] if candidates_zh else 'N/A'}\n\n"
-            "建议解决方法:\n"
-            "1. 运行 'ludiglot pak-update' 从游戏 Pak 解包并构建数据库\n"
-            "2. 确保 config/settings.json 中配置了正确的 game_pak_root 或 game_install_root\n"
-            "3. 详情请参阅 docs/usage/data-management.md"
-        )
-    return en_path, zh_path
-
+    paths = WutheringDataMapper(data_root).parse()
+    return paths.en_text, paths.zh_text
 
 def build_text_db_from_root(data_root: Path) -> Dict[str, dict]:
     en_json, zh_json = find_multitext_paths(data_root)
@@ -544,48 +397,10 @@ def build_text_db_from_root(data_root: Path) -> Dict[str, dict]:
 
 
 def build_text_db_from_root_all(data_root: Path) -> Dict[str, dict]:
-    # 语言对定义
-    langs = [("en", "zh-Hans"), ("en", "zh-CN")]
-    
-    # 探测可能的数据目录（种子根）
-    seed_roots = [
-        data_root / "ConfigDB",
-        data_root / "Client" / "Content" / "Aki" / "ConfigDB",
-        data_root / "TextMap",
-        data_root / "Client" / "Content" / "Aki" / "TextMap",
-    ]
+    from ludiglot.adapters.wuthering_waves.data_mapper import WutheringDataMapper
 
-    # 自动发现嵌套的语言目录对。
-    # 鸣潮 PAK 内部结构可能包含 ConfigDB/ConfigDB/{lang}/ 等多层嵌套，
-    # 解包后会出现 data/ConfigDB/ConfigDB/{en,zh-Hans}/ 这样的路径。
-    # 这里递归扫描种子根下的所有 {en} 子目录并尝试匹配 {zh} 对。
-    roots: list[Path] = []
-    _seen_roots: set[Path] = set()
-    for sr in seed_roots:
-        if not sr.exists():
-            continue
-        # 添加种子本身
-        if sr not in _seen_roots:
-            roots.append(sr)
-            _seen_roots.add(sr)
-        # 发现额外嵌套：遍历种子根的直接子目录，若子目录也包含语言对则加入
-        try:
-            for child in sr.iterdir():
-                if not child.is_dir():
-                    continue
-                # 跳过语言目录本身（en, zh-Hans 等）
-                if child.name in ("en", "zh-Hans", "zh-CN", "ja", "ko", "de", "fr", "es", "ru",
-                                  "pt", "id", "vi", "th", "zh-Hant", "Misc"):
-                    continue
-                # 检查这个子目录是否包含语言对
-                for en_name, zh_name in langs:
-                    if (child / en_name).is_dir() and (child / zh_name).is_dir():
-                        if child not in _seen_roots:
-                            roots.append(child)
-                            _seen_roots.add(child)
-                        break
-        except OSError:
-            pass
+    mapper = WutheringDataMapper(data_root)
+    roots = mapper.text_source_roots()
 
     plot_audio = load_plot_audio_map(data_root)
     # 启用缓存，确保 voice_map 可读
@@ -617,25 +432,10 @@ def build_text_db_from_root_all(data_root: Path) -> Dict[str, dict]:
 
     for r in roots:
         if not r.exists(): continue
-        for en, zh in langs:
-            scan_pair(r / en, r / zh)
+        for pair in mapper.language_pairs:
+            scan_pair(r / pair.en, r / pair.zh)
 
-    # 额外补充：扫描 ConfigDB 根目录中的 BLOB 配置库（典型为 db_gacha.db）。
-    # 这些文件不在 en/zh 语言子目录内，原逻辑不会覆盖到。
-    root_blob_db_names = ("db_gacha.db",)
-    root_blob_db_paths: list[Path] = []
-    for base in (
-        data_root / "ConfigDB",
-        data_root / "Client" / "Content" / "Aki" / "ConfigDB",
-    ):
-        if not base.exists():
-            continue
-        for name in root_blob_db_names:
-            cand = base / name
-            if cand.exists() and cand not in root_blob_db_paths:
-                root_blob_db_paths.append(cand)
-
-    for db_path in root_blob_db_paths:
+    for db_path in mapper.root_blob_db_paths():
         try:
             en_map = _load_sqlite_map(db_path)
             if not en_map:

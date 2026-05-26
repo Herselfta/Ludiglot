@@ -13,20 +13,10 @@ sys.path.insert(0, str(project_root / "src"))
 
 from ludiglot.core.config import load_config
 from ludiglot.core.ocr import OCREngine, group_ocr_lines
-from ludiglot.core.text_builder import normalize_en
-from ludiglot.core.search import FuzzySearcher
+from ludiglot.core.matcher import TextMatcher
 from ludiglot.core.audio_mapper import AudioCacheIndex
-
-# Import actual runtime functions
-from ludiglot.__main__ import (
-    _load_db,
-    _find_audio,
-    _play_audio_for_key,
-    _get_voice_event_index,
-    _resolve_events_for_text_key,
-    _ensure_audio_for_hash,
-)
-from ludiglot.adapters.wuthering_waves.audio_strategy import WutheringAudioStrategy
+from ludiglot.core.audio_player import AudioPlayer
+from ludiglot.core.audio_resolver import AudioResolver, get_voice_event_index
 from ludiglot.core.audio_extract import find_wem_by_hash
 
 # Configure logging to file
@@ -79,41 +69,29 @@ def debug_pipeline():
     log("\n" + "=" * 70)
     log("=== 2. Text Search (same as runtime) ===")
     log("=" * 70)
-    db = _load_db(db_path)
-    searcher = FuzzySearcher()
-    
-    best_key = None
-    best_score = 0.0
+    db = json.loads(db_path.read_text(encoding="utf-8"))
+    matcher = TextMatcher(db, gender_preference=cfg.gender_preference)
+
+    result = None
     best_original_text = ""
-    best_match = None
-    
-    # Try each group - same logic as cmd_run
     for txt, conf in lines:
         if len(txt.strip()) < 5:
             continue
-        if any(char.isdigit() for char in txt) and len([c for c in txt if c.isdigit()]) > len(txt) / 3:
-            continue
-            
-        normalized = normalize_en(txt)
-        if normalized in db:
-            key, score = normalized, 1.0
-        else:
-            key, score = searcher.search(normalized, db.keys())
-            
+        candidate = matcher.match([(txt, conf)])
+        score = candidate.get("_score", 0.0) if candidate else 0.0
+        key = candidate.get("_matched_key", "") if candidate else ""
         log(f"  Testing '{txt[:50]}...' -> Match: {key} (score={score:.3f})")
-        if score > best_score:
-            best_score = score
-            best_key = key
+        if candidate and (result is None or score > result.get("_score", 0.0)):
+            result = candidate
             best_original_text = txt
 
-    if not best_key or best_score < 0.6:
+    if not result or result.get("_score", 0.0) < 0.6:
         log("No good match found among all groups.")
         return
 
     log(f"\nFinal Selection: '{best_original_text}'")
-    log(f"Match Key: {best_key} (score={best_score:.3f})")
-    
-    result = db[best_key]
+    log(f"Match Key: {result.get('_matched_key')} (score={result.get('_score', 0.0):.3f})")
+
     best_match = result['matches'][0]
     text_key = best_match.get('text_key', "")
     audio_event = best_match.get("audio_event")
@@ -140,84 +118,78 @@ def debug_pipeline():
         cache_index.scan()
         log(f"Audio cache index loaded: {len(cache_index.entries)} entries")
     
-    # Show what the strategy would generate
-    strategy = WutheringAudioStrategy()
-    events = _resolve_events_for_text_key(text_key, cfg)
-    log(f"\nResolved Events: {events}")
-    
-    candidates = []
-    if events:
-        main_event = events[0]
-        candidates = strategy.build_names(text_key, main_event)
-        log(f"Strategy candidates for '{main_event}' ({len(candidates)}):")
-        for i, name in enumerate(candidates[:10]):
-            h = strategy.hash_name(name)
-            log(f"  [{i}] {name} -> hash={h}")
-    
-    # Check voice event index
-    event_index = _get_voice_event_index(cfg)
+    resolver = AudioResolver(cfg, voice_event_index=get_voice_event_index(cfg), audio_index=cache_index)
+    candidates = resolver.get_candidates(text_key, audio_event)
+    log(f"\nResolver candidates ({len(candidates)}):")
+    for i, name in enumerate(candidates[:10]):
+        h = resolver.strategy.hash_name(name)
+        log(f"  [{i}] {name} -> hash={h}")
+
+    event_index = get_voice_event_index(cfg)
     if event_index:
-        ref_event = events[0] if events else None
+        ref_event = candidates[0] if candidates else audio_event
         extra = event_index.find_candidates(text_key, ref_event, limit=8)
         log(f"\nVoice Event Index extra candidates: {extra}")
     else:
         log("\nVoice Event Index: Not available")
-    
+
     log("\n" + "=" * 70)
     log("=== 4. WEM File Search ===")
     log("=" * 70)
-    
-    # Check if WEM files exist
+
     log(f"audio_wem_root: {cfg.audio_wem_root}")
     log(f"audio_bnk_root: {cfg.audio_bnk_root}")
-    
+
     if cfg.audio_wem_root and cfg.audio_wem_root.exists():
-        # Try to find WEM by hash
         if audio_hash:
             h = int(audio_hash)
             wem_path = find_wem_by_hash(cfg.audio_wem_root, h)
             log(f"find_wem_by_hash({h}): {wem_path}")
-        
-        # Check for WEM files matching the text_key pattern
+
         log("\nSearching for WEM files matching text_key pattern:")
-        
-        # Search in WwiseExternalSource
         if "Media" in str(cfg.audio_wem_root):
             ext_root = cfg.audio_wem_root.parents[1] / "WwiseExternalSource"
         else:
             ext_root = cfg.audio_wem_root.parent / "WwiseExternalSource"
-        
+
         log(f"WwiseExternalSource path: {ext_root}")
         log(f"WwiseExternalSource exists: {ext_root.exists()}")
-        
+
         if ext_root.exists():
-            # Search for files matching the text_key
-            patterns = [
-                f"*{text_key}*",
-                f"*LahaiRoi_3_2_5*",
-                f"*lahairoi_3_2_5*",
-            ]
-            for pattern in patterns:
+            for pattern in (f"*{text_key}*", f"*{text_key.lower()}*"):
                 matches = list(ext_root.glob(pattern))[:5]
                 if matches:
                     log(f"  Pattern '{pattern}': {[f.name for f in matches]}")
                 else:
                     log(f"  Pattern '{pattern}': No matches")
-    
+
     log("\n" + "=" * 70)
-    log("=== 5. Attempting Playback (ACTUAL _play_audio_for_key) ===")
+    log("=== 5. Attempting Playback (AudioResolver) ===")
     log("=" * 70)
-    
-    # Call the ACTUAL runtime function
-    success = _play_audio_for_key(
+
+    resolution = resolver.resolve(
         text_key,
-        cfg,
-        index=cache_index,
-        audio_event=audio_event,
-        audio_hash=audio_hash
+        db_event=audio_event,
+        db_hash=int(audio_hash) if audio_hash else None,
     )
-    
-    if success:
+    audio_path = None
+    if resolution:
+        log(
+            f"Resolver result: event={resolution.event_name}, "
+            f"hash={resolution.hash_value}, source={resolution.source_type}"
+        )
+        if resolution.source_type == "cache":
+            audio_path = resolver.get_cached_path(resolution.hash_value, resolution.event_name)
+        if audio_path is None:
+            audio_path = resolver.ensure_playable_audio(
+                resolution.hash_value,
+                text_key,
+                resolution.event_name,
+                log_callback=log,
+            )
+
+    if audio_path:
+        AudioPlayer().play(str(audio_path))
         log("\n✅ SUCCESS: Audio played!")
     else:
         log("\n❌ FAILED: Audio not found.")
@@ -228,25 +200,20 @@ def debug_pipeline():
         log(f"  audio_txtp_cache: {cfg.audio_txtp_cache}")
         log(f"  vgmstream_path: {cfg.vgmstream_path}")
         log(f"  wwiser_path: {cfg.wwiser_path}")
-        
-        # Check if WEM files exist for any candidate hash
+
         if cfg.audio_wem_root and cfg.audio_wem_root.exists():
             log(f"\n--- WEM Root Analysis ---")
             wem_count = len(list(cfg.audio_wem_root.glob("*.wem")))
             log(f"  Total .wem files in wem_root: {wem_count}")
-            
-            # Sample files
             wem_files = list(cfg.audio_wem_root.glob("*.wem"))[:10]
             log(f"  Sample WEM files: {[f.name for f in wem_files]}")
-        
-        # Check if any candidate hash exists as WEM
+
         log("\n--- Checking candidate hashes in WEM root ---")
         for name in candidates[:5]:
-            h = strategy.hash_name(name)
+            h = resolver.strategy.hash_name(name)
             wem_path = find_wem_by_hash(cfg.audio_wem_root, h) if cfg.audio_wem_root else None
             status = "FOUND" if wem_path else "NOT FOUND"
             log(f"  {name} (hash={h}): {status}")
-
     log(f"\n\nFull log saved to: {log_file}")
 
 

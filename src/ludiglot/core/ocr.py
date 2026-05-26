@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import base64
+from dataclasses import dataclass
 import io
 import json
 import os
@@ -44,6 +45,13 @@ DEFAULT_GLM_OCR_PROMPT = "Text Recognition:"
 DEFAULT_GLM_OCR_TIMEOUT = 30.0
 # <=0 means "follow Ollama default behavior" (do not send num_predict).
 DEFAULT_GLM_OCR_MAX_TOKENS = 0
+
+
+@dataclass(frozen=True)
+class OcrPipelineResult:
+    boxes: List[Dict[str, object]]
+    lines: List[Tuple[str, float]]
+    backend: str | None
 
 
 class OCREngine:
@@ -1734,10 +1742,25 @@ class OCREngine:
         image_path: str | Path,
         backend: str | None = None,
     ) -> List[Tuple[str, float]]:
-        box_lines = self.recognize_with_boxes(image_path, backend=backend)
-        if not box_lines:
-            return []
-        return group_ocr_lines(box_lines, lang=self.lang)
+        return self.recognize_pipeline(image_path, backend=backend).lines
+
+    def recognize_pipeline(
+        self,
+        image_input: Union[str, Path, Any],
+        prefer_tesseract: bool = False,
+        backend: str | None = None,
+    ) -> OcrPipelineResult:
+        boxes = self.recognize_with_boxes(
+            image_input,
+            prefer_tesseract=prefer_tesseract,
+            backend=backend,
+        )
+        lines = group_ocr_lines(boxes, lang=self.lang) if boxes else []
+        return OcrPipelineResult(
+            boxes=boxes,
+            lines=lines,
+            backend=self.last_backend,
+        )
 
     def recognize_with_boxes(
         self,
