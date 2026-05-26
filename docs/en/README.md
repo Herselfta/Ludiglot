@@ -19,7 +19,7 @@
 - **🔍 Smart OCR**: Windows native OCR priority (startup < 0.1s), optional GLM-OCR (local Transformers) backend, auto-fallback to PaddleOCR/Tesseract
 - **🌏 Instant Translation**: Non-intrusive overlay displays official Chinese text
 - **🎵 Voice Playback**: Auto-play corresponding official voice-over with Wwise logic
-- **⌨️ Global Hotkeys**: Hotkey screenshot, history, smart title separation
+- **⌨️ Global Hotkeys**: Hotkey screenshot and smart title separation
 - **📦 One-Click Extraction**: Built-in FModelCLI for auto-extracting text, audio, and fonts from game Pak
 
 ---
