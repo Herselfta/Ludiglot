@@ -108,8 +108,8 @@ def load_config(path: Path, *, validate_data: bool = True) -> AppConfig:
         extract_audio = raw.get("extract_game_audio")
 
     
-    # 智能探测数据库文件（如果配置的路径不存在）
-    if db_path and not db_path.exists():
+    # 智能探测数据库文件（仅在未显式配置 db_path 时启用）
+    if not raw.get("db_path"):
         shared_db_candidates = [
             project_root / "game_text_db.json",
             project_root / "data" / "game_text_db.json",
