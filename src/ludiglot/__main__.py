@@ -18,13 +18,7 @@ from ludiglot.core.audio_extract import (
 from ludiglot.core.audio_mapper import AudioCacheIndex
 from ludiglot.core.audio_player import AudioPlayer
 from ludiglot.core.audio_resolver import AudioResolver, get_voice_event_index
-from ludiglot.core.capture import (
-    CaptureError,
-    CaptureRegion,
-    capture_fullscreen,
-    capture_region,
-    capture_window,
-)
+from ludiglot.core.capture_input import CaptureInputAdapters, capture_input_to_memory, capture_options_from_config
 from ludiglot.core.config import load_config
 from ludiglot.core.game_pak_update import GamePakUpdateError, update_from_game_paks
 from ludiglot.core.matcher import TextMatcher
@@ -452,29 +446,12 @@ def cmd_run(args: argparse.Namespace) -> None:
             db = build_text_db(cfg.en_json, cfg.zh_json)
         save_text_db(db, cfg.db_path)
 
-    try:
-        if cfg.capture_mode == "window":
-            if not cfg.window_title:
-                raise RuntimeError("capture_mode=window 需要 window_title")
-            capture_window(cfg.window_title, cfg.image_path)
-        elif cfg.capture_mode == "region":
-            if not cfg.capture_region:
-                raise RuntimeError("capture_mode=region 需要 capture_region")
-            region = CaptureRegion(
-                left=int(cfg.capture_region["left"]),
-                top=int(cfg.capture_region["top"]),
-                width=int(cfg.capture_region["width"]),
-                height=int(cfg.capture_region["height"]),
-            )
-            capture_region(region, cfg.image_path)
-        elif cfg.capture_mode == "image":
-            if not cfg.image_path.exists():
-                capture_fullscreen(cfg.image_path)
-        else:
-            raise RuntimeError(f"未知 capture_mode: {cfg.capture_mode}")
-    except CaptureError as exc:
-        print(f"捕获失败：{exc}，将回退到全屏截图")
-        capture_fullscreen(cfg.image_path)
+    if str(cfg.capture_mode).lower() == "select":
+        raise RuntimeError("CLI run 不支持 capture_mode=select；请使用 gui 或配置 window/region/image")
+    capture_input = capture_input_to_memory(
+        capture_options_from_config(cfg),
+        adapters=CaptureInputAdapters(on_fallback=print),
+    )
 
     db = _load_db(cfg.db_path)
     engine = OCREngine(
@@ -509,7 +486,7 @@ def cmd_run(args: argparse.Namespace) -> None:
         )
         cache_index.load()
         cache_index.scan()
-    ocr_result = engine.recognize_pipeline(cfg.image_path, backend=cfg.ocr_backend)
+    ocr_result = engine.recognize_pipeline(capture_input, backend=cfg.ocr_backend)
     lines = ocr_result.lines
 
     if not lines:
