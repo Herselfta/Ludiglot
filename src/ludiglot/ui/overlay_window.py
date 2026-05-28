@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from PyQt6.QtCore import Qt, pyqtSignal, QObject, QTimer, QPoint, QRect, QSize, QAbstractNativeEventFilter, QEvent, QEventLoop
+from PyQt6.QtCore import Qt, pyqtSignal, QObject, QTimer, QPoint, QPointF, QRect, QRectF, QSize, QAbstractNativeEventFilter, QEvent, QEventLoop
 from PyQt6.QtGui import QFont, QTextOption, QColor, QPalette, QAction, QActionGroup, QCursor, QPainter, QPixmap, QGuiApplication, QImage
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
@@ -76,6 +76,271 @@ class PersistentMenu(QMenu):
             return # 关键：不调用 super() 阻止菜单关闭
             
         super().mouseReleaseEvent(event)
+
+
+class PlayPauseButton(QPushButton):
+    """自绘制的播放/暂停按钮，保证图标完美居中和颜色可调。"""
+    def __init__(self, parent=None):
+        super().__init__("", parent)
+        self._is_playing = False
+        
+    def set_playing(self, playing: bool):
+        if self._is_playing != playing:
+            self._is_playing = playing
+            self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        
+        # 绘制背景和边框 (复用 QSS 风格)
+        rect = self.rect()
+        
+        # 获取当前状态的颜色
+        if not self.isEnabled():
+            bg_color = QColor(255, 255, 255, 12)
+            border_color = QColor(255, 255, 255, 25)
+            icon_color = QColor(255, 255, 255, 76)  # 30% alpha
+        elif self.underMouse() and self.isDown():
+            bg_color = QColor(255, 255, 255, 64)
+            border_color = QColor(255, 255, 255, 128)
+            icon_color = QColor(255, 255, 255, 255)
+        elif self.underMouse():
+            bg_color = QColor(255, 255, 255, 51)
+            border_color = QColor(255, 255, 255, 102)
+            icon_color = QColor(255, 255, 255, 255)
+        else:
+            bg_color = QColor(255, 255, 255, 38)
+            border_color = QColor(255, 255, 255, 76)
+            icon_color = QColor(200, 200, 200, 200)
+
+        # 绘制背景圆角矩形
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(bg_color)
+        painter.drawRoundedRect(rect.adjusted(1, 1, -1, -1), 4, 4)
+        
+        # 绘制边框
+        from PyQt6.QtGui import QPen
+        pen = QPen(border_color, 1.0)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRoundedRect(rect.adjusted(1, 1, -1, -1), 4, 4)
+
+        # 绘制完美居中的播放/暂停图标
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(icon_color)
+        
+        cx = rect.width() / 2.0
+        cy = rect.height() / 2.0
+        
+        if not self._is_playing:
+            # 绘制完美居中且平衡的播放三角形 (向右偏移一点点，使其在视觉上完美居中)
+            from PyQt6.QtGui import QPolygonF
+            size = 10.0
+            half_size = size / 2.0
+            # 播放三角形的质心偏左，稍微向右偏移 0.5px 以保证完美视觉平衡
+            offset = 0.5
+            p1 = QPointF(cx - half_size * 0.7 + offset, cy - half_size)
+            p2 = QPointF(cx - half_size * 0.7 + offset, cy + half_size)
+            p3 = QPointF(cx + half_size * 1.1 + offset, cy)
+            poly = QPolygonF([p1, p2, p3])
+            painter.drawPolygon(poly)
+        else:
+            # 绘制完美对称和比例适中的暂停双线
+            w = 3.0  # 每一竖线的宽度
+            h = 10.0 # 竖线的高度
+            gap = 4.0 # 两竖线间的间距
+            
+            # 左竖线
+            x1 = cx - gap / 2.0 - w
+            y1 = cy - h / 2.0
+            painter.drawRect(QRectF(x1, y1, w, h))
+            
+            # 右竖线
+            x2 = cx + gap / 2.0
+            painter.drawRect(QRectF(x2, y1, w, h))
+            
+        painter.end()
+
+
+class CloseIconButton(QPushButton):
+    """自绘制的关闭按钮，鸣潮风格的四片利刃组成的交叉图标。
+    Hover 态为微动效：四片利刃平滑地朝外侧对角线方向扩张（无颜色和背景变化）。
+    """
+    def __init__(self, parent=None):
+        super().__init__("", parent)
+        self.setFixedSize(32, 32)
+        self._current_offset = 2.5  # 基础偏移，稍微移大，增加常规状态下的比例感
+        
+        # 强制覆盖全局 QSS，防止受到全局 QPushButton 的边框、底色和内边距影响
+        self.setStyleSheet("""
+            QPushButton {
+                background-color: transparent;
+                border: none;
+                border-radius: 4px;
+                padding: 0px;
+            }
+        """)
+        
+        # 导入动画所需类
+        from PyQt6.QtCore import QVariantAnimation, QEasingCurve
+        self._anim = QVariantAnimation(self)
+        self._anim.setDuration(120)  # 120ms 灵动响应
+        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._anim.valueChanged.connect(self._handle_anim)
+        
+    def _handle_anim(self, value):
+        self._current_offset = value
+        self.update()
+        
+    def enterEvent(self, event):
+        super().enterEvent(event)
+        self._anim.stop()
+        self._anim.setStartValue(self._current_offset)
+        self._anim.setEndValue(6.0)  # 悬浮时利刃向外舒展 6.0px，展现出强烈的张力
+        self._anim.start()
+        
+    def leaveEvent(self, event):
+        super().leaveEvent(event)
+        self._anim.stop()
+        self._anim.setStartValue(self._current_offset)
+        self._anim.setEndValue(2.5)  # 移开时平滑缩回到 2.5px
+        self._anim.start()
+        
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        
+        rect = self.rect()
+        cx = rect.width() / 2.0
+        cy = rect.height() / 2.0
+        
+        # 纯净的白色/亮灰，无任何底色和彩色变幻
+        if self.underMouse():
+            icon_color = QColor(255, 255, 255, 230)  # 略微明亮以示交互
+        else:
+            icon_color = QColor(255, 255, 255, 180)  # 默认柔和白色
+            
+        # 绘制四瓣鸣潮风格利刃交叉
+        painter.save()
+        painter.translate(cx, cy)
+        
+        L = 12.5  # 增大：利刃整体长度为 12.5
+        
+        # 每次旋转 90 度画一片利刃，倾斜 45 度开始第一片
+        painter.rotate(45)
+        
+        from PyQt6.QtGui import QPainterPath
+        for _ in range(4):
+            painter.save()
+            # 沿着当前旋转方向 of X 轴平移，实现完美且极其平滑的向外舒展动画
+            painter.translate(self._current_offset, 0)
+            
+            path = QPainterPath()
+            # 刀刃起点移动至 0.0 开始绘制，基础宽度微增到 1.6 以适应比例
+            path.moveTo(0.0, -1.6)
+            # 绘制上弧线到刀尖
+            path.quadTo(L * 0.4, -0.7, L - 1.8, 0.0)
+            # 绘制下弧线到终点
+            path.quadTo(L * 0.4, 0.7, 0.0, 1.6)
+            path.closeSubpath()
+            
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(icon_color)
+            painter.drawPath(path)
+            
+            # 绘制中间细微的利刃脊线
+            from PyQt6.QtGui import QPen
+            pen = QPen(QColor(0, 0, 0, 45), 0.8)
+            painter.setPen(pen)
+            painter.drawLine(QPointF(0.0, 0), QPointF(L - 3.0, 0))
+            
+            painter.restore()
+            painter.rotate(90)
+            
+        painter.restore()
+        painter.end()
+
+
+class MenuIconButton(QPushButton):
+    """自绘制的菜单/设置按钮，鸣潮风格的六齿齿轮图标，完美对齐和居中。"""
+    def __init__(self, parent=None):
+        super().__init__("", parent)
+        self.setFixedSize(32, 32)
+        
+        # 强制覆盖全局 QSS，防止受到全局 QPushButton 的边框、底色和内边距影响
+        self.setStyleSheet("""
+            QPushButton {
+                background-color: transparent;
+                border: none;
+                border-radius: 4px;
+                padding: 0px;
+            }
+        """)
+        
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        
+        rect = self.rect()
+        cx = rect.width() / 2.0
+        cy = rect.height() / 2.0
+        
+        # 悬停背景绘制
+        if self.underMouse() and self.isDown():
+            bg_color = QColor(255, 255, 255, 45)
+            icon_color = QColor(255, 255, 255, 255)
+            ring_color = QColor(170, 155, 106, 250)  # 主金黄色
+        elif self.underMouse():
+            bg_color = QColor(255, 255, 255, 30)
+            icon_color = QColor(255, 255, 255, 230)
+            ring_color = QColor(170, 155, 106, 220)
+        else:
+            bg_color = QColor(255, 255, 255, 0)
+            icon_color = QColor(255, 255, 255, 180)  # 默认淡白
+            ring_color = QColor(150, 150, 150, 160)  # 默认灰色圆环
+            
+        if bg_color.alpha() > 0:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(bg_color)
+            painter.drawRoundedRect(rect.adjusted(1, 1, -1, -1), 4, 4)
+            
+        # 绘制六齿齿轮
+        painter.save()
+        painter.translate(cx, cy)
+        
+        # 绘制齿轮外圈 (比例微增)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(icon_color)
+        painter.drawEllipse(QPointF(0, 0), 7.0, 7.0)
+        
+        # 绘制 6 个梯形齿 (比例微增)
+        from PyQt6.QtGui import QPainterPath
+        for _ in range(6):
+            tooth = QPainterPath()
+            tooth.moveTo(-2.5, -6.5)
+            tooth.lineTo(-1.5, -10.0)
+            tooth.lineTo(1.5, -10.0)
+            tooth.lineTo(2.5, -6.5)
+            tooth.closeSubpath()
+            painter.drawPath(tooth)
+            painter.rotate(60)
+            
+        # 绘制内凹环 (比例微增)
+        from PyQt6.QtGui import QPen
+        ring_pen = QPen(ring_color, 1.2)
+        painter.setPen(ring_pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawEllipse(QPointF(0, 0), 5.0, 5.0)
+        
+        # 镂空最中心圆孔 (InnerFrame 背景色 rgba(15, 18, 22, 255))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(15, 18, 22, 255))
+        painter.drawEllipse(QPointF(0, 0), 3.2, 3.2)
+        
+        painter.restore()
+        painter.end()
+
 
 class UiSignals(QObject):
     status = pyqtSignal(str)
@@ -246,11 +511,34 @@ class OverlayWindow(QMainWindow):
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
         container = QWidget(self)
-        container.setObjectName("CentralWidget") # 给容器一个名字以便样式或拖拽识别
-        container.setMouseTracking(True)  # 确保容器也传递鼠标事件
-        layout = QVBoxLayout(container)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(8)
+        container.setObjectName("OverlayRoot") # 最外层金边
+        self.setCentralWidget(container)
+        container.setMouseTracking(True)
+
+        # 中间装饰色带层
+        stripe_frame = QWidget(container)
+        stripe_frame.setObjectName("StripeFrame") # 这里显示灰白带
+        stripe_frame.setMouseTracking(True)
+
+        outer_layout = QVBoxLayout(container)
+        outer_layout.setContentsMargins(7, 7, 7, 7) # 加大：让外框到色带之间的背景层显出来
+        outer_layout.setSpacing(0)
+        outer_layout.addWidget(stripe_frame)
+
+        # 内部核心容器
+        inner_frame = QWidget(stripe_frame)
+        inner_frame.setObjectName("InnerFrame") # 这里显示核心背景和大圆角
+        inner_frame.setMouseTracking(True)
+
+        stripe_layout = QVBoxLayout(stripe_frame)
+        stripe_layout.setContentsMargins(3, 3, 3, 3) # 保持：色带本身依然纤细
+        stripe_layout.setSpacing(0)
+        stripe_layout.addWidget(inner_frame)
+
+        # 实际的内容布局都在 inner_frame 里
+        layout = QVBoxLayout(inner_frame)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
 
         self.title_label = QLabel("Ludiglot")
         self.title_label.setObjectName("Title")
@@ -284,27 +572,38 @@ class OverlayWindow(QMainWindow):
 
 
         layout.addWidget(self.title_label)
-        layout.addWidget(self.source_label)
-        layout.addWidget(self.cn_label)
+
+        # 原文卡片容器
+        source_card = QWidget()
+        source_card.setObjectName("SourceCard")
+        source_card_layout = QVBoxLayout(source_card)
+        source_card_layout.setContentsMargins(0, 0, 0, 0)
+        source_card_layout.addWidget(self.source_label)
+        layout.addWidget(source_card)
+
+        # 分界线
+        divider = QWidget()
+        divider.setObjectName("Divider")
+        divider.setFixedHeight(1)
+        layout.addWidget(divider)
+
+        # 译文卡片容器
+        cn_card = QWidget()
+        cn_card.setObjectName("TargetCard")
+        cn_card_layout = QVBoxLayout(cn_card)
+        cn_card_layout.setContentsMargins(0, 0, 0, 0)
+        cn_card_layout.addWidget(self.cn_label)
+        layout.addWidget(cn_card)
         
         # 音频控制栏（进度条 + 播放/暂停按钮 + 时间显示）
         audio_control_layout = QHBoxLayout()
-        self.play_pause_btn = QPushButton("")
+        self.play_pause_btn = PlayPauseButton(self)
         self.play_pause_btn.setObjectName("AudioControl")
         self.play_pause_btn.setFixedSize(28, 28)
         self.play_pause_btn.setEnabled(False)
         self.play_pause_btn.clicked.connect(self._toggle_audio_playback)
-        # 使用系统标准图标，避免彩色emoji
-        style = self.style()
-        if style:
-            self._icon_play = style.standardIcon(QStyle.StandardPixmap.SP_MediaPlay)
-            self._icon_pause = style.standardIcon(QStyle.StandardPixmap.SP_MediaPause)
-        else:
-            self._icon_play = None
-            self._icon_pause = None
-        if self._icon_play:
-            self.play_pause_btn.setIcon(self._icon_play)
-        self.play_pause_btn.setIconSize(self.play_pause_btn.size() * 0.7)
+        self._icon_play = "▶"
+        self._icon_pause = "Ⅱ"
         
         self.audio_slider = QSlider(Qt.Orientation.Horizontal)
         self.audio_slider.setObjectName("AudioSlider")
@@ -323,9 +622,6 @@ class OverlayWindow(QMainWindow):
         layout.addLayout(audio_control_layout)
         
         layout.addWidget(self.status_label)
-
-        container.setObjectName("OverlayRoot")
-        self.setCentralWidget(container)
 
         
         # 创建窗口右上角菜单按钮
@@ -346,80 +642,14 @@ class OverlayWindow(QMainWindow):
         layout.addStretch()
         
         # 创建关闭按钮
-        self.top_close_btn = QPushButton("", self.control_bar)
-        self.top_close_btn.setFixedSize(26, 26)
+        self.top_close_btn = CloseIconButton(self.control_bar)
         self.top_close_btn.setObjectName("TopCloseButton")
-        self.top_close_btn.setStyleSheet("""
-            QPushButton#TopCloseButton {
-                background-color: transparent;
-                border: none;
-                border-radius: 4px;
-                min-width: 26px;
-                max-width: 26px;
-                padding: 0px;
-            }
-            QPushButton#TopCloseButton:hover {
-                background-color: rgba(255, 100, 100, 30);
-            }
-        """)
-        
-        # 使用 Label 承载关闭图标以实现像素级对齐
-        self.close_icon_label = QLabel("×", self.top_close_btn)
-        self.close_icon_label.setFixedSize(26, 26)
-        # y轴上移 2px
-        self.close_icon_label.move(0, -2)
-        self.close_icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.close_icon_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        self.close_icon_label.setStyleSheet("""
-            QLabel {
-                color: rgba(255, 100, 100, 200);
-                font-size: 22px;
-                font-weight: bold;
-                background: transparent;
-            }
-        """)
         self.top_close_btn.clicked.connect(self.hide)
         layout.addWidget(self.top_close_btn)
         
         # 创建菜单按钮
-        self.top_menu_btn = QPushButton("", self.control_bar)
-        self.top_menu_btn.setFixedSize(26, 26)
+        self.top_menu_btn = MenuIconButton(self.control_bar)
         self.top_menu_btn.setObjectName("TopMenuButton")
-        self.top_menu_btn.setStyleSheet("""
-            QPushButton#TopMenuButton {
-                background-color: transparent;
-                border: none;
-                border-radius: 4px;
-                min-width: 26px;
-                max-width: 26px;
-                padding: 0px;
-            }
-            QPushButton#TopMenuButton:hover {
-                background-color: rgba(255, 255, 255, 30);
-            }
-            QPushButton#TopMenuButton::menu-indicator {
-                image: none;
-                width: 0px;
-                height: 0px;
-            }
-        """)
-
-        # 创建独立的图标 Label 以实现像素级位置控制
-        self.menu_icon_label = QLabel("≡", self.top_menu_btn)
-        self.menu_icon_label.setFixedSize(26, 26)
-        # y 轴上移 3px
-        self.menu_icon_label.move(0, -3)
-        self.menu_icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.menu_icon_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        self.menu_icon_label.setStyleSheet("""
-            QLabel {
-                color: rgba(255, 255, 255, 200);
-                font-size: 20px;
-                font-weight: bold;
-                background: transparent;
-            }
-        """)
-
         layout.addWidget(self.top_menu_btn)
         
         # 初始定位
@@ -929,7 +1159,12 @@ class OverlayWindow(QMainWindow):
     def _update_button_positions(self):
         """更新按钮位置"""
         if hasattr(self, 'control_bar'):
-            self.control_bar.setGeometry(0, 5, self.width(), 30)
+            # 基于内框（inner_frame）计算位置：
+            # 外部边距是 7 (outer_layout) + 3 (stripe_layout) = 10 px
+            # 顶部与内框顶部对齐，即 y = 10 px
+            # 宽度为整个内框宽度，即 self.width() - 20
+            margin = 10
+            self.control_bar.setGeometry(margin, margin, self.width() - 2 * margin, 30)
 
     def _get_available_fonts(self) -> list[str]:
         """获取系统和data/fonts目录下的可用字体"""
@@ -1219,9 +1454,16 @@ class OverlayWindow(QMainWindow):
         self.update_thread.start()
 
     def _load_style(self) -> None:
-        style_path = Path(__file__).parent / "style.qss"
-        if style_path.exists():
-            self.setStyleSheet(style_path.read_text(encoding="utf-8"))
+        try:
+            style_path = Path(__file__).resolve().parent / "style.qss"
+            if style_path.exists():
+                qss = style_path.read_text(encoding="utf-8")
+                self.setStyleSheet(qss)
+                self.signals.log.emit(f"[UI] QSS 样式加载成功: {style_path}")
+            else:
+                self.signals.log.emit(f"[UI] QSS 样式文件不存在: {style_path}")
+        except Exception as e:
+            self.signals.log.emit(f"[UI] QSS 样式加载异常: {e}")
 
     def _connect_signals(self) -> None:
         self.signals.status.connect(self.status_label.setText)
@@ -1413,13 +1655,11 @@ class OverlayWindow(QMainWindow):
         """切换音频播放/暂停。"""
         if self.player.is_playing():
             self.player.pause()
-            if self._icon_play:
-                self.play_pause_btn.setIcon(self._icon_play)
+            self.play_pause_btn.set_playing(False)
             self.audio_timer.stop()
         else:
             self.player.resume()
-            if self._icon_pause:
-                self.play_pause_btn.setIcon(self._icon_pause)
+            self.play_pause_btn.set_playing(True)
             self.audio_timer.start()
     
     def _on_slider_pressed(self) -> None:
@@ -1827,8 +2067,7 @@ class OverlayWindow(QMainWindow):
             if hasattr(self, 'audio_timer'):
                 self.audio_timer.stop()
             if hasattr(self, 'play_pause_btn'):
-                if self._icon_play:
-                    self.play_pause_btn.setIcon(self._icon_play)
+                self.play_pause_btn.set_playing(False)
                 self.play_pause_btn.setEnabled(False)
             if hasattr(self, 'audio_slider'):
                 self.audio_slider.setValue(0)
@@ -1882,8 +2121,7 @@ class OverlayWindow(QMainWindow):
             self.player.play(str(decision.path), block=False)
 
             self.play_pause_btn.setEnabled(True)
-            if self._icon_pause:
-                self.play_pause_btn.setIcon(self._icon_pause)
+            self.play_pause_btn.set_playing(True)
             self.audio_slider.setEnabled(True)
             self.audio_slider.setValue(0)
             self.audio_timer.start()
