@@ -325,10 +325,10 @@ class MenuIconButton(QPushButton):
             icon_color = QColor(255, 255, 255, 180)  # 默认淡白
             arc_color = QColor(150, 150, 150, 160)  # 默认灰色圆弧
             
-        # 整体应用微放大（1.0 -> 1.12），创造高级的物理升起感
+        # 整体应用微放大（1.0 -> 1.2），创造高级的物理升起感
         painter.save()
         painter.translate(cx, cy)
-        total_scale = 1.0 + self._anim_progress * 0.12
+        total_scale = 1.0 + self._anim_progress * 0.2
         painter.scale(total_scale, total_scale)
         
         # 1. 绘制会旋转的外部六边形与内部圆
