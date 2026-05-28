@@ -611,27 +611,9 @@ class OverlayWindow(QMainWindow):
 
         layout.addWidget(self.title_label)
 
-        # 原文卡片容器
-        source_card = QWidget()
-        source_card.setObjectName("SourceCard")
-        source_card_layout = QVBoxLayout(source_card)
-        source_card_layout.setContentsMargins(0, 0, 0, 0)
-        source_card_layout.addWidget(self.source_label)
-        layout.addWidget(source_card)
-
-        # 分界线
-        divider = QWidget()
-        divider.setObjectName("Divider")
-        divider.setFixedHeight(1)
-        layout.addWidget(divider)
-
-        # 译文卡片容器
-        cn_card = QWidget()
-        cn_card.setObjectName("TargetCard")
-        cn_card_layout = QVBoxLayout(cn_card)
-        cn_card_layout.setContentsMargins(0, 0, 0, 0)
-        cn_card_layout.addWidget(self.cn_label)
-        layout.addWidget(cn_card)
+        # 直接添加文本组件，移除卡片容器化
+        layout.addWidget(self.source_label)
+        layout.addWidget(self.cn_label)
         
         # 音频控制栏（进度条 + 播放/暂停按钮 + 时间显示）
         audio_control_layout = QHBoxLayout()
