@@ -669,12 +669,12 @@ class OverlayWindow(QMainWindow):
         """创建窗口右上角下拉菜单 and 关闭按钮"""
         # 创建顶部控制栏小部件
         self.control_bar = QWidget(self)
-        self.control_bar.setFixedHeight(30)
+        self.control_bar.setFixedHeight(45)
         
         # 使用水平布局来管理按钮
         layout = QHBoxLayout(self.control_bar)
-        layout.setContentsMargins(0, 0, 0, 0)  # 右边距0px
-        layout.setSpacing(0)  # 按钮间距0px
+        layout.setContentsMargins(0, 10, 12, 0)  # 边距
+        layout.setSpacing(0)  # 按钮间距
         
         # 添加弹簧，将按钮推向右侧
         layout.addStretch()
@@ -1203,7 +1203,7 @@ class OverlayWindow(QMainWindow):
             # 顶部与内框顶部对齐，即 y = 10 px
             # 宽度为整个内框宽度，即 self.width() - 20
             margin = 10
-            self.control_bar.setGeometry(margin, margin, self.width() - 2 * margin, 30)
+            self.control_bar.setGeometry(margin, margin, self.width() - 2 * margin, 45)
 
     def _get_available_fonts(self) -> list[str]:
         """获取系统和data/fonts目录下的可用字体"""
