@@ -263,10 +263,13 @@ class CloseIconButton(QPushButton):
 
 
 class MenuIconButton(QPushButton):
-    """自绘制的菜单/设置按钮，鸣潮风格的六齿齿轮图标，完美对齐和居中。"""
+    """自绘制的菜单/设置按钮，外部是六边形（无齿轮），内部是圆，内部的圆内有个直径稍小的圆形弧线。
+    Hover 态为旋转与微放大动画：外部图标旋转 60 度，内部圆形弧线保持静止，整体放大 12%。
+    """
     def __init__(self, parent=None):
         super().__init__("", parent)
         self.setFixedSize(32, 32)
+        self._anim_progress = 0.0
         
         # 强制覆盖全局 QSS，防止受到全局 QPushButton 的边框、底色和内边距影响
         self.setStyleSheet("""
@@ -278,6 +281,31 @@ class MenuIconButton(QPushButton):
             }
         """)
         
+        # 导入动画所需类
+        from PyQt6.QtCore import QVariantAnimation, QEasingCurve
+        self._anim = QVariantAnimation(self)
+        self._anim.setDuration(350)  # 350ms 顺滑旋转与放大
+        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._anim.valueChanged.connect(self._handle_anim)
+        
+    def _handle_anim(self, value):
+        self._anim_progress = value
+        self.update()
+        
+    def enterEvent(self, event):
+        super().enterEvent(event)
+        self._anim.stop()
+        self._anim.setStartValue(self._anim_progress)
+        self._anim.setEndValue(1.0)  # 悬浮态达到最大值
+        self._anim.start()
+        
+    def leaveEvent(self, event):
+        super().leaveEvent(event)
+        self._anim.stop()
+        self._anim.setStartValue(self._anim_progress)
+        self._anim.setEndValue(0.0)  # 恢复
+        self._anim.start()
+        
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -286,58 +314,68 @@ class MenuIconButton(QPushButton):
         cx = rect.width() / 2.0
         cy = rect.height() / 2.0
         
-        # 悬停背景绘制
+        # 悬停时仅高亮图标自身，不绘制任何背景色
         if self.underMouse() and self.isDown():
-            bg_color = QColor(255, 255, 255, 45)
             icon_color = QColor(255, 255, 255, 255)
-            ring_color = QColor(170, 155, 106, 250)  # 主金黄色
+            arc_color = QColor(170, 155, 106, 250)  # 主金黄色
         elif self.underMouse():
-            bg_color = QColor(255, 255, 255, 30)
             icon_color = QColor(255, 255, 255, 230)
-            ring_color = QColor(170, 155, 106, 220)
+            arc_color = QColor(170, 155, 106, 220)
         else:
-            bg_color = QColor(255, 255, 255, 0)
             icon_color = QColor(255, 255, 255, 180)  # 默认淡白
-            ring_color = QColor(150, 150, 150, 160)  # 默认灰色圆环
+            arc_color = QColor(150, 150, 150, 160)  # 默认灰色圆弧
             
-        if bg_color.alpha() > 0:
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(bg_color)
-            painter.drawRoundedRect(rect.adjusted(1, 1, -1, -1), 4, 4)
-            
-        # 绘制六齿齿轮
+        # 整体应用微放大（1.0 -> 1.12），创造高级的物理升起感
         painter.save()
         painter.translate(cx, cy)
+        total_scale = 1.0 + self._anim_progress * 0.12
+        painter.scale(total_scale, total_scale)
         
-        # 绘制齿轮外圈 (比例微增)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(icon_color)
-        painter.drawEllipse(QPointF(0, 0), 7.0, 7.0)
+        # 1. 绘制会旋转的外部六边形与内部圆
+        painter.save()
+        angle = self._anim_progress * 60.0
+        painter.rotate(angle)
+        painter.scale(0.95, 0.95)  # 基础微调缩放以维持视觉精致度
         
-        # 绘制 6 个梯形齿 (比例微增)
-        from PyQt6.QtGui import QPainterPath
-        for _ in range(6):
-            tooth = QPainterPath()
-            tooth.moveTo(-2.5, -6.5)
-            tooth.lineTo(-1.5, -10.0)
-            tooth.lineTo(1.5, -10.0)
-            tooth.lineTo(2.5, -6.5)
-            tooth.closeSubpath()
-            painter.drawPath(tooth)
-            painter.rotate(60)
+        # 绘制六边形
+        import math
+        from PyQt6.QtGui import QPolygonF
+        
+        hexagon = QPolygonF()
+        R = 9.5  # 六边形外接圆半径
+        for i in range(6):
+            # i * 60 + 30 使得平顶朝上，极其规整精美
+            angle_rad = math.radians(i * 60 + 30)
+            x = R * math.cos(angle_rad)
+            y = R * math.sin(angle_rad)
+            hexagon.append(QPointF(x, y))
             
-        # 绘制内凹环 (比例微增)
         from PyQt6.QtGui import QPen
-        ring_pen = QPen(ring_color, 1.2)
-        painter.setPen(ring_pen)
+        hex_pen = QPen(icon_color, 1.5)
+        painter.setPen(hex_pen)
         painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawEllipse(QPointF(0, 0), 5.0, 5.0)
+        painter.drawPolygon(hexagon)
         
-        # 镂空最中心圆孔 (InnerFrame 背景色 rgba(15, 18, 22, 255))
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(15, 18, 22, 255))
-        painter.drawEllipse(QPointF(0, 0), 3.2, 3.2)
+        # 绘制内部圆
+        r_inner = 4.5
+        painter.drawEllipse(QPointF(0, 0), r_inner, r_inner)
         
+        painter.restore()
+        
+        # 2. 绘制不旋转的内部圆形弧线（但参与整体的放大效果）
+        painter.save()
+        
+        arc_pen = QPen(arc_color, 1.2)
+        painter.setPen(arc_pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        
+        r_arc = 4.0  # 直径稍小的圆形弧线半径
+        arc_rect = QRectF(-r_arc, -r_arc, r_arc * 2, r_arc * 2)
+        start_angle = 45 * 16  # 起始角度
+        span_angle = 270 * 16  # 跨越角度，留出优雅缺口
+        painter.drawArc(arc_rect, start_angle, span_angle)
+        
+        painter.restore()
         painter.restore()
         painter.end()
 
@@ -641,16 +679,17 @@ class OverlayWindow(QMainWindow):
         # 添加弹簧，将按钮推向右侧
         layout.addStretch()
         
+        # 创建菜单按钮
+        self.top_menu_btn = MenuIconButton(self.control_bar)
+        self.top_menu_btn.setObjectName("TopMenuButton")
+        layout.addWidget(self.top_menu_btn)
+        
         # 创建关闭按钮
         self.top_close_btn = CloseIconButton(self.control_bar)
         self.top_close_btn.setObjectName("TopCloseButton")
         self.top_close_btn.clicked.connect(self.hide)
         layout.addWidget(self.top_close_btn)
-        
-        # 创建菜单按钮
-        self.top_menu_btn = MenuIconButton(self.control_bar)
-        self.top_menu_btn.setObjectName("TopMenuButton")
-        layout.addWidget(self.top_menu_btn)
+
         
         # 初始定位
         self._update_button_positions()
