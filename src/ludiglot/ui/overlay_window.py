@@ -673,7 +673,7 @@ class OverlayWindow(QMainWindow):
         
         # 使用水平布局来管理按钮
         layout = QHBoxLayout(self.control_bar)
-        layout.setContentsMargins(0, 0, 10, 0)  # 右边距10px
+        layout.setContentsMargins(0, 0, 2, 0)  # 右边距2px
         layout.setSpacing(8)  # 按钮间距8px
         
         # 添加弹簧，将按钮推向右侧
