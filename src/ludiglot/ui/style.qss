@@ -32,10 +32,17 @@
 }
 
 #SourceText, #AccentText {
-    background-color: transparent;
+    background-color: rgba(170, 155, 106, 8);
+    border: 1px solid rgba(170, 155, 106, 45);
+    border-radius: 4px;
     color: #f0f4f8;
     padding: 12px 15px;
     selection-background-color: #706d54;
+}
+
+#SourceText:hover, #AccentText:hover {
+    background-color: rgba(170, 155, 106, 15);
+    border: 1px solid rgba(170, 155, 106, 90);
 }
 
 /* 状态栏 */

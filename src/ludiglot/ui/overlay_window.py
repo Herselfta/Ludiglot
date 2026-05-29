@@ -381,6 +381,77 @@ class MenuIconButton(QPushButton):
         painter.end()
 
 
+class StarDivider(QWidget):
+    """中间带四角星的分界线"""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedHeight(24)
+        
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        
+        rect = self.rect()
+        cx = rect.width() / 2.0
+        cy = rect.height() / 2.0
+        
+        # 绘制四角星
+        painter.save()
+        painter.translate(cx, cy)
+        
+        star_color = QColor(170, 155, 106, 220)  # 经典金黄色 #aa9b6a
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(star_color)
+        
+        # 绘制四角星的路径
+        from PyQt6.QtGui import QPainterPath
+        path = QPainterPath()
+        R = 8.0  # 外半径
+        r = 2.5  # 内半径
+        
+        path.moveTo(0, -R)
+        path.lineTo(r, -r)
+        path.lineTo(R, 0)
+        path.lineTo(r, r)
+        path.lineTo(0, R)
+        path.lineTo(-r, r)
+        path.lineTo(-R, 0)
+        path.lineTo(-r, -r)
+        path.closeSubpath()
+        painter.drawPath(path)
+        
+        # 绘制四角星中心的微小亮核
+        painter.setBrush(QColor(255, 255, 255, 200))
+        painter.drawEllipse(QPointF(0, 0), 1.2, 1.2)
+        
+        painter.restore()
+        
+        # 绘制两侧的渐变线条
+        from PyQt6.QtGui import QLinearGradient, QPen
+        
+        # 左侧渐变线
+        left_grad = QLinearGradient(0, cy, cx - 12, cy)
+        left_grad.setColorAt(0.0, QColor(170, 155, 106, 0))
+        left_grad.setColorAt(0.7, QColor(170, 155, 106, 120))
+        left_grad.setColorAt(1.0, QColor(170, 155, 106, 200))
+        
+        pen_left = QPen(left_grad, 1.0)
+        painter.setPen(pen_left)
+        painter.drawLine(QPointF(10, cy), QPointF(cx - 12, cy))
+        
+        # 右侧渐变线
+        right_grad = QLinearGradient(cx + 12, cy, rect.width(), cy)
+        right_grad.setColorAt(0.0, QColor(170, 155, 106, 200))
+        right_grad.setColorAt(0.3, QColor(170, 155, 106, 120))
+        right_grad.setColorAt(1.0, QColor(170, 155, 106, 0))
+        
+        pen_right = QPen(right_grad, 1.0)
+        painter.setPen(pen_right)
+        painter.drawLine(QPointF(cx + 12, cy), QPointF(rect.width() - 10, cy))
+        
+        painter.end()
+
+
 class UiSignals(QObject):
     status = pyqtSignal(str)
     result = pyqtSignal(dict)
@@ -616,6 +687,10 @@ class OverlayWindow(QMainWindow):
 
         # 直接添加文本组件，移除卡片容器化
         layout.addWidget(self.source_label)
+        
+        self.star_divider = StarDivider(self)
+        layout.addWidget(self.star_divider)
+        
         layout.addWidget(self.cn_label)
         
         # 音频控制栏（进度条 + 播放/暂停按钮 + 时间显示）
