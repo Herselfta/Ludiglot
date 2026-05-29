@@ -13,7 +13,7 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
     QLabel, QPushButton, QTextEdit, QMenu, QComboBox, QSizePolicy,
     QSlider, QSpinBox, QDoubleSpinBox, QWidgetAction, QStyle,
-    QRubberBand, QSystemTrayIcon
+    QRubberBand, QSystemTrayIcon, QFrame
 )
 
 from ludiglot.core.audio_player import AudioPlayer
@@ -63,6 +63,7 @@ from ludiglot.core.capture_match_workflow import (
     needs_tesseract,
     run_capture_match_workflow,
 )
+from ludiglot.ui.waveform_progress_bar import AudioWaveformProgressBar
 
 
 class PersistentMenu(QMenu):
@@ -588,6 +589,7 @@ class OverlayWindow(QMainWindow):
         self.source_label.setAcceptRichText(True)  # 支持富文本
         self.source_label.setWordWrapMode(QTextOption.WrapMode.WordWrap)
         self.source_label.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.source_label.setFrameStyle(QFrame.Shape.NoFrame)
         self.source_label.setMinimumHeight(60)
         self.source_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
@@ -597,6 +599,7 @@ class OverlayWindow(QMainWindow):
         self.cn_label.setAcceptRichText(True)  # 显式启用富文本支持
         self.cn_label.setWordWrapMode(QTextOption.WrapMode.WordWrap)
         self.cn_label.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.cn_label.setFrameStyle(QFrame.Shape.NoFrame)
         self.cn_label.setMinimumHeight(80)
         self.cn_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
@@ -625,12 +628,11 @@ class OverlayWindow(QMainWindow):
         self._icon_play = "▶"
         self._icon_pause = "Ⅱ"
         
-        self.audio_slider = QSlider(Qt.Orientation.Horizontal)
-        self.audio_slider.setObjectName("AudioSlider")
+        self.audio_slider = AudioWaveformProgressBar(self)
+        self.audio_slider.setObjectName("AudioWaveformSlider")
         self.audio_slider.setEnabled(False)
-        self.audio_slider.setRange(0, 100)
-        self.audio_slider.sliderPressed.connect(self._on_slider_pressed)
-        self.audio_slider.sliderReleased.connect(self._on_slider_released)
+        self.audio_slider.sigSeekStarted.connect(self._on_audio_seek_started)
+        self.audio_slider.sigSeekFinished.connect(self._on_audio_seek_finished)
         
         self.time_label = QLabel("00:00 / 00:00")
         self.time_label.setObjectName("TimeLabel")
@@ -1683,8 +1685,8 @@ class OverlayWindow(QMainWindow):
             self.play_pause_btn.set_playing(True)
             self.audio_timer.start()
     
-    def _on_slider_pressed(self) -> None:
-        """滑动条按下时暂停播放，避免跳动。"""
+    def _on_audio_seek_started(self) -> None:
+        """波形拖动开始时暂停播放，避免跳动。"""
         if hasattr(self, '_slider_was_playing'):
             return
         self._slider_was_playing = self.player.is_playing()
@@ -1692,14 +1694,12 @@ class OverlayWindow(QMainWindow):
             self.player.pause()
             self.audio_timer.stop()
     
-    def _on_slider_released(self) -> None:
-        """滑动条释放时跳转到新位置并恢复播放。"""
-        position = self.audio_slider.value() / 100.0
+    def _on_audio_seek_finished(self, position: float) -> None:
+        """波形释放时跳转到新位置并恢复播放。"""
         self.player.seek(position)
         if hasattr(self, '_slider_was_playing') and self._slider_was_playing:
             self.player.resume()
-            if self._icon_pause:
-                self.play_pause_btn.setIcon(self._icon_pause)
+            self.play_pause_btn.set_playing(True)
             self.audio_timer.start()
             del self._slider_was_playing
     
@@ -1713,8 +1713,8 @@ class OverlayWindow(QMainWindow):
         duration = self.player.get_duration()
         
         # 更新进度条（但不在拖动时更新）
-        if not self.audio_slider.isSliderDown():
-            self.audio_slider.setValue(int(position * 100))
+        if not self.audio_slider.is_dragging():
+            self.audio_slider.set_progress(position, duration)
         
         # 更新时间标签
         if duration > 0:
@@ -2091,7 +2091,7 @@ class OverlayWindow(QMainWindow):
                 self.play_pause_btn.set_playing(False)
                 self.play_pause_btn.setEnabled(False)
             if hasattr(self, 'audio_slider'):
-                self.audio_slider.setValue(0)
+                self.audio_slider.set_progress(0)
                 self.audio_slider.setEnabled(False)
             if hasattr(self, 'time_label'):
                 self.time_label.setText("00:00 / 00:00")
@@ -2144,7 +2144,7 @@ class OverlayWindow(QMainWindow):
             self.play_pause_btn.setEnabled(True)
             self.play_pause_btn.set_playing(True)
             self.audio_slider.setEnabled(True)
-            self.audio_slider.setValue(0)
+            self.audio_slider.set_progress(0)
             self.audio_timer.start()
         except Exception as e:
             print(f"[ERROR] play_audio crashed: {e}", flush=True)
