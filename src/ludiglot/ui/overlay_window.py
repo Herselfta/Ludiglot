@@ -1081,6 +1081,7 @@ class OverlayWindow(QMainWindow):
                 height: 11px;
                 border-left: 1px solid rgba(170, 155, 106, 90); /* 左侧分割线 */
                 background: rgba(170, 155, 106, 20);
+                border-top-right-radius: 3px; /* 完美贴合外框右上圆角，杜绝溢出冲突 */
             }
             QAbstractSpinBox::down-button {
                 subcontrol-origin: border;
@@ -1090,6 +1091,7 @@ class OverlayWindow(QMainWindow):
                 border-left: 1px solid rgba(170, 155, 106, 90); /* 左侧分割线 */
                 border-top: 1px solid rgba(170, 155, 106, 90);
                 background: rgba(170, 155, 106, 20);
+                border-bottom-right-radius: 3px; /* 完美贴合外框右下圆角，杜绝溢出冲突 */
             }
             QAbstractSpinBox::up-button:hover, QAbstractSpinBox::down-button:hover { 
                 background: rgba(170, 155, 106, 60); 
@@ -1129,6 +1131,10 @@ class OverlayWindow(QMainWindow):
             # 点击回车后确认并清除焦点（隐藏游标）
             size_line_edit.returnPressed.connect(size_line_edit.clearFocus)
             size_line_edit.editingFinished.connect(size_line_edit.clearFocus)
+        
+        # 强制设置标准的 LTR 布局方向，完全隔离并彻底解决父级菜单 RightToLeft 继承导致的按键/间距镜像错乱冲突
+        size_widget.setLayoutDirection(Qt.LayoutDirection.LeftToRight)
+        self.size_spin.setLayoutDirection(Qt.LayoutDirection.LeftToRight)
         
         self.size_spin.setStyleSheet(spinner_qss)
         self.size_spin.setValue(self.current_font_size)
@@ -1184,6 +1190,10 @@ class OverlayWindow(QMainWindow):
             spacing_line_edit.returnPressed.connect(spacing_line_edit.clearFocus)
             spacing_line_edit.editingFinished.connect(spacing_line_edit.clearFocus)
         
+        # 强制设置标准的 LTR 布局方向，完全隔离并彻底解决父级菜单 RightToLeft 继承导致的按键/间距镜像错乱冲突
+        spacing_widget.setLayoutDirection(Qt.LayoutDirection.LeftToRight)
+        self.spacing_spin.setLayoutDirection(Qt.LayoutDirection.LeftToRight)
+        
         self.spacing_spin.setStyleSheet(spinner_qss)
         self.spacing_spin.setButtonSymbols(QDoubleSpinBox.ButtonSymbols.UpDownArrows)
         self.spacing_spin.setValue(self.current_letter_spacing)
@@ -1220,6 +1230,10 @@ class OverlayWindow(QMainWindow):
             # 点击回车后确认并清除焦点（隐藏游标）
             lh_line_edit.returnPressed.connect(lh_line_edit.clearFocus)
             lh_line_edit.editingFinished.connect(lh_line_edit.clearFocus)
+        
+        # 强制设置标准的 LTR 布局方向，完全隔离并彻底解决父级菜单 RightToLeft 继承导致的按键/间距镜像错乱冲突
+        lh_widget.setLayoutDirection(Qt.LayoutDirection.LeftToRight)
+        self.lh_spin.setLayoutDirection(Qt.LayoutDirection.LeftToRight)
         
         self.lh_spin.setStyleSheet(spinner_qss)
         self.lh_spin.setButtonSymbols(QDoubleSpinBox.ButtonSymbols.UpDownArrows)
