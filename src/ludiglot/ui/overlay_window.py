@@ -1872,25 +1872,32 @@ class OverlayWindow(QMainWindow):
             self.audio_timer.start()
     
     def _on_audio_seek_started(self) -> None:
-        """波形拖动开始时暂停播放，避免跳动。"""
-        if hasattr(self, '_slider_was_playing'):
-            return
-        self._slider_was_playing = self.player.is_playing()
-        if self._slider_was_playing:
-            self.player.pause()
-            self.audio_timer.stop()
+        """波形拖动开始。"""
+        pass
     
     def _on_audio_seek_finished(self, position: float) -> None:
-        """波形释放时跳转到新位置并恢复播放。"""
+        """波形释放时跳转到新位置。"""
+        import time
+        self._last_seek_time = time.time()
+        
         self.player.seek(position)
-        if hasattr(self, '_slider_was_playing') and self._slider_was_playing:
-            self.player.resume()
-            self.play_pause_btn.set_playing(True)
-            self.audio_timer.start()
-            del self._slider_was_playing
+        
+        # 立即在 UI 上更新进度和时间，消除异步延迟感
+        duration = self.player.get_duration()
+        if duration > 0:
+            self.audio_slider.set_progress(position, duration)
+            current_ms = int(position * duration)
+            current_sec = current_ms // 1000
+            duration_sec = duration // 1000
+            self.time_label.setText(f"{current_sec//60:02d}:{current_sec%60:02d} / {duration_sec//60:02d}:{duration_sec%60:02d}")
     
     def _update_audio_progress(self) -> None:
         """定时更新音频进度条和时间标签。"""
+        # 如果刚进行过 seek，在 200ms 内不从播放器同步位置，避免异步延迟导致进度条跳回原处
+        import time
+        if hasattr(self, '_last_seek_time') and time.time() - self._last_seek_time < 0.2:
+            return
+
         # 检测是否自然播放完毕（即使 is_playing 还是 True，如果底层 QMediaPlayer 状态已经是 EndOfMedia）
         is_natural_end = False
         if hasattr(self.player, "_player") and self.player._player is not None:

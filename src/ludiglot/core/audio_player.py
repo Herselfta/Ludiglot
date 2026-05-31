@@ -91,7 +91,13 @@ class AudioPlayer:
         if self._player:
             duration = self._player.duration()
             if duration > 0:
-                self._player.setPosition(int(position * duration))
+                target_pos = int(position * duration)
+                self._player.setPosition(target_pos)
+                if not self._is_playing:
+                    # Qt6 FFmpeg 后端在暂停状态下调用 setPosition 不会立即刷新解码器和状态
+                    # 通过极速的 play() + pause() 强行触发媒体引擎 flush，实现暂停态秒级 Seek！
+                    self._player.play()
+                    self._player.pause()
     
     def is_playing(self) -> bool:
         """返回当前是否正在播放。"""
