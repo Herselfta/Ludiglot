@@ -38,8 +38,10 @@ from ludiglot.core.preferences import (
     WindowSize,
     clamp_window_position,
 )
-from ludiglot.core.audio_playback_orchestrator import AudioIntent, AudioPlaybackIdentity
+from ludiglot.ui.audio_controls_presenter import AudioControlsPresenter
+from ludiglot.ui.audio_playback_ui_controller import AudioPlaybackUiController
 from ludiglot.ui.capture_session import CaptureSessionCallbacks, OverlayCaptureSession
+from ludiglot.ui.qt_audio_controls_adapter import QtAudioControlsAdapter
 from ludiglot.ui.qt_capture_adapter import QtCaptureAdapter
 from ludiglot.ui.waveform_progress_bar import AudioWaveformProgressBar
 
@@ -693,9 +695,6 @@ class OverlayWindow(QMainWindow):
         self.audio_index = None
         self.audio_runtime: OverlayAudioRuntime | None = None
         self.last_match: Dict[str, Any] | None = None
-        self.last_text_key: str | None = None
-        self.last_hash: int | None = None
-        self.last_event_name: str | None = None
         self.player = AudioPlayer()
         self._hotkey_listener = None
         self._win_hotkey_filter = None
@@ -727,6 +726,24 @@ class OverlayWindow(QMainWindow):
         
         # 1. 先初始化 UI
         self._setup_ui()
+        self.audio_controls_adapter = QtAudioControlsAdapter(
+            play_pause_button=self.play_pause_btn,
+            slider=self.audio_slider,
+            time_label=self.time_label,
+            timer=self.audio_timer,
+            status=self.signals.status.emit,
+        )
+        self.audio_ui = AudioPlaybackUiController(
+            config_provider=lambda: self.config,
+            runtime_provider=lambda: self.audio_runtime,
+            player=self.player,
+            controls=self.audio_controls_adapter,
+            presenter=AudioControlsPresenter(),
+            status=self.signals.status.emit,
+            log=self.signals.log.emit,
+            error=self.signals.error.emit,
+            audio_index_updated=self._set_audio_index,
+        )
         # 2. 连接所有信号（确保日志等能正常工作）
         self._connect_signals()
         # 3. 恢复配置（覆盖默认值，并调整窗口尺寸）
@@ -1814,90 +1831,19 @@ class OverlayWindow(QMainWindow):
     
     def _toggle_audio_playback(self) -> None:
         """切换音频播放/暂停。"""
-        if self.player.is_playing():
-            self.player.pause()
-            self.play_pause_btn.set_playing(False)
-            self.audio_timer.stop()
-            self.signals.status.emit("已暂停")
-        else:
-            # 如果播放已经结束（进度在最末尾），重新播放时回到起点
-            if self.player.get_position() >= 0.99:
-                self.player.seek(0.0)
-            self.player.resume()
-            self.play_pause_btn.set_playing(True)
-            self.audio_timer.start()
-            
-            # 更新状态为当前播放的文件名
-            src_name = ""
-            if hasattr(self.player, "_player") and self.player._player is not None:
-                src_path = self.player._player.source().toLocalFile()
-                if src_path:
-                    src_name = Path(src_path).name
-            if src_name:
-                self.signals.status.emit(f"正在播放: {src_name}")
-            else:
-                self.signals.status.emit("正在播放")
-    
+        self.audio_ui.toggle()
+
     def _on_audio_seek_started(self) -> None:
         """波形拖动开始。"""
-        pass
-    
+        self.audio_ui.seek_started()
+
     def _on_audio_seek_finished(self, position: float) -> None:
         """波形释放时跳转到新位置。"""
-        import time
-        self._last_seek_time = time.time()
-        
-        self.player.seek(position)
-        
-        # 立即在 UI 上更新进度和时间，消除异步延迟感
-        duration = self.player.get_duration()
-        if duration > 0:
-            self.audio_slider.set_progress(position, duration)
-            current_ms = int(position * duration)
-            current_sec = current_ms // 1000
-            duration_sec = duration // 1000
-            self.time_label.setText(f"{current_sec//60:02d}:{current_sec%60:02d} / {duration_sec//60:02d}:{duration_sec%60:02d}")
-    
+        self.audio_ui.seek_finished(position)
+
     def _update_audio_progress(self) -> None:
         """定时更新音频进度条和时间标签。"""
-        # 如果刚进行过 seek，在 200ms 内不从播放器同步位置，避免异步延迟导致进度条跳回原处
-        import time
-        if hasattr(self, '_last_seek_time') and time.time() - self._last_seek_time < 0.2:
-            return
-
-        # 检测是否自然播放完毕（即使 is_playing 还是 True，如果底层 QMediaPlayer 状态已经是 EndOfMedia）
-        is_natural_end = False
-        if hasattr(self.player, "_player") and self.player._player is not None:
-            from PyQt6.QtMultimedia import QMediaPlayer
-            if self.player._player.mediaStatus() == QMediaPlayer.MediaStatus.EndOfMedia:
-                is_natural_end = True
-                self.player.stop()  # 这会设置播放器的 _is_playing 为 False 并停止播放
-        
-        if not self.player.is_playing() or is_natural_end:
-            self.audio_timer.stop()
-            self.play_pause_btn.set_playing(False)
-            duration = self.player.get_duration()
-            if duration > 0:
-                self.audio_slider.set_progress(1.0, duration)
-                current_sec = duration // 1000
-                self.time_label.setText(f"{current_sec//60:02d}:{current_sec%60:02d} / {current_sec//60:02d}:{current_sec%60:02d}")
-            if is_natural_end:
-                self.signals.status.emit("播放已结束")
-            return
-        
-        position = self.player.get_position()
-        duration = self.player.get_duration()
-        
-        # 更新进度条（但不在拖动时更新）
-        if not self.audio_slider.is_dragging():
-            self.audio_slider.set_progress(position, duration)
-        
-        # 更新时间标签
-        if duration > 0:
-            current_ms = int(position * duration)
-            current_sec = current_ms // 1000
-            duration_sec = duration // 1000
-            self.time_label.setText(f"{current_sec//60:02d}:{current_sec%60:02d} / {duration_sec//60:02d}:{duration_sec%60:02d}")
+        self.audio_ui.update_progress()
 
     def _translate_title(self, title: str) -> str:
         """标题翻译委托给核心匹配器，UI 层只负责调用。"""
@@ -1927,10 +1873,11 @@ class OverlayWindow(QMainWindow):
     def trigger_capture(self) -> None:
         self.capture_requested.emit(True)
 
+    def _set_audio_index(self, audio_index) -> None:
+        self.audio_index = audio_index
+
     def _clear_capture_audio_state(self) -> None:
-        self.last_text_key = None
-        self.last_hash = None
-        self.last_event_name = None
+        self.audio_ui.clear_candidate()
 
     def _is_voice_eligible(self, text_key: str | None) -> bool:
         if not text_key:
@@ -1975,9 +1922,7 @@ class OverlayWindow(QMainWindow):
         try:
             self.stop_audio(emit_status=False)
             self.last_match = result
-            self.last_text_key = None
-            self.last_hash = None
-            self.last_event_name = None
+            self.audio_ui.clear_candidate()
 
             model = shape_translation_display(
                 result,
@@ -1998,45 +1943,13 @@ class OverlayWindow(QMainWindow):
                 self.signals.log.emit(line)
 
             audio_candidate = model.audio_candidate
-            if audio_candidate and audio_candidate.origin == "multi":
-                self.signals.log.emit("[WINDOW] 多条目模式：检测到高置信度音频，启用音频控件")
-                self.play_pause_btn.setEnabled(True)
-                self.audio_slider.setEnabled(True)
-                self._play_audio_for_key(audio_candidate.text_key)
-            elif audio_candidate:
-                t_audio = time.time()
-                identity = None
-                if self.audio_runtime:
-                    identity = self.audio_runtime.resolve_intent(
-                        AudioIntent(
-                            text_key=audio_candidate.text_key,
-                            db_event=audio_candidate.db_event,
-                            db_hash=audio_candidate.db_hash,
-                            origin=audio_candidate.origin,
-                        )
-                    )
-                if identity:
-                    self.last_text_key = identity.text_key
-                    self.last_hash = identity.hash_value
-                    self.last_event_name = identity.event_name
-                    if identity.source_type == "db_fallback":
-                        self.signals.log.emit(f"[MATCH] text_key={audio_candidate.text_key} 使用数据库哈希={self.last_hash}")
-                    else:
-                        self.signals.log.emit(f"[MATCH] text_key={audio_candidate.text_key} hash={self.last_hash} ({identity.source_type})")
-                else:
-                    self.last_text_key = audio_candidate.text_key
-                    self.signals.log.emit(f"[MATCH] text_key={audio_candidate.text_key} 未找到对应音频")
-                self.signals.log.emit(f"[PERF] 音频解析: {(time.time()-t_audio)*1000:.1f}ms")
-            elif model.is_multi:
-                self.signals.log.emit("[WINDOW] 禁用音频控件（多条目模式）")
+            t_audio = time.time()
+            has_audio = self.audio_ui.load_result_candidate(audio_candidate, is_multi=model.is_multi)
+            self.signals.log.emit(f"[PERF] 音频解析: {(time.time()-t_audio)*1000:.1f}ms")
 
             en_font, cn_font = self._build_content_fonts()
             self._apply_text_document_style(self.source_label, en_font, force_char_style=not self._last_en_is_html)
             self._apply_text_document_style(self.cn_label, cn_font, force_char_style=not self._last_cn_is_html)
-
-            has_audio = self.last_hash is not None or (audio_candidate is not None and audio_candidate.origin == "multi")
-            self.play_pause_btn.setEnabled(has_audio)
-            self.audio_slider.setEnabled(has_audio)
 
             if model.is_multi:
                 self.show()
@@ -2050,7 +1963,7 @@ class OverlayWindow(QMainWindow):
                 self.show_and_activate()
                 self.signals.log.emit("[DEBUG] show_and_activate returned.")
 
-            if self.config.play_audio and self.last_hash is not None:
+            if self.config.play_audio and has_audio and self.audio_ui.has_current_audio:
                 self.signals.log.emit("[DEBUG] Calling play_audio...")
                 self.play_audio()
                 self.signals.log.emit("[DEBUG] play_audio returned.")
@@ -2103,78 +2016,13 @@ class OverlayWindow(QMainWindow):
         QApplication.processEvents()  # 立即处理事件
 
     def stop_audio(self, emit_status: bool = True) -> None:
-        if hasattr(self, "player"):
-            self.player.stop()
-            if emit_status:
-                self.signals.status.emit("已停止播放")
-            
-            # 重置音频控制UI
-            if hasattr(self, 'audio_timer'):
-                self.audio_timer.stop()
-            if hasattr(self, 'play_pause_btn'):
-                self.play_pause_btn.set_playing(False)
-                self.play_pause_btn.setEnabled(False)
-            if hasattr(self, 'audio_slider'):
-                self.audio_slider.set_progress(0)
-                self.audio_slider.setEnabled(False)
-            if hasattr(self, 'time_label'):
-                self.time_label.setText("00:00 / 00:00")
+        self.audio_ui.stop(emit_status=emit_status)
 
     def _play_audio_for_key(self, text_key: str) -> None:
-        if not text_key:
-            return
-        identity = self.audio_runtime.resolve_intent(AudioIntent(text_key=text_key, origin="multi")) if self.audio_runtime else None
-        if not identity:
-            self.signals.log.emit(f"[AUDIO] text_key={text_key} 未找到对应音频，跳过播放")
-            return
-        self.last_text_key = identity.text_key
-        self.last_hash = identity.hash_value
-        self.last_event_name = identity.event_name
-        self.signals.log.emit(f"[AUDIO] text_key={text_key} hash={self.last_hash} ({identity.source_type})")
-        if self.config.play_audio:
-            self.play_audio()
+        self.audio_ui.play_for_key(text_key)
 
     def play_audio(self) -> None:
-        if self.last_hash is None or not self.config.audio_cache_path or not self.audio_runtime:
-            return
-
-        try:
-            print("[DEBUG] play_audio started", flush=True)
-            identity = AudioPlaybackIdentity(
-                text_key=self.last_text_key,
-                hash_value=int(self.last_hash),
-                event_name=self.last_event_name,
-                source_type="unknown",
-            )
-            decision = self.audio_runtime.prepare_playback(identity)
-            self.audio_index = self.audio_runtime.audio_index
-
-            if decision.identity:
-                self.last_text_key = decision.identity.text_key
-                self.last_hash = decision.identity.hash_value
-                self.last_event_name = decision.identity.event_name
-                print(f"[DEBUG] play_audio resolved: {decision.identity.source_type}", flush=True)
-
-            if decision.path is None:
-                self.stop_audio(emit_status=False)
-                self.signals.status.emit(decision.status_message or "未找到对应音频文件")
-                print("[DEBUG] play_audio: path not found", flush=True)
-                return
-
-            self.signals.status.emit(f"正在播放: {decision.path.name}")
-            print(f"[DEBUG] Invoking self.player.play: {decision.path}", flush=True)
-            self.player.play(str(decision.path), block=False)
-
-            self.play_pause_btn.setEnabled(True)
-            self.play_pause_btn.set_playing(True)
-            self.audio_slider.setEnabled(True)
-            self.audio_slider.set_progress(0)
-            self.audio_timer.start()
-        except Exception as e:
-            print(f"[ERROR] play_audio crashed: {e}", flush=True)
-            import traceback
-            traceback.print_exc()
-            self.signals.error.emit(f"播放失败: {e}")
+        self.audio_ui.play_current()
 
 
 
