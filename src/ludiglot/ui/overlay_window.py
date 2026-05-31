@@ -1420,27 +1420,27 @@ class OverlayWindow(QMainWindow):
                 color: #dcdcdc;
                 font-family: "Segoe UI", "Source Han Serif SC", sans-serif;
                 font-size: 12px;
-                border: 1px solid rgba(170, 155, 106, 90);
+                border: 1px solid #494535; /* 实心不透明金边，杜绝透明窗口下文字透底 */
                 border-radius: 2px;
                 padding: 0px; /* 彻底移除上下左右 padding，使首尾条目高亮完美触达菜单边界 */
                 margin: 0px; /* 强制外边距为0，彻底消除一切空洞的黑底缝隙 */
             }}
             QMenu::item {{
-                padding: 5px 10px; /* 缩减左右边距以紧凑界面，解决左右白边过宽问题 */
-                margin: 0px; /* 强制项与项之间的外边距为0 */
-                border-radius: 0px; /* 移除高亮圆角，防止圆角收缩导致左右留空丑陋 */
+                padding: 5px 10px;
+                margin: 0px;
+                border-radius: 0px;
                 text-align: {item_align};
-                border-left: 3px solid transparent; 
+                border-left: 3px solid #5a5035; /* 常态：暗金色实心，完全不透明 */
             }}
             QMenu::item:checked {{
                 background-color: rgba(170, 155, 106, 35);
                 color: #ffffff;
-                border-left: 3px solid #aa9b6a; /* 保证高亮左侧绝对直角 */
+                border-left: 3px solid #c9a651; /* 选中态：提亮饱和金色，与同色系高亮背景形成对比 */
             }}
             QMenu::item:selected {{
                 background-color: rgba(170, 155, 106, 25);
                 color: #ffffff;
-                border-left: 3px solid #aa9b6a; /* 保证高亮左侧绝对直角 */
+                border-left: 3px solid #c9a651; /* 悬浮态：同上，明亮金色杠明确可见 */
             }}
             QMenu::item:disabled {{
                 color: rgba(255, 255, 255, 40);
