@@ -1304,80 +1304,7 @@ class OverlayWindow(QMainWindow):
     def _initialize_menu_style(self):
         """初始化菜单样式，确保所有用户都能看到正确的样式"""
         direction = getattr(self, "_menu_direction", "right")
-        layout_dir = Qt.LayoutDirection.RightToLeft if direction == "left" else Qt.LayoutDirection.LeftToRight
-        item_align = "right" if direction == "left" else "left"
-        arrow_svg = (
-            "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'><path fill='transparent' d='M0 0 H10 V10 H0 Z'/></svg>"
-            if direction == "left" else
-            "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='8' height='8' viewBox='0 0 10 10'><path fill='%23aa9b6a' d='M3 1 L7 5 L3 9 Z'/></svg>"
-        )
-        
-        menu_style = f"""
-            QMenu {{
-                background-color: rgba(15, 18, 22, 245);
-                color: #dcdcdc;
-                font-family: "Segoe UI", "Source Han Serif SC", sans-serif;
-                font-size: 12px;
-                border: 1px solid rgba(170, 155, 106, 90);
-                border-radius: 2px;
-                padding: 0px; /* 彻底移除上下左右 padding，使首尾条目高亮完美触达菜单边界 */
-                margin: 0px; /* 强制外边距为0，彻底消除一切空洞的黑底缝隙 */
-            }}
-            QMenu::item {{
-                padding: 5px 10px; /* 缩减左右边距以紧凑界面，解决左右白边过宽问题 */
-                margin: 0px; 
-                border-radius: 0px; 
-                text-align: {item_align};
-                border: none; /* 彻底移除所有边框导致的额外空白断层 */
-            }}
-            QMenu::item:checked {{
-                background-color: rgba(170, 155, 106, 35);
-                color: #ffffff;
-            }}
-            QMenu::item:selected {{
-                background-color: rgba(170, 155, 106, 25);
-                color: #ffffff;
-            }}
-            QMenu::item:disabled {{
-                color: rgba(255, 255, 255, 40);
-                background-color: transparent;
-            }}
-            QMenu::separator {{
-                height: 1px;
-                background-color: rgba(170, 155, 106, 40);
-                margin: 0px 8px; /* 彻底移除上下 margin，使选项高亮与分隔线之间零缝隙完美贴合 */
-            }}
-            QMenu::right-arrow {{
-                width: 8px;
-                height: 8px;
-                image: url("{arrow_svg}");
-            }}
-            QMenu::left-arrow {{
-                width: 8px;
-                height: 8px;
-                image: url("{arrow_svg}");
-            }}
-            QMenu::indicator {{
-                width: 0px;
-                height: 0px;
-                image: none;
-            }}
-            QLabel {{
-                color: #dcdcdc;
-                font-family: "Segoe UI", "Source Han Serif SC", sans-serif;
-                font-size: 11px;
-            }}
-        """
-        
-        # 递归设置所有菜单的方向和样式
-        menus = [self.window_menu]
-        while menus:
-            m = menus.pop(0)
-            m.setLayoutDirection(layout_dir)
-            m.setStyleSheet(menu_style)
-            for action in m.actions():
-                if action.menu():
-                    menus.append(action.menu())
+        self._set_menu_direction(direction)
 
     def _show_window_menu_old(self):
         """显示窗口菜单，实现右边缘对齐"""
@@ -1416,7 +1343,7 @@ class OverlayWindow(QMainWindow):
         
         menu_style = f"""
             QMenu {{
-                background-color: rgba(15, 18, 22, 245);
+                background-color: #0f1216;
                 color: #dcdcdc;
                 font-family: "Segoe UI", "Source Han Serif SC", sans-serif;
                 font-size: 12px;
