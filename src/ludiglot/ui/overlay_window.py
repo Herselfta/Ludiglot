@@ -75,6 +75,26 @@ class PersistentMenu(QMenu):
         # 启用无边框窗口标记，彻底剥离 Windows 11 等操作系统的 native 强行大圆角和原生阴影，使 2px border-radius 生效
         self.setWindowFlags(self.windowFlags() | Qt.WindowType.FramelessWindowHint | Qt.WindowType.NoDropShadowWindowHint)
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        parent_menu = self.parent()
+        # 如果当前是一个嵌套子菜单，我们强制重新计算它的弹出坐标，让它完美贴合在母菜单边界之外，绝不覆盖
+        if isinstance(parent_menu, QMenu):
+            # 获取母菜单的物理屏幕坐标和宽度
+            p_geom = parent_menu.geometry()
+            my_geom = self.geometry()
+            
+            # 检测当前的展开方向是向左还是向右，并做高精度对齐
+            direction = "left" if parent_menu.layoutDirection() == Qt.LayoutDirection.RightToLeft else "right"
+            if direction == "left":
+                # 向左展开：子选单的右边界对齐母选单的左边界
+                new_x = p_geom.x() - my_geom.width()
+            else:
+                # 向右展开：子选单的左边界对齐母选单的右边界
+                new_x = p_geom.x() + p_geom.width()
+                
+            self.move(new_x, my_geom.y())
+
     def mouseReleaseEvent(self, event):
         action = self.actionAt(event.position().toPoint())
         
@@ -1096,7 +1116,7 @@ class OverlayWindow(QMainWindow):
         size_label.setStyleSheet("color: white; font-weight: normal;")
         self.size_spin = GoldSpinBox()
         self.size_spin.setRange(8, 72)
-        self.size_spin.setFixedWidth(80)
+        self.size_spin.setFixedWidth(65)
         self.size_spin.setButtonSymbols(QSpinBox.ButtonSymbols.UpDownArrows)
         self.size_spin.setAlignment(Qt.AlignmentFlag.AlignCenter)
         
@@ -1121,7 +1141,6 @@ class OverlayWindow(QMainWindow):
             font_size_menu.addAction(size_action)
         
         font_weight_menu = PersistentMenu("Weight", font_settings_menu)
-        font_weight_menu.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
         font_weight_menu.setStyleSheet(self.window_menu.styleSheet())
         font_settings_menu.addMenu(font_weight_menu)
         
@@ -1141,7 +1160,6 @@ class OverlayWindow(QMainWindow):
         
         # 字距调节器
         letter_spacing_menu = PersistentMenu("Letter Spacing", font_settings_menu)
-        letter_spacing_menu.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
         letter_spacing_menu.setStyleSheet(self.window_menu.styleSheet())
         font_settings_menu.addMenu(letter_spacing_menu)
         
@@ -1155,7 +1173,7 @@ class OverlayWindow(QMainWindow):
         self.spacing_spin = GoldDoubleSpinBox()
         self.spacing_spin.setRange(-10, 50)
         self.spacing_spin.setSingleStep(0.5)
-        self.spacing_spin.setFixedWidth(80)
+        self.spacing_spin.setFixedWidth(65)
         self.spacing_spin.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.spacing_spin.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
         spacing_line_edit = self.spacing_spin.lineEdit()
@@ -1179,7 +1197,6 @@ class OverlayWindow(QMainWindow):
         
         # 行距调节器
         line_spacing_menu = PersistentMenu("Line Spacing", font_settings_menu)
-        line_spacing_menu.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
         line_spacing_menu.setStyleSheet(self.window_menu.styleSheet())
         font_settings_menu.addMenu(line_spacing_menu)
         
@@ -1193,7 +1210,7 @@ class OverlayWindow(QMainWindow):
         self.lh_spin = GoldDoubleSpinBox()
         self.lh_spin.setRange(0.5, 5.0)
         self.lh_spin.setSingleStep(0.1)
-        self.lh_spin.setFixedWidth(80)
+        self.lh_spin.setFixedWidth(65)
         self.lh_spin.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.lh_spin.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
         lh_line_edit = self.lh_spin.lineEdit()
@@ -1266,12 +1283,12 @@ class OverlayWindow(QMainWindow):
         direction = getattr(self, "_menu_direction", "right")
         
         if direction == "left":
-            # 强制右边缘对齐：菜单左 X = 按钮右 X - 菜单宽度
-            target_x = btn_right_x - menu_w
+            # 强制右边缘对齐：菜单左 X = 按钮右 X - 菜单宽度 - 2 (视觉缝隙补偿)
+            target_x = btn_right_x - menu_w - 2
             self.window_menu.exec(QPoint(target_x, btn_bottom_y))
         else:
-            # 向右展开：左边缘对齐 (默认行为)
-            self.window_menu.exec(QPoint(btn_topleft.x(), btn_bottom_y))
+            # 向右展开：左边缘对齐 + 2 (默认行为)
+            self.window_menu.exec(QPoint(btn_topleft.x() + 2, btn_bottom_y))
     
     def _initialize_menu_style(self):
         """初始化菜单样式，确保所有用户都能看到正确的样式"""
@@ -1279,49 +1296,54 @@ class OverlayWindow(QMainWindow):
         layout_dir = Qt.LayoutDirection.RightToLeft if direction == "left" else Qt.LayoutDirection.LeftToRight
         item_align = "right" if direction == "left" else "left"
         arrow_svg = (
-            "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'><path fill='%23aa9b6a' d='M7 2 L3 5 L7 8 Z'/></svg>"
+            "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'><path fill='transparent' d='M0 0 H10 V10 H0 Z'/></svg>"
             if direction == "left" else
-            "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'><path fill='%23aa9b6a' d='M3 2 L7 5 L3 8 Z'/></svg>"
+            "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='8' height='8' viewBox='0 0 10 10'><path fill='%23aa9b6a' d='M3 1 L7 5 L3 9 Z'/></svg>"
         )
         
         menu_style = f"""
             QMenu {{
-                background-color: rgba(15, 18, 22, 240);
+                background-color: rgba(15, 18, 22, 245);
                 color: #dcdcdc;
-                font-family: "Segoe UI", "Source Han Serif SC", "思源宋体", serif;
-                font-size: 13px;
-                border: 1px solid rgba(170, 155, 106, 120);
+                font-family: "Segoe UI", "Source Han Serif SC", sans-serif;
+                font-size: 12px;
+                border: 1px solid rgba(170, 155, 106, 90);
                 border-radius: 2px;
-                padding: 6px 4px;
+                padding: 4px 0px; /* 移除左右 padding，让高亮覆盖整行选项 */
+                margin: 0px; /* 强制外边距为0，彻底消除一切空洞的黑底缝隙 */
             }}
             QMenu::item {{
-                padding: 8px 24px;
-                border-radius: 4px;
+                padding: 5px 10px; /* 缩减左右边距以紧凑界面，解决左右白边过宽问题 */
+                margin: 0px; 
+                border-radius: 0px; 
                 text-align: {item_align};
-                border-left: 3px solid transparent; /* 始终占用空间，防止选中时宽度抖动 */
+                border: none; /* 彻底移除所有边框导致的额外空白断层 */
             }}
             QMenu::item:checked {{
-                background-color: rgba(170, 155, 106, 45);
+                background-color: rgba(170, 155, 106, 35);
                 color: #ffffff;
-                border-left: 3px solid #aa9b6a;
             }}
             QMenu::item:selected {{
-                background-color: rgba(170, 155, 106, 30);
+                background-color: rgba(170, 155, 106, 25);
                 color: #ffffff;
-                border-left: 3px solid #aa9b6a;
             }}
             QMenu::item:disabled {{
-                color: rgba(255, 255, 255, 60);
+                color: rgba(255, 255, 255, 40);
                 background-color: transparent;
             }}
             QMenu::separator {{
                 height: 1px;
-                background-color: rgba(170, 155, 106, 60);
-                margin: 6px 12px;
+                background-color: rgba(170, 155, 106, 40);
+                margin: 4px 8px;
             }}
             QMenu::right-arrow {{
-                width: 10px;
-                height: 10px;
+                width: 8px;
+                height: 8px;
+                image: url("{arrow_svg}");
+            }}
+            QMenu::left-arrow {{
+                width: 8px;
+                height: 8px;
                 image: url("{arrow_svg}");
             }}
             QMenu::indicator {{
@@ -1332,7 +1354,7 @@ class OverlayWindow(QMainWindow):
             QLabel {{
                 color: #dcdcdc;
                 font-family: "Segoe UI", "Source Han Serif SC", sans-serif;
-                font-size: 12px;
+                font-size: 11px;
             }}
         """
         
@@ -1376,49 +1398,56 @@ class OverlayWindow(QMainWindow):
         # 根据方向更新菜单样式（统一左侧高亮条）
         item_align = "right" if direction == "left" else "left"
         arrow_svg = (
-            "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'><path fill='%23aa9b6a' d='M7 2 L3 5 L7 8 Z'/></svg>"
+            "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'><path fill='transparent' d='M0 0 H10 V10 H0 Z'/></svg>"
             if direction == "left" else
-            "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'><path fill='%23aa9b6a' d='M3 2 L7 5 L3 8 Z'/></svg>"
+            "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='8' height='8' viewBox='0 0 10 10'><path fill='%23aa9b6a' d='M3 1 L7 5 L3 9 Z'/></svg>"
         )
         
         menu_style = f"""
             QMenu {{
-                background-color: rgba(15, 18, 22, 240);
+                background-color: rgba(15, 18, 22, 245);
                 color: #dcdcdc;
-                font-family: "Segoe UI", "Source Han Serif SC", "思源宋体", serif;
-                font-size: 13px;
-                border: 1px solid rgba(170, 155, 106, 120);
+                font-family: "Segoe UI", "Source Han Serif SC", sans-serif;
+                font-size: 12px;
+                border: 1px solid rgba(170, 155, 106, 90);
                 border-radius: 2px;
-                padding: 6px 4px;
+                padding: 4px 0px; /* 移除左右 padding，让高亮覆盖整行选项 */
+                margin: 0px; /* 强制外边距为0，彻底消除一切空洞的黑底缝隙 */
             }}
             QMenu::item {{
-                padding: 8px 24px;
-                border-radius: 4px;
+                padding: 5px 10px; /* 缩减左右边距以紧凑界面，解决左右白边过宽问题 */
+                margin: 0px; /* 强制项与项之间的外边距为0 */
+                border-radius: 0px; /* 移除高亮圆角，防止圆角收缩导致左右留空丑陋 */
                 text-align: {item_align};
-                border-left: 3px solid transparent; /* 始终占用空间，防止选中时宽度抖动 */
+                border-left: 3px solid transparent; 
             }}
             QMenu::item:checked {{
-                background-color: rgba(170, 155, 106, 45);
+                background-color: rgba(170, 155, 106, 35);
                 color: #ffffff;
-                border-left: 3px solid #aa9b6a;
+                border-left: 3px solid #aa9b6a; /* 保证高亮左侧绝对直角 */
             }}
             QMenu::item:selected {{
-                background-color: rgba(170, 155, 106, 30);
+                background-color: rgba(170, 155, 106, 25);
                 color: #ffffff;
-                border-left: 3px solid #aa9b6a;
+                border-left: 3px solid #aa9b6a; /* 保证高亮左侧绝对直角 */
             }}
             QMenu::item:disabled {{
-                color: rgba(255, 255, 255, 60);
+                color: rgba(255, 255, 255, 40);
                 background-color: transparent;
             }}
             QMenu::separator {{
                 height: 1px;
-                background-color: rgba(170, 155, 106, 60);
-                margin: 6px 12px;
+                background-color: rgba(170, 155, 106, 40);
+                margin: 4px 8px;
             }}
             QMenu::right-arrow {{
-                width: 10px;
-                height: 10px;
+                width: 8px;
+                height: 8px;
+                image: url("{arrow_svg}");
+            }}
+            QMenu::left-arrow {{
+                width: 8px;
+                height: 8px;
                 image: url("{arrow_svg}");
             }}
             QMenu::indicator {{
@@ -1429,7 +1458,7 @@ class OverlayWindow(QMainWindow):
             QLabel {{
                 color: #dcdcdc;
                 font-family: "Segoe UI", "Source Han Serif SC", sans-serif;
-                font-size: 12px;
+                font-size: 11px;
             }}
         """
         
