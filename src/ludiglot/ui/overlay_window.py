@@ -68,6 +68,13 @@ from ludiglot.ui.waveform_progress_bar import AudioWaveformProgressBar
 
 class PersistentMenu(QMenu):
     """自定义菜单，支持在操作某些控件时保持开启。"""
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # 启用半透明背景，去除系统默认白色底框
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        # 启用无边框窗口标记，彻底剥离 Windows 11 等操作系统的 native 强行大圆角和原生阴影，使 2px border-radius 生效
+        self.setWindowFlags(self.windowFlags() | Qt.WindowType.FramelessWindowHint | Qt.WindowType.NoDropShadowWindowHint)
+
     def mouseReleaseEvent(self, event):
         action = self.actionAt(event.position().toPoint())
         
@@ -77,6 +84,104 @@ class PersistentMenu(QMenu):
             return # 关键：不调用 super() 阻止菜单关闭
             
         super().mouseReleaseEvent(event)
+
+
+class GoldSpinBox(QSpinBox):
+    """自绘制箭头的金铜色微调输入框，确保在任何布局和渲染引擎下100%显示完美的矢量三角形图标"""
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        
+        from PyQt6.QtWidgets import QStyle, QStyleOptionSpinBox
+        from PyQt6.QtGui import QPolygonF
+        opt = QStyleOptionSpinBox()
+        self.initStyleOption(opt)
+        
+        # 获取向上和向下按钮的物理区域
+        up_rect = self.style().subControlRect(QStyle.ComplexControl.CC_SpinBox, opt, QStyle.SubControl.SC_SpinBoxUp, self)
+        down_rect = self.style().subControlRect(QStyle.ComplexControl.CC_SpinBox, opt, QStyle.SubControl.SC_SpinBoxDown, self)
+        
+        # 获取鼠标相对于控件的全局位置
+        mouse_pos = self.mapFromGlobal(QCursor.pos())
+        
+        # 绘制向上箭头
+        if not up_rect.isEmpty():
+            painter.save()
+            is_hover = self.underMouse() and up_rect.contains(mouse_pos)
+            color = QColor(255, 255, 255, 255) if is_hover else QColor(170, 155, 106, 220)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(color)
+            
+            cx = up_rect.x() + up_rect.width() / 2.0
+            cy = up_rect.y() + up_rect.height() / 2.0
+            poly = QPolygonF([QPointF(cx, cy - 2.5), QPointF(cx + 3.5, cy + 1.5), QPointF(cx - 3.5, cy + 1.5)])
+            painter.drawPolygon(poly)
+            painter.restore()
+
+        # 绘制向下箭头
+        if not down_rect.isEmpty():
+            painter.save()
+            is_hover = self.underMouse() and down_rect.contains(mouse_pos)
+            color = QColor(255, 255, 255, 255) if is_hover else QColor(170, 155, 106, 220)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(color)
+            
+            cx = down_rect.x() + down_rect.width() / 2.0
+            cy = down_rect.y() + down_rect.height() / 2.0
+            poly = QPolygonF([QPointF(cx - 3.5, cy - 1.5), QPointF(cx + 3.5, cy - 1.5), QPointF(cx, cy + 2.5)])
+            painter.drawPolygon(poly)
+            painter.restore()
+
+
+class GoldDoubleSpinBox(QDoubleSpinBox):
+    """自绘制箭头的金铜色双精度微调输入框，确保在任何布局和渲染引擎下100%显示完美的矢量三角形图标"""
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        
+        from PyQt6.QtWidgets import QStyle, QStyleOptionSpinBox
+        from PyQt6.QtGui import QPolygonF
+        opt = QStyleOptionSpinBox()
+        self.initStyleOption(opt)
+        
+        # 获取向上和向下按钮的物理区域
+        up_rect = self.style().subControlRect(QStyle.ComplexControl.CC_SpinBox, opt, QStyle.SubControl.SC_SpinBoxUp, self)
+        down_rect = self.style().subControlRect(QStyle.ComplexControl.CC_SpinBox, opt, QStyle.SubControl.SC_SpinBoxDown, self)
+        
+        # 获取鼠标相对于控件的全局位置
+        mouse_pos = self.mapFromGlobal(QCursor.pos())
+        
+        # 绘制向上箭头
+        if not up_rect.isEmpty():
+            painter.save()
+            is_hover = self.underMouse() and up_rect.contains(mouse_pos)
+            color = QColor(255, 255, 255, 255) if is_hover else QColor(170, 155, 106, 220)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(color)
+            
+            cx = up_rect.x() + up_rect.width() / 2.0
+            cy = up_rect.y() + up_rect.height() / 2.0
+            poly = QPolygonF([QPointF(cx, cy - 2.5), QPointF(cx + 3.5, cy + 1.5), QPointF(cx - 3.5, cy + 1.5)])
+            painter.drawPolygon(poly)
+            painter.restore()
+
+        # 绘制向下箭头
+        if not down_rect.isEmpty():
+            painter.save()
+            is_hover = self.underMouse() and down_rect.contains(mouse_pos)
+            color = QColor(255, 255, 255, 255) if is_hover else QColor(170, 155, 106, 220)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(color)
+            
+            cx = down_rect.x() + down_rect.width() / 2.0
+            cy = down_rect.y() + down_rect.height() / 2.0
+            poly = QPolygonF([QPointF(cx - 3.5, cy - 1.5), QPointF(cx + 3.5, cy - 1.5), QPointF(cx, cy + 2.5)])
+            painter.drawPolygon(poly)
+            painter.restore()
 
 
 class PlayPauseButton(QPushButton):
@@ -876,13 +981,11 @@ class OverlayWindow(QMainWindow):
 
         # OCR 设置子菜单
         ocr_settings_menu = PersistentMenu("OCR Settings", self.window_menu)
-        ocr_settings_menu.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
         ocr_settings_menu.setStyleSheet(self.window_menu.styleSheet())
         self.window_menu.addMenu(ocr_settings_menu)
 
         # OCR 后端选择
         ocr_backend_menu = PersistentMenu("Backend", ocr_settings_menu)
-        ocr_backend_menu.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
         ocr_backend_menu.setStyleSheet(self.window_menu.styleSheet())
         ocr_settings_menu.addMenu(ocr_backend_menu)
 
@@ -905,7 +1008,6 @@ class OverlayWindow(QMainWindow):
 
         # OCR 模式选择
         ocr_mode_menu = PersistentMenu("Mode", ocr_settings_menu)
-        ocr_mode_menu.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
         ocr_mode_menu.setStyleSheet(self.window_menu.styleSheet())
         ocr_settings_menu.addMenu(ocr_mode_menu)
 
@@ -929,63 +1031,58 @@ class OverlayWindow(QMainWindow):
         
         # 字体设置子菜单
         font_settings_menu = PersistentMenu("Font Settings", self.window_menu)
-        font_settings_menu.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
         font_settings_menu.setStyleSheet(self.window_menu.styleSheet())
         self.window_menu.addMenu(font_settings_menu)
         
         # 字号调节器
         font_size_menu = PersistentMenu("Size", font_settings_menu)
-        font_size_menu.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
         font_size_menu.setStyleSheet(self.window_menu.styleSheet())
         font_settings_menu.addMenu(font_size_menu)
         
         # 共享调节器样式
         spinner_qss = """
-            QSpinBox, QDoubleSpinBox { 
-                background: #444; 
-                color: white; 
-                border: 1px solid #666; 
-                border-radius: 3px; 
-                padding: 2px 22px 2px 2px;
-                selection-background-color: #666;
+            QAbstractSpinBox { 
+                background: rgba(15, 18, 22, 255); 
+                color: #f0f4f8; 
+                border: 1px solid rgba(170, 155, 106, 90); 
+                border-radius: 4px; 
+                padding: 4px 22px 4px 6px; /* 22px 右边距：为右侧的增减按钮留出空间 */
+                font-family: "Segoe UI", "Source Han Serif SC", sans-serif;
+                font-size: 11px;
+                selection-background-color: rgba(170, 155, 106, 80);
             }
-            QSpinBox::up-button, QDoubleSpinBox::up-button {
+            QAbstractSpinBox:hover {
+                border: 1px solid rgba(170, 155, 106, 200);
+            }
+            QAbstractSpinBox::up-button {
                 subcontrol-origin: border;
-                subcontrol-position: top right;
-                width: 20px;
-                height: 10px;
-                border-left: 1px solid #666;
-                background: #555;
+                subcontrol-position: top right; /* 按钮靠右边 */
+                width: 18px;
+                height: 11px;
+                border-left: 1px solid rgba(170, 155, 106, 90); /* 左侧分割线 */
+                background: rgba(170, 155, 106, 20);
             }
-            QSpinBox::down-button, QDoubleSpinBox::down-button {
+            QAbstractSpinBox::down-button {
                 subcontrol-origin: border;
-                subcontrol-position: bottom right;
-                width: 20px;
-                height: 10px;
-                border-left: 1px solid #666;
-                border-top: 1px solid #666;
-                background: #555;
+                subcontrol-position: bottom right; /* 按钮靠右边 */
+                width: 18px;
+                height: 11px;
+                border-left: 1px solid rgba(170, 155, 106, 90); /* 左侧分割线 */
+                border-top: 1px solid rgba(170, 155, 106, 90);
+                background: rgba(170, 155, 106, 20);
             }
-            QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover,
-            QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover { 
-                background: #666; 
+            QAbstractSpinBox::up-button:hover, QAbstractSpinBox::down-button:hover { 
+                background: rgba(170, 155, 106, 60); 
             }
-            /* 之前尝试使用边框三角形绘制箭头，在部分环境会退化成矩形，已确认无效 */
-            QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {
-                image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='8' height='8' viewBox='0 0 8 8'><path fill='%23cccccc' d='M4 2 L7 6 H1 Z'/></svg>");
-                width: 8px;
-                height: 8px;
+            QAbstractSpinBox::up-arrow {
+                image: none; /* 彻底禁用图像，交由底层 Gold 派生类 paintEvent 强行矢量精准绘制 */
+                width: 0px;
+                height: 0px;
             }
-            QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {
-                image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='8' height='8' viewBox='0 0 8 8'><path fill='%23cccccc' d='M1 2 H7 L4 6 Z'/></svg>");
-                width: 8px;
-                height: 8px;
-            }
-            QSpinBox::up-arrow:hover, QDoubleSpinBox::up-arrow:hover {
-                image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='8' height='8' viewBox='0 0 8 8'><path fill='%23ffffff' d='M4 2 L7 6 H1 Z'/></svg>");
-            }
-            QSpinBox::down-arrow:hover, QDoubleSpinBox::down-arrow:hover {
-                image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='8' height='8' viewBox='0 0 8 8'><path fill='%23ffffff' d='M1 2 H7 L4 6 Z'/></svg>");
+            QAbstractSpinBox::down-arrow {
+                image: none; /* 彻底禁用图像，交由底层 Gold 派生类 paintEvent 强行矢量精准绘制 */
+                width: 0px;
+                height: 0px;
             }
         """
 
@@ -997,10 +1094,11 @@ class OverlayWindow(QMainWindow):
         size_layout.setSpacing(10)
         size_label = QLabel("Size")
         size_label.setStyleSheet("color: white; font-weight: normal;")
-        self.size_spin = QSpinBox()
+        self.size_spin = GoldSpinBox()
         self.size_spin.setRange(8, 72)
         self.size_spin.setFixedWidth(80)
         self.size_spin.setButtonSymbols(QSpinBox.ButtonSymbols.UpDownArrows)
+        self.size_spin.setAlignment(Qt.AlignmentFlag.AlignCenter)
         
         # 严格禁用自动获取焦点
         self.size_spin.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
@@ -1054,10 +1152,11 @@ class OverlayWindow(QMainWindow):
         spacing_layout.setSpacing(10)
         spacing_label = QLabel("Spacing")
         spacing_label.setStyleSheet("color: white; font-weight: normal;")
-        self.spacing_spin = QDoubleSpinBox()
+        self.spacing_spin = GoldDoubleSpinBox()
         self.spacing_spin.setRange(-10, 50)
         self.spacing_spin.setSingleStep(0.5)
         self.spacing_spin.setFixedWidth(80)
+        self.spacing_spin.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.spacing_spin.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
         spacing_line_edit = self.spacing_spin.lineEdit()
         if spacing_line_edit:
@@ -1091,10 +1190,11 @@ class OverlayWindow(QMainWindow):
         lh_layout.setSpacing(10)
         lh_label = QLabel("Line Spacing")
         lh_label.setStyleSheet("color: white; font-weight: normal;")
-        self.lh_spin = QDoubleSpinBox()
+        self.lh_spin = GoldDoubleSpinBox()
         self.lh_spin.setRange(0.5, 5.0)
         self.lh_spin.setSingleStep(0.1)
         self.lh_spin.setFixedWidth(80)
+        self.lh_spin.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.lh_spin.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
         lh_line_edit = self.lh_spin.lineEdit()
         if lh_line_edit:
@@ -1117,21 +1217,18 @@ class OverlayWindow(QMainWindow):
 
         # 字体选择菜单
         font_family_menu = PersistentMenu("Font Family", font_settings_menu)
-        font_family_menu.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
         font_family_menu.setStyleSheet(self.window_menu.styleSheet())
         if font_settings_menu:
             font_settings_menu.addMenu(font_family_menu)
             
             # 英文字体
             en_font_menu = PersistentMenu("English", font_family_menu)
-            en_font_menu.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
             en_font_menu.setStyleSheet(self.window_menu.styleSheet())
             font_family_menu.addMenu(en_font_menu)
             self._setup_font_selection_menu(en_font_menu, "en")
             
             # 中文字体
             cn_font_menu = PersistentMenu("Chinese", font_family_menu)
-            cn_font_menu.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
             cn_font_menu.setStyleSheet(self.window_menu.styleSheet())
             font_family_menu.addMenu(cn_font_menu)
             self._setup_font_selection_menu(cn_font_menu, "cn")
@@ -1181,42 +1278,61 @@ class OverlayWindow(QMainWindow):
         direction = getattr(self, "_menu_direction", "right")
         layout_dir = Qt.LayoutDirection.RightToLeft if direction == "left" else Qt.LayoutDirection.LeftToRight
         item_align = "right" if direction == "left" else "left"
+        arrow_svg = (
+            "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'><path fill='%23aa9b6a' d='M7 2 L3 5 L7 8 Z'/></svg>"
+            if direction == "left" else
+            "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'><path fill='%23aa9b6a' d='M3 2 L7 5 L3 8 Z'/></svg>"
+        )
         
         menu_style = f"""
             QMenu {{
-                background-color: rgba(40, 40, 40, 240);
-                color: white;
-                font-family: "Source Han Serif SC", "思源宋体", serif;
+                background-color: rgba(15, 18, 22, 240);
+                color: #dcdcdc;
+                font-family: "Segoe UI", "Source Han Serif SC", "思源宋体", serif;
                 font-size: 13px;
-                border: 1px solid rgba(255, 255, 255, 30);
+                border: 1px solid rgba(170, 155, 106, 120);
+                border-radius: 2px;
+                padding: 6px 4px;
             }}
             QMenu::item {{
-                padding: 6px 16px 6px 16px;
+                padding: 8px 24px;
                 border-radius: 4px;
                 text-align: {item_align};
-                border-left: 2px solid transparent; /* 始终占用空间，防止选中时宽度抖动 */
+                border-left: 3px solid transparent; /* 始终占用空间，防止选中时宽度抖动 */
             }}
             QMenu::item:checked {{
-                background-color: rgba(201, 166, 74, 45);
-                border-left: 2px solid #c9a64a;
+                background-color: rgba(170, 155, 106, 45);
+                color: #ffffff;
+                border-left: 3px solid #aa9b6a;
             }}
             QMenu::item:selected {{
-                background-color: rgba(60, 60, 60, 200);
+                background-color: rgba(170, 155, 106, 30);
+                color: #ffffff;
+                border-left: 3px solid #aa9b6a;
+            }}
+            QMenu::item:disabled {{
+                color: rgba(255, 255, 255, 60);
+                background-color: transparent;
             }}
             QMenu::separator {{
                 height: 1px;
-                background-color: #555;
-                margin: 4px 8px;
+                background-color: rgba(170, 155, 106, 60);
+                margin: 6px 12px;
             }}
             QMenu::right-arrow {{
-                width: 0px;
-                height: 0px;
-                image: none;
+                width: 10px;
+                height: 10px;
+                image: url("{arrow_svg}");
             }}
             QMenu::indicator {{
                 width: 0px;
                 height: 0px;
                 image: none;
+            }}
+            QLabel {{
+                color: #dcdcdc;
+                font-family: "Segoe UI", "Source Han Serif SC", sans-serif;
+                font-size: 12px;
             }}
         """
         
@@ -1259,41 +1375,61 @@ class OverlayWindow(QMainWindow):
         
         # 根据方向更新菜单样式（统一左侧高亮条）
         item_align = "right" if direction == "left" else "left"
+        arrow_svg = (
+            "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'><path fill='%23aa9b6a' d='M7 2 L3 5 L7 8 Z'/></svg>"
+            if direction == "left" else
+            "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'><path fill='%23aa9b6a' d='M3 2 L7 5 L3 8 Z'/></svg>"
+        )
+        
         menu_style = f"""
             QMenu {{
-                background-color: rgba(40, 40, 40, 240);
-                color: white;
-                font-family: \"Source Han Serif SC\", \"思源宋体\", serif;
+                background-color: rgba(15, 18, 22, 240);
+                color: #dcdcdc;
+                font-family: "Segoe UI", "Source Han Serif SC", "思源宋体", serif;
                 font-size: 13px;
-                border: 1px solid rgba(255, 255, 255, 30);
+                border: 1px solid rgba(170, 155, 106, 120);
+                border-radius: 2px;
+                padding: 6px 4px;
             }}
             QMenu::item {{
-                padding: 6px 16px 6px 16px;
+                padding: 8px 24px;
                 border-radius: 4px;
                 text-align: {item_align};
-                border-left: 2px solid transparent; /* 始终占用空间，防止选中时宽度抖动 */
+                border-left: 3px solid transparent; /* 始终占用空间，防止选中时宽度抖动 */
             }}
             QMenu::item:checked {{
-                background-color: rgba(201, 166, 74, 45);
-                border-left: 2px solid #c9a64a;
+                background-color: rgba(170, 155, 106, 45);
+                color: #ffffff;
+                border-left: 3px solid #aa9b6a;
             }}
             QMenu::item:selected {{
-                background-color: rgba(60, 60, 60, 200);
+                background-color: rgba(170, 155, 106, 30);
+                color: #ffffff;
+                border-left: 3px solid #aa9b6a;
+            }}
+            QMenu::item:disabled {{
+                color: rgba(255, 255, 255, 60);
+                background-color: transparent;
             }}
             QMenu::separator {{
                 height: 1px;
-                background-color: #555;
-                margin: 4px 8px;
+                background-color: rgba(170, 155, 106, 60);
+                margin: 6px 12px;
             }}
             QMenu::right-arrow {{
-                width: 0px;
-                height: 0px;
-                image: none;
+                width: 10px;
+                height: 10px;
+                image: url("{arrow_svg}");
             }}
             QMenu::indicator {{
                 width: 0px;
                 height: 0px;
                 image: none;
+            }}
+            QLabel {{
+                color: #dcdcdc;
+                font-family: "Segoe UI", "Source Han Serif SC", sans-serif;
+                font-size: 12px;
             }}
         """
         
