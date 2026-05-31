@@ -784,6 +784,7 @@ class OverlayWindow(QMainWindow):
 
         self.status_label = QLabel("就绪")
         self.status_label.setObjectName("StatusText")
+        self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         self.log_box = QTextEdit()
         self.log_box.setReadOnly(True)
@@ -1863,6 +1864,7 @@ class OverlayWindow(QMainWindow):
             self.player.pause()
             self.play_pause_btn.set_playing(False)
             self.audio_timer.stop()
+            self.signals.status.emit("已暂停")
         else:
             # 如果播放已经结束（进度在最末尾），重新播放时回到起点
             if self.player.get_position() >= 0.99:
@@ -1870,6 +1872,17 @@ class OverlayWindow(QMainWindow):
             self.player.resume()
             self.play_pause_btn.set_playing(True)
             self.audio_timer.start()
+            
+            # 更新状态为当前播放的文件名
+            src_name = ""
+            if hasattr(self.player, "_player") and self.player._player is not None:
+                src_path = self.player._player.source().toLocalFile()
+                if src_path:
+                    src_name = Path(src_path).name
+            if src_name:
+                self.signals.status.emit(f"正在播放: {src_name}")
+            else:
+                self.signals.status.emit("正在播放")
     
     def _on_audio_seek_started(self) -> None:
         """波形拖动开始。"""

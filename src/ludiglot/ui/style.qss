@@ -50,6 +50,7 @@
     color: rgba(170, 155, 106, 180);
     font-size: 9pt;
     background: transparent;
+    qproperty-alignment: 'AlignHCenter';
 }
 
 /* 按钮风格 */
