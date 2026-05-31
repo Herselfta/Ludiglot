@@ -3,26 +3,19 @@ from __future__ import annotations
 import json
 import sys
 import threading
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
-from PyQt6.QtCore import Qt, pyqtSignal, QObject, QTimer, QPoint, QPointF, QRect, QRectF, QSize, QAbstractNativeEventFilter, QEvent, QEventLoop
-from PyQt6.QtGui import QFont, QTextOption, QColor, QPalette, QAction, QActionGroup, QCursor, QPainter, QPixmap, QGuiApplication, QImage
+from PyQt6.QtCore import Qt, pyqtSignal, QObject, QTimer, QPoint, QPointF, QRect, QRectF, QAbstractNativeEventFilter, QEvent
+from PyQt6.QtGui import QFont, QTextOption, QColor, QAction, QActionGroup, QCursor, QPainter, QGuiApplication
 from PyQt6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QTextEdit, QMenu, QComboBox, QSizePolicy,
     QSlider, QSpinBox, QDoubleSpinBox, QWidgetAction, QStyle,
-    QRubberBand, QSystemTrayIcon, QFrame
+    QSystemTrayIcon, QFrame
 )
 
 from ludiglot.core.audio_player import AudioPlayer
-from ludiglot.core.capture import CaptureRegion
-from ludiglot.core.capture_input import (
-    CaptureInputAdapters,
-    capture_input_to_memory,
-    capture_options_from_config,
-)
 from ludiglot.core.config import AppConfig, load_config
 from ludiglot.core.overlay_runtime import (
     OverlayRuntimeCallbacks,
@@ -33,8 +26,6 @@ from ludiglot.core.overlay_audio_runtime import OverlayAudioRuntime
 from ludiglot.core.display_shaper import (
     DisplayPreferences,
     convert_game_html,
-    extract_numeric_values_from_context,
-    resolve_display_placeholders,
     shape_translation_display,
 )
 from ludiglot.core.preferences import (
@@ -47,22 +38,9 @@ from ludiglot.core.preferences import (
     WindowSize,
     clamp_window_position,
 )
-from ludiglot.core.selection_geometry import (
-    MonitorGeometry,
-    Rect,
-    ScreenGeometry,
-    crop_box_for_snapshot_region,
-    expand_region_within_monitor,
-    map_selection_to_capture_region,
-    normalize_monitors_to_image_size,
-)
 from ludiglot.core.audio_playback_orchestrator import AudioIntent, AudioPlaybackIdentity
-from ludiglot.core.capture_match_workflow import (
-    CaptureProcessCallbacks,
-    CaptureProcessRequest,
-    needs_tesseract,
-    run_capture_match_workflow,
-)
+from ludiglot.ui.capture_session import CaptureSessionCallbacks, OverlayCaptureSession
+from ludiglot.ui.qt_capture_adapter import QtCaptureAdapter
 from ludiglot.ui.waveform_progress_bar import AudioWaveformProgressBar
 
 
@@ -686,15 +664,6 @@ class UiSignals(QObject):
     log = pyqtSignal(str)
 
 
-@dataclass
-class DesktopSnapshot:
-    image: Any
-    left: int
-    top: int
-    monitors: list[MonitorGeometry]
-    screen_pixmaps: list[QPixmap]
-
-
 class OverlayWindow(QMainWindow):
     """无边框、置顶覆盖层窗口（MVP）。"""
 
@@ -731,7 +700,6 @@ class OverlayWindow(QMainWindow):
         self._hotkey_listener = None
         self._win_hotkey_filter = None
         self._win_hotkey_ids: list[int] = []
-        self._capture_in_progress = False  # 防止快捷键重复触发捕获
         self._dragging = False
         self._drag_pos: QPoint | None = None
         self._resizing = False
@@ -767,7 +735,22 @@ class OverlayWindow(QMainWindow):
         self._load_style()
         self._apply_font_settings()
 
-        self.capture_requested.connect(self._capture_and_process_async)
+        self.capture_adapter = QtCaptureAdapter(self.config, log=self.signals.log.emit)
+        self.capture_session = OverlayCaptureSession(
+            config_provider=lambda: self.config,
+            ocr_engine_provider=lambda: self.engine,
+            matcher_provider=lambda: self.matcher,
+            capture_adapter=self.capture_adapter,
+            callbacks=CaptureSessionCallbacks(
+                status=self.signals.status.emit,
+                log=self.signals.log.emit,
+                error=self.signals.error.emit,
+                result=self.signals.result.emit,
+            ),
+            stop_audio=self.stop_audio,
+            clear_result_audio_state=self._clear_capture_audio_state,
+        )
+        self.capture_requested.connect(self.capture_session.trigger)
         self.resources_initialized.connect(self._on_runtime_resources_initialized)
         
         app = QApplication.instance()
@@ -1307,28 +1290,6 @@ class OverlayWindow(QMainWindow):
         direction = getattr(self, "_menu_direction", "right")
         self._set_menu_direction(direction)
 
-    def _show_window_menu_old(self):
-        """显示窗口菜单，实现右边缘对齐"""
-        # 核心：必须先获取 sizeHint，因为 exec() 之前 width() 可能还是旧值
-        self.window_menu.ensurePolished()
-        self.window_menu.adjustSize()
-        menu_w = self.window_menu.sizeHint().width()
-        
-        # 获取按钮右边缘的全局 X 坐标
-        btn_topleft = self.top_menu_btn.mapToGlobal(QPoint(0, 0))
-        btn_right_x = btn_topleft.x() + self.top_menu_btn.width()
-        btn_bottom_y = btn_topleft.y() + self.top_menu_btn.height()
-        
-        direction = getattr(self, "_menu_direction", "right")
-        
-        if direction == "left":
-            # 强制右边缘对齐：菜单左 X = 按钮右 X - 菜单宽度
-            target_x = btn_right_x - menu_w
-            self.window_menu.exec(QPoint(target_x, btn_bottom_y))
-        else:
-            # 向右展开：左边缘对齐 (默认行为)
-            self.window_menu.exec(QPoint(btn_topleft.x(), btn_bottom_y))
-
     def _set_menu_direction(self, direction: str):
         """设置菜单展开方向"""
         self._menu_direction = direction
@@ -1433,39 +1394,6 @@ class OverlayWindow(QMainWindow):
         self._apply_font_settings()
         self.signals.log.emit(f"[UI] 行距设置为: {value:.1f}x")
         self._persist_window_position()
-
-    def _on_size_click(self):
-        """当点击字号数值时，弹出输入框"""
-        from ludiglot.ui.dialogs import StyledInputDialog
-        val, ok = StyledInputDialog.get_int(self, "Font Size", "Enter Size (8-72):", 
-                                          self.current_font_size, 8, 72)
-        if ok:
-            self.current_font_size = val
-            self._apply_font_settings()
-            if hasattr(self, 'font_size_label_action'):
-                self.font_size_label_action.setText(f"{val}pt")
-
-    def _on_spacing_click(self):
-        """点击字距数值直接输入"""
-        from ludiglot.ui.dialogs import StyledInputDialog
-        val, ok = StyledInputDialog.get_double(self, "Letter Spacing", "Enter (px):", 
-                                             self.current_letter_spacing, -10, 50, 1)
-        if ok:
-            self.current_letter_spacing = val
-            self._apply_font_settings()
-            if hasattr(self, 'letter_spacing_label'):
-                self.letter_spacing_label.setText(f"{val}px")
-
-    def _on_line_spacing_click(self):
-        """点击行距数值直接输入"""
-        from ludiglot.ui.dialogs import StyledInputDialog
-        val, ok = StyledInputDialog.get_double(self, "Line Spacing", "Enter (x):", 
-                                             self.current_line_spacing, 0.5, 5.0, 1)
-        if ok:
-            self.current_line_spacing = val
-            self._apply_font_settings()
-            if hasattr(self, 'line_spacing_label'):
-                self.line_spacing_label.setText(f"{val:.1f}x")
 
     def _update_button_positions(self):
         """更新按钮位置"""
@@ -1654,18 +1582,6 @@ class OverlayWindow(QMainWindow):
             else:
                 self.cn_label.setPlainText(self._last_cn_raw)
     
-    def _sync_menu_states(self):
-        """显示菜单前强制同步状态并清除焦点"""
-        # 同步字重勾选状态
-        for action in self.window_menu.findChildren(QAction):
-            if action.text() in ["Light", "Normal", "SemiBold", "Bold", "Heavy"]:
-                action.setChecked(action.text() == self.current_font_weight)
-        
-        # 强制清除输入框焦点（防止游标再次出现）
-        if hasattr(self, 'size_spin'): self.size_spin.lineEdit().clearFocus()
-        if hasattr(self, 'spacing_spin'): self.spacing_spin.lineEdit().clearFocus()
-        if hasattr(self, 'lh_spin'): self.lh_spin.lineEdit().clearFocus()
-
     def _adjust_font_weight(self, weight: str):
         """调整字体粗细"""
         self.current_font_weight = weight
@@ -1675,37 +1591,6 @@ class OverlayWindow(QMainWindow):
                 action.setChecked(action.text() == weight)
         self._apply_font_settings()
         self._persist_window_position()
-    
-    def _adjust_letter_spacing(self, delta: float):
-        """调整字距"""
-        self.current_letter_spacing = max(-2, min(10, self.current_letter_spacing + delta))
-        self._apply_font_settings()
-        if hasattr(self, 'letter_spacing_label'):
-            self.letter_spacing_label.setText(f"{self.current_letter_spacing}px")
-    
-    def _adjust_line_spacing(self, delta: float):
-        """调整行距"""
-        self.current_line_spacing = max(0.8, min(3.0, self.current_line_spacing + delta))
-        self._apply_font_settings()
-        if hasattr(self, 'line_spacing_label'):
-            self.line_spacing_label.setText(f"{self.current_line_spacing:.1f}x")
-
-    def _adjust_font_size(self, delta: int) -> None:
-        """调整字体大小
-        
-        Args:
-            delta: 增量（+1 或 -1）
-        """
-        self.current_font_size = max(FONT_SIZE_MIN, min(FONT_SIZE_MAX, self.current_font_size + delta))
-        
-        # 应用字体设置
-        self._apply_font_settings()
-        
-        # 更新菜单显示
-        if hasattr(self, 'font_size_label_action'):
-            self.font_size_label_action.setText(f"{self.current_font_size}pt")
-        
-        self.signals.log.emit(f"[UI] 字体大小调整为 {self.current_font_size}pt")
     
     def _update_database(self) -> None:
         """更新数据库：从游戏 Pak 重新解包并构建"""
@@ -1814,41 +1699,6 @@ class OverlayWindow(QMainWindow):
             self.audio_index,
             self.signals.log.emit,
         )
-
-    def _should_rebuild_db(self) -> bool:
-        if not self.config.auto_rebuild_db:
-            return not self.config.db_path.exists()
-        if not self.config.db_path.exists():
-            return True
-        try:
-            db_mtime = self.config.db_path.stat().st_mtime
-            if self.config.data_root:
-                textmap_root = self.config.data_root / "TextMap"
-                if textmap_root.exists():
-                    latest = max((p.stat().st_mtime for p in textmap_root.rglob("*.json")), default=db_mtime)
-                    if latest > db_mtime:
-                        return True
-            if self.config.en_json.exists() and self.config.en_json.stat().st_mtime > db_mtime:
-                return True
-            if self.config.zh_json.exists() and self.config.zh_json.stat().st_mtime > db_mtime:
-                return True
-        except Exception:
-            pass
-        try:
-            raw = json.loads(self.config.db_path.read_text(encoding="utf-8"))
-            if not isinstance(raw, dict):
-                return True
-            if len(raw) < self.config.min_db_entries:
-                return True
-            # demo 数据库识别
-            for value in raw.values():
-                matches = value.get("matches") if isinstance(value, dict) else None
-                if matches and matches[0].get("source_json") == "demo.json":
-                    return True
-                break
-        except Exception:
-            return True
-        return False
 
     def _start_hotkeys(self) -> None:
         if not self.config.hotkey_capture:
@@ -2075,144 +1925,12 @@ class OverlayWindow(QMainWindow):
         self._persist_window_position()
 
     def trigger_capture(self) -> None:
-        self.stop_audio()
         self.capture_requested.emit(True)
 
-    def _capture_and_process_async(self, force_select: bool = False) -> None:
-        if self._capture_in_progress:
-            self.signals.log.emit("[HOTKEY] 正在处理中，忽略重复触发")
-            return
-        self._capture_in_progress = True
-        import time
-        t_start = time.time()
-        selected_region: CaptureRegion | None = None
-        snapshot: DesktopSnapshot | None = None
-        thread_started = False
-        try:
-            # 新一轮 OCR 前先停止当前播放，避免旧音频与新结果串音
-            self.stop_audio(emit_status=False)
-            self.last_text_key = None
-            self.last_hash = None
-            self.last_event_name = None
-            self.signals.log.emit("[HOTKEY] 触发捕获")
-            if force_select or self.config.capture_mode == "select":
-                self.signals.status.emit("冻结屏幕…")
-                t_snap_start = time.time()
-                try:
-                    snapshot = self._capture_desktop_snapshot()
-                except Exception as exc:
-                    snapshot = None
-                    self.signals.log.emit(f"[CAPTURE] 预截图失败，回退实时框选: {exc}")
-                t_snap_end = time.time()
-                if snapshot is not None:
-                    self.signals.log.emit(f"[PERF] 屏幕快照耗时: {(t_snap_end - t_snap_start):.3f}s")
-                self.signals.status.emit("请选择 OCR 区域…")
-                t_select_start = time.time()
-                selected_region = self._select_region(snapshot)
-                t_select_end = time.time()
-                self.signals.log.emit(f"[PERF] 区域选择耗时: {(t_select_end - t_select_start):.3f}s")
-                if selected_region is None:
-                    self.signals.status.emit("已取消")
-                    return
-            threading.Thread(
-                target=self._capture_and_process,
-                args=(selected_region, snapshot),
-                daemon=True,
-            ).start()
-            thread_started = True
-            self.signals.log.emit(f"[PERF] 异步调用总耗时: {(time.time() - t_start):.3f}s")
-        except Exception as exc:
-            self.signals.log.emit(f"[CAPTURE] 触发捕获异常: {exc}")
-            self.signals.status.emit("捕获失败")
-        finally:
-            # 仅在未成功启动后台线程时（后台线程会自己清除标志）清除
-            if not thread_started:
-                self._capture_in_progress = False
-
-    def _capture_and_process(self, selected_region: CaptureRegion | None, snapshot: DesktopSnapshot | None) -> None:
-        import time
-        t_total_start = time.time()
-        try:
-            self._do_capture_and_process(selected_region, snapshot, t_total_start)
-        finally:
-            self._capture_in_progress = False
-
-    def _do_capture_and_process(self, selected_region: CaptureRegion | None, snapshot: DesktopSnapshot | None, t_total_start: float) -> None:
-        run_capture_match_workflow(
-            CaptureProcessRequest(
-                capture_image=lambda: self._capture_image_to_memory(selected_region, snapshot),
-                ocr_engine=self.engine,
-                matcher=self.matcher,
-                ocr_backend=self.config.ocr_backend,
-                debug_dump_input=getattr(self.config, "ocr_debug_dump_input", False),
-                debug_dump_dir=self.config.image_path.parent if getattr(self.config, "image_path", None) else Path.cwd(),
-            ),
-            CaptureProcessCallbacks(
-                status=self.signals.status.emit,
-                log=self.signals.log.emit,
-                error=self.signals.error.emit,
-                result=self.signals.result.emit,
-            ),
-        )
-
-    def _expand_region(self, region: CaptureRegion) -> CaptureRegion:
-        try:
-            import mss
-            with mss.mss() as sct:
-                monitor = self._monitor_geometry_from_mapping(sct.monitors[1])
-        except Exception:
-            return region
-        return expand_region_within_monitor(region, monitor)
-
-    def _preprocess_image(self, image_path: Path) -> Path:
-        try:
-            from PIL import Image, ImageOps
-            img = Image.open(image_path)
-            
-            # 1. 尺寸优化：移除强制放大
-            # 这里的放大逻辑已被移动到 OCREngine 内部，采用更智能的 "Text-Grab" 自适应算法
-            # 此处只需保留基本的格式转换
-            processed = False
-
-            # 2. 模式转换：转为灰度
-            if img.mode != 'L':
-                img = img.convert('L')
-                processed = True
-                
-            # 3. 对比度增强
-            img = ImageOps.autocontrast(img)
-            processed = True
-            
-            # Save Debug Image
-            try:
-                debug_p = image_path.parent / "last_ocr_input.png"
-                img.save(debug_p)
-            except Exception: pass
-            
-            if processed:
-                processed_path = image_path.parent / f"{image_path.stem}_proc{image_path.suffix}"
-                img.save(processed_path)
-                return processed_path
-                
-            return image_path
-        except Exception as e:
-            self.signals.log.emit(f"[PRE] 预处理失败: {e}")
-            return image_path
-
-    def _capture_image_to_memory(self, selected_region: CaptureRegion | None, snapshot: DesktopSnapshot | None = None) -> Any:
-        return capture_input_to_memory(
-            capture_options_from_config(self.config),
-            selected_region=selected_region,
-            snapshot=snapshot,
-            adapters=CaptureInputAdapters(
-                select_region=self._select_region,
-                crop_snapshot=self._crop_snapshot,
-                on_fallback=self.signals.log.emit,
-            ),
-        )
-
-    def _needs_tesseract(self, lines: list[tuple[str, float]]) -> bool:
-        return needs_tesseract(lines)
+    def _clear_capture_audio_state(self) -> None:
+        self.last_text_key = None
+        self.last_hash = None
+        self.last_event_name = None
 
     def _is_voice_eligible(self, text_key: str | None) -> bool:
         if not text_key:
@@ -2345,26 +2063,6 @@ class OverlayWindow(QMainWindow):
 
     def _convert_game_html(self, text: str, lang: str = "cn") -> str:
         return convert_game_html(text, lang=lang, preferences=self._display_preferences())
-
-    def _extract_numeric_values_from_context(self, ocr_context: str) -> list[str]:
-        return extract_numeric_values_from_context(ocr_context)
-
-    def _resolve_display_placeholders(
-        self,
-        text: str,
-        lang: str = "en",
-        ocr_context: str | None = None,
-        text_key: str | None = None,
-    ) -> str:
-        return resolve_display_placeholders(
-            text,
-            lang=lang,
-            ocr_context=ocr_context,
-            text_key=text_key,
-            gender_preference=getattr(self.config, "gender_preference", "female"),
-            param_resolver=self.skill_param_resolver,
-        )
-
 
     def _show_error(self, message: str) -> None:
         self.status_label.setText(message)
@@ -2801,191 +2499,6 @@ class OverlayWindow(QMainWindow):
                 pass
         self._win_hotkey_ids = []
 
-    def _pil_to_pixmap(self, img, target_size: QSize | None = None) -> QPixmap:
-        try:
-            from PIL import Image
-        except Exception as exc:
-            raise RuntimeError("缺少 Pillow，无法生成截图背景") from exc
-        if not isinstance(img, Image.Image):
-            raise RuntimeError("无效截图对象，无法生成截图背景")
-        if img.mode != "RGBA":
-            img = img.convert("RGBA")
-        data = img.tobytes("raw", "RGBA")
-        qimage = QImage(data, img.width, img.height, QImage.Format.Format_RGBA8888)
-        qimage = qimage.copy()
-        pixmap = QPixmap.fromImage(qimage)
-        if target_size and (pixmap.width() != target_size.width() or pixmap.height() != target_size.height()):
-            pixmap = pixmap.scaled(
-                target_size,
-                Qt.AspectRatioMode.IgnoreAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
-            )
-        return pixmap
-
-    def _monitor_geometry_from_mapping(self, monitor: dict) -> MonitorGeometry:
-        return MonitorGeometry(
-            left=int(monitor["left"]),
-            top=int(monitor["top"]),
-            width=int(monitor["width"]),
-            height=int(monitor["height"]),
-        )
-
-    def _rect_from_qrect(self, rect: QRect) -> Rect:
-        return Rect(x=int(rect.x()), y=int(rect.y()), width=int(rect.width()), height=int(rect.height()))
-
-    def _screen_geometry_from_qscreen(self, screen, index: int) -> ScreenGeometry:
-        geo = screen.geometry()
-        return ScreenGeometry(
-            index=index,
-            x=int(geo.x()),
-            y=int(geo.y()),
-            width=int(geo.width()),
-            height=int(geo.height()),
-            dpr=float(screen.devicePixelRatio()),
-            name=str(screen.name()),
-        )
-
-    def _screen_geometries(self) -> list[ScreenGeometry]:
-        return [self._screen_geometry_from_qscreen(screen, idx) for idx, screen in enumerate(QGuiApplication.screens())]
-
-    def _current_mss_monitors(self) -> list[MonitorGeometry]:
-        try:
-            import mss
-            with mss.mss() as sct:
-                return [self._monitor_geometry_from_mapping(mon) for mon in sct.monitors]
-        except Exception:
-            return []
-
-    def _build_screen_pixmaps(self, desktop_img, monitors: list[MonitorGeometry]) -> list[QPixmap]:
-        screens = QGuiApplication.screens()
-        if not monitors:
-            return []
-        all_mon = monitors[0]
-        pixmaps: list[QPixmap] = []
-        for idx, screen in enumerate(screens):
-            if idx + 1 < len(monitors):
-                mon = monitors[idx + 1]
-                crop_left = mon.left - all_mon.left
-                crop_top = mon.top - all_mon.top
-                crop_right = crop_left + mon.width
-                crop_bottom = crop_top + mon.height
-                crop = desktop_img.crop((crop_left, crop_top, crop_right, crop_bottom))
-            else:
-                crop = desktop_img
-            pixmaps.append(self._pil_to_pixmap(crop, screen.geometry().size()))
-        return pixmaps
-
-    def _capture_desktop_snapshot(self) -> DesktopSnapshot:
-        backend = str(getattr(self.config, "capture_backend", "mss")).lower()
-        try:
-            import mss
-        except Exception as exc:
-            raise RuntimeError("缺少 mss，无法截图") from exc
-        try:
-            from PIL import Image, ImageGrab
-        except Exception as exc:
-            raise RuntimeError("缺少 Pillow，无法截图") from exc
-
-        with mss.mss() as sct:
-            raw_monitors = sct.monitors
-            if not raw_monitors:
-                raise RuntimeError("未检测到屏幕")
-            all_mon = raw_monitors[0]
-            if backend == "winrt":
-                bbox = (
-                    all_mon["left"],
-                    all_mon["top"],
-                    all_mon["left"] + all_mon["width"],
-                    all_mon["top"] + all_mon["height"],
-                )
-                img = ImageGrab.grab(bbox=bbox, all_screens=True)
-            else:
-                sct_img = sct.grab(all_mon)
-                img = Image.frombytes("RGB", sct_img.size, sct_img.bgra, "raw", "BGRX")
-
-        monitors = normalize_monitors_to_image_size(
-            [self._monitor_geometry_from_mapping(mon) for mon in raw_monitors],
-            image_width=img.width,
-            image_height=img.height,
-        )
-        all_monitor = monitors[0]
-        screen_pixmaps = self._build_screen_pixmaps(img, monitors)
-        return DesktopSnapshot(
-            image=img,
-            left=int(all_monitor.left),
-            top=int(all_monitor.top),
-            monitors=monitors,
-            screen_pixmaps=screen_pixmaps,
-        )
-
-    def _crop_snapshot(self, snapshot: DesktopSnapshot, region: CaptureRegion):
-        box = crop_box_for_snapshot_region(
-            snapshot_left=snapshot.left,
-            snapshot_top=snapshot.top,
-            snapshot_width=snapshot.image.width,
-            snapshot_height=snapshot.image.height,
-            region=region,
-        )
-        return snapshot.image.crop(box)
-
-    def _select_region(self, snapshot: DesktopSnapshot | None = None) -> CaptureRegion | None:
-        """选择屏幕区域并转换为物理像素坐标（适配多屏不同DPI）。"""
-        selector = ScreenSelector(snapshot.screen_pixmaps if snapshot else None)
-        rect = selector.get_region()
-
-        if rect is None or rect.width() <= 0 or rect.height() <= 0:
-            return None
-
-        print(f"[框选] 逻辑坐标: {rect}")
-        rect_model = self._rect_from_qrect(rect)
-        screens = self._screen_geometries()
-
-        if snapshot is not None:
-            try:
-                mapping = map_selection_to_capture_region(rect_model, screens, monitors=snapshot.monitors)
-                if mapping.source == "snapshot-monitor":
-                    print(f"[框选] 快照映射: MSS Monitor={mapping.monitor}")
-                    print(f"[框选] 快照缩放: sx={mapping.scale_x:.3f}, sy={mapping.scale_y:.3f}")
-                    print(
-                        f"[框选] 最终物理坐标: ({mapping.region.left}, {mapping.region.top}, "
-                        f"{mapping.region.width}, {mapping.region.height})"
-                    )
-                    return mapping.region
-            except Exception as e:
-                print(f"[框选] 快照映射失败: {e}，回退到实时坐标映射")
-
-        dpr_override = None
-        override_raw = getattr(self.config, "capture_force_dpr", None)
-        if override_raw is not None:
-            try:
-                dpr_override = float(override_raw)
-            except Exception:
-                pass
-
-        monitors = self._current_mss_monitors()
-        mapping = map_selection_to_capture_region(
-            rect_model,
-            screens,
-            monitors=monitors,
-            dpr_override=dpr_override,
-            use_monitor_scale=False,
-        )
-        screen = next((item for item in screens if item.index == mapping.screen_index), screens[0] if screens else None)
-        screen_name = screen.name if screen else ""
-        suffix = " (override)" if dpr_override is not None else ""
-        print(f"[框选] 命中屏幕: {screen_name} (Index {mapping.screen_index}), DPR: {mapping.scale_x}{suffix}")
-
-        if mapping.source == "dpr-monitor":
-            print(f"[框选] MSS Monitor: {mapping.monitor}")
-        elif monitors:
-            print("[框选] 警告：MSS 屏幕数量不匹配，回退到主屏估算")
-
-        print(
-            f"[框选] 最终物理坐标: ({mapping.region.left}, {mapping.region.top}, "
-            f"{mapping.region.width}, {mapping.region.height})"
-        )
-        return mapping.region
-
 
 def run_gui(config_path: Path) -> None:
     app = QApplication([])
@@ -3047,115 +2560,3 @@ def run_gui(config_path: Path) -> None:
         print(f"[ERROR] Exception in app.exec(): {e}", flush=True)
     finally:
         print("[DEBUG] Application exiting.", flush=True)
-
-
-class ScreenOverlay(QWidget):
-    """单屏幕覆盖窗口"""
-    region_selected = pyqtSignal(QRect)
-
-    def __init__(self, screen, background: QPixmap | None = None, parent=None):
-        super().__init__(parent)
-        self._screen = screen
-        self._background = background
-        self.setGeometry(screen.geometry()) # 逻辑坐标
-        
-        self.setWindowFlags(
-            Qt.WindowType.FramelessWindowHint
-            | Qt.WindowType.WindowStaysOnTopHint
-            | Qt.WindowType.Tool
-        )
-        # 每个窗口只负责自己所在的屏幕，避免跨屏DPI问题
-        self.setScreen(screen)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
-        
-        self.rubber_band: QRubberBand | None = None
-        self.origin: QPoint | None = None
-
-    def paintEvent(self, event) -> None:
-        painter = QPainter(self)
-        if not painter.isActive(): return
-        if self._background is not None:
-            painter.drawPixmap(self.rect(), self._background)
-        painter.fillRect(self.rect(), QColor(0, 0, 0, 80)) # 半透明遮罩
-        painter.end()
-
-    def mousePressEvent(self, event) -> None:
-        self.origin = event.pos()
-        if self.rubber_band is None:
-            self.rubber_band = QRubberBand(QRubberBand.Shape.Rectangle, self)
-        if self.origin:
-            self.rubber_band.setGeometry(QRect(self.origin, event.pos()).normalized())
-        self.rubber_band.show()
-
-    def mouseMoveEvent(self, event) -> None:
-        if self.rubber_band and self.origin:
-            self.rubber_band.setGeometry(QRect(self.origin, event.pos()).normalized())
-
-    def mouseReleaseEvent(self, event) -> None:
-        if self.rubber_band and self.origin:
-            rect = self.rubber_band.geometry().normalized()
-            # 转换为全局逻辑坐标
-            global_top_left = self.mapToGlobal(rect.topLeft())
-            global_rect = QRect(global_top_left, rect.size())
-            self.region_selected.emit(global_rect)
-        else:
-            self.region_selected.emit(QRect())
-
-    def keyPressEvent(self, event) -> None:
-        if event.key() == Qt.Key.Key_Escape:
-            self.region_selected.emit(QRect())
-        else:
-            super().keyPressEvent(event)
-
-
-class ScreenSelector(QObject):
-    """全屏选区控制器，管理多屏覆盖窗口。"""
-    region_selected_signal = pyqtSignal(QRect)
-
-    def __init__(self, backgrounds: list[QPixmap] | None = None) -> None:
-        super().__init__()
-        self._overlays: list[ScreenOverlay] = []
-        self._selected_rect: QRect | None = None
-        self._loop: QEventLoop | None = None
-
-        # 为每个屏幕创建一个覆盖窗口
-        screens = QGuiApplication.screens()
-        for idx, screen in enumerate(screens):
-            bg = backgrounds[idx] if backgrounds and idx < len(backgrounds) else None
-            overlay = ScreenOverlay(screen, bg)
-            overlay.region_selected.connect(self._on_region_selected)
-            self._overlays.append(overlay)
-            
-        print(f"[ScreenSelector] 已初始化 {len(self._overlays)} 个屏幕覆盖层")
-
-    def get_region(self) -> QRect | None:
-        try:
-            self._loop = QEventLoop()
-            
-            for overlay in self._overlays:
-                overlay.showFullScreen() 
-                overlay.raise_()
-                overlay.activateWindow()
-            
-            self._loop.exec()
-            
-            # 清理
-            for overlay in self._overlays:
-                overlay.close()
-                
-            return self._selected_rect
-        except Exception as e:
-            print(f"[ScreenSelector ERROR] {e}")
-            import traceback
-            traceback.print_exc()
-            for overlay in self._overlays:
-                overlay.close()
-            return None
-
-    def _on_region_selected(self, rect: QRect) -> None:
-        # 当任意一个屏幕完成了选区，保存结果并退出循环
-        if not rect.isNull():
-            self._selected_rect = rect
-        if self._loop and self._loop.isRunning():
-            self._loop.quit()
