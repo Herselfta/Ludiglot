@@ -80,87 +80,195 @@ class PersistentMenu(QMenu):
 
 
 class PlayPauseButton(QPushButton):
-    """自绘制的播放/暂停按钮，保证图标完美居中和颜色可调。"""
+    """自绘制的播放/暂停按钮，保证图标完美居中和颜色可调，并带有精致的悬浮和状态切换动效。"""
     def __init__(self, parent=None):
         super().__init__("", parent)
         self._is_playing = False
+        self._hover_val = 0.0
+        self._press_val = 0.0
+        self._state_val = 0.0  # 0.0 = Play, 1.0 = Pause
         
+        # 强制覆盖全局 QSS，防止受到全局 QPushButton 的影响
+        self.setStyleSheet("""
+            QPushButton {
+                background-color: transparent;
+                border: none;
+                border-radius: 4px;
+                padding: 0px;
+            }
+        """)
+        
+        from PyQt6.QtCore import QVariantAnimation, QEasingCurve
+        
+        # 悬浮动画：0.0 -> 1.0
+        self._hover_anim = QVariantAnimation(self)
+        self._hover_anim.setDuration(180)
+        self._hover_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._hover_anim.valueChanged.connect(self._handle_hover_anim)
+        
+        # 播放/暂停状态切换动画：0.0 -> 1.0，OutBack 带有微弹回感，尽显灵动
+        self._state_anim = QVariantAnimation(self)
+        self._state_anim.setDuration(300)
+        self._state_anim.setEasingCurve(QEasingCurve.Type.OutBack)
+        self._state_anim.valueChanged.connect(self._handle_state_anim)
+
+    def _handle_hover_anim(self, value):
+        self._hover_val = value
+        self.update()
+
+    def _handle_state_anim(self, value):
+        self._state_val = value
+        self.update()
+
     def set_playing(self, playing: bool):
         if self._is_playing != playing:
             self._is_playing = playing
+            self._state_anim.stop()
+            self._state_anim.setStartValue(self._state_val)
+            self._state_anim.setEndValue(1.0 if playing else 0.0)
+            self._state_anim.start()
+
+    def enterEvent(self, event):
+        super().enterEvent(event)
+        self._hover_anim.stop()
+        self._hover_anim.setStartValue(self._hover_val)
+        self._hover_anim.setEndValue(1.0)
+        self._hover_anim.start()
+
+    def leaveEvent(self, event):
+        super().leaveEvent(event)
+        self._hover_anim.stop()
+        self._hover_anim.setStartValue(self._hover_val)
+        self._hover_anim.setEndValue(0.0)
+        self._hover_anim.start()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._press_val = 1.0
             self.update()
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._press_val = 0.0
+            self.update()
+        super().mouseReleaseEvent(event)
 
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         
-        # 绘制背景和边框 (复用 QSS 风格)
         rect = self.rect()
         
-        # 获取当前状态的颜色
+        # 禁用或各类状态的颜色和微动效融合计算
         if not self.isEnabled():
             bg_color = QColor(255, 255, 255, 12)
             border_color = QColor(255, 255, 255, 25)
-            icon_color = QColor(255, 255, 255, 76)  # 30% alpha
-        elif self.underMouse() and self.isDown():
-            bg_color = QColor(255, 255, 255, 64)
-            border_color = QColor(255, 255, 255, 128)
-            icon_color = QColor(255, 255, 255, 255)
-        elif self.underMouse():
-            bg_color = QColor(255, 255, 255, 51)
-            border_color = QColor(255, 255, 255, 102)
-            icon_color = QColor(255, 255, 255, 255)
+            icon_color = QColor(255, 255, 255, 76)
         else:
-            bg_color = QColor(255, 255, 255, 38)
-            border_color = QColor(255, 255, 255, 76)
-            icon_color = QColor(200, 200, 200, 200)
+            h = self._hover_val
+            p = self._press_val
+            
+            # 背景色：透明灰 -> 雅致金黄微亮
+            bg_r = int(255 * (1.0 - h) + 170 * h)
+            bg_g = int(255 * (1.0 - h) + 155 * h)
+            bg_b = int(255 * (1.0 - h) + 106 * h)
+            bg_a = int((38 * (1.0 - h) + 60 * h) * (1.0 - p * 0.2))
+            bg_color = QColor(bg_r, bg_g, bg_b, bg_a)
+            
+            # 边框色：透白 -> 明亮金黄 #c9a64a
+            border_r = int(255 * (1.0 - h) + 201 * h)
+            border_g = int(255 * (1.0 - h) + 166 * h)
+            border_b = int(255 * (1.0 - h) + 74 * h)
+            border_a = int(76 * (1.0 - h) + 180 * h)
+            border_color = QColor(border_r, border_g, border_b, border_a)
+            
+            # 图标颜色
+            icon_r = int(200 * (1.0 - h) + 255 * h)
+            icon_g = int(200 * (1.0 - h) + 255 * h)
+            icon_b = int(200 * (1.0 - h) + 255 * h)
+            icon_a = int(200 * (1.0 - h) + 255 * h)
+            icon_color = QColor(icon_r, icon_g, icon_b, icon_a)
 
-        # 绘制背景圆角矩形
+        # 1. 绘制背景菱形
+        from PyQt6.QtGui import QPolygonF
+        cx = rect.width() / 2.0
+        cy = rect.height() / 2.0
+        margin = 1.5
+        w = rect.width() - 2.0 * margin
+        h = rect.height() - 2.0 * margin
+        p_top = QPointF(cx, cy - h / 2.0)
+        p_right = QPointF(cx + w / 2.0, cy)
+        p_bottom = QPointF(cx, cy + h / 2.0)
+        p_left = QPointF(cx - w / 2.0, cy)
+        diamond = QPolygonF([p_top, p_right, p_bottom, p_left])
+
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(bg_color)
-        painter.drawRoundedRect(rect.adjusted(1, 1, -1, -1), 4, 4)
+        painter.drawPolygon(diamond)
         
-        # 绘制边框
+        # 2. 绘制边框菱形
         from PyQt6.QtGui import QPen
-        pen = QPen(border_color, 1.0)
+        pen = QPen(border_color, 1.0 + self._hover_val * 0.4)
         painter.setPen(pen)
         painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawRoundedRect(rect.adjusted(1, 1, -1, -1), 4, 4)
+        painter.drawPolygon(diamond)
 
-        # 绘制完美居中的播放/暂停图标
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(icon_color)
-        
+        # 3. 绘制图标（以中心为锚点应用变换）
         cx = rect.width() / 2.0
         cy = rect.height() / 2.0
         
-        if not self._is_playing:
-            # 绘制完美居中且平衡的播放三角形 (向右偏移一点点，使其在视觉上完美居中)
+        # 播放三角形（在 state_val 趋向 1.0 时顺时针旋转 90 度并淡出）
+        if self._state_val < 0.99:
+            painter.save()
+            painter.translate(cx, cy)
+            painter.rotate(self._state_val * 90.0)
+            
+            opacity = 1.0 - self._state_val
+            c_play = QColor(icon_color)
+            c_play.setAlpha(int(icon_color.alpha() * opacity))
+            
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(c_play)
+            
             from PyQt6.QtGui import QPolygonF
             size = 10.0
             half_size = size / 2.0
-            # 播放三角形的质心偏左，稍微向右偏移 0.5px 以保证完美视觉平衡
-            offset = 0.5
-            p1 = QPointF(cx - half_size * 0.7 + offset, cy - half_size)
-            p2 = QPointF(cx - half_size * 0.7 + offset, cy + half_size)
-            p3 = QPointF(cx + half_size * 1.1 + offset, cy)
+            offset = 0.5  # 视觉微调中心偏移
+            p1 = QPointF(-half_size * 0.7 + offset, -half_size)
+            p2 = QPointF(-half_size * 0.7 + offset, half_size)
+            p3 = QPointF(half_size * 1.1 + offset, 0.0)
             poly = QPolygonF([p1, p2, p3])
             painter.drawPolygon(poly)
-        else:
-            # 绘制完美对称和比例适中的暂停双线
-            w = 3.0  # 每一竖线的宽度
-            h = 10.0 # 竖线的高度
-            gap = 4.0 # 两竖线间的间距
+            painter.restore()
+            
+        # 暂停双线（从 -90 度逆时针转回 0 度并淡入）
+        if self._state_val > 0.01:
+            painter.save()
+            painter.translate(cx, cy)
+            painter.rotate((1.0 - self._state_val) * -90.0)
+            
+            opacity = self._state_val
+            c_pause = QColor(icon_color)
+            c_pause.setAlpha(int(icon_color.alpha() * opacity))
+            
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(c_pause)
+            
+            w = 3.0
+            h = 10.0
+            gap = 4.0
             
             # 左竖线
-            x1 = cx - gap / 2.0 - w
-            y1 = cy - h / 2.0
+            x1 = -gap / 2.0 - w
+            y1 = -h / 2.0
             painter.drawRect(QRectF(x1, y1, w, h))
             
             # 右竖线
-            x2 = cx + gap / 2.0
+            x2 = gap / 2.0
             painter.drawRect(QRectF(x2, y1, w, h))
-            
+            painter.restore()
+
         painter.end()
 
 
@@ -1756,6 +1864,9 @@ class OverlayWindow(QMainWindow):
             self.play_pause_btn.set_playing(False)
             self.audio_timer.stop()
         else:
+            # 如果播放已经结束（进度在最末尾），重新播放时回到起点
+            if self.player.get_position() >= 0.99:
+                self.player.seek(0.0)
             self.player.resume()
             self.play_pause_btn.set_playing(True)
             self.audio_timer.start()
@@ -1780,8 +1891,24 @@ class OverlayWindow(QMainWindow):
     
     def _update_audio_progress(self) -> None:
         """定时更新音频进度条和时间标签。"""
-        if not self.player.is_playing():
+        # 检测是否自然播放完毕（即使 is_playing 还是 True，如果底层 QMediaPlayer 状态已经是 EndOfMedia）
+        is_natural_end = False
+        if hasattr(self.player, "_player") and self.player._player is not None:
+            from PyQt6.QtMultimedia import QMediaPlayer
+            if self.player._player.mediaStatus() == QMediaPlayer.MediaStatus.EndOfMedia:
+                is_natural_end = True
+                self.player.stop()  # 这会设置播放器的 _is_playing 为 False 并停止播放
+        
+        if not self.player.is_playing() or is_natural_end:
             self.audio_timer.stop()
+            self.play_pause_btn.set_playing(False)
+            duration = self.player.get_duration()
+            if duration > 0:
+                self.audio_slider.set_progress(1.0, duration)
+                current_sec = duration // 1000
+                self.time_label.setText(f"{current_sec//60:02d}:{current_sec%60:02d} / {current_sec//60:02d}:{current_sec%60:02d}")
+            if is_natural_end:
+                self.signals.status.emit("播放已结束")
             return
         
         position = self.player.get_position()
@@ -2252,6 +2379,9 @@ class OverlayWindow(QMainWindow):
 
     def eventFilter(self, obj, event) -> bool:
         """全局事件过滤器：检测窗口失焦+鼠标点击窗口外 → 隐藏窗口"""
+        if getattr(self, "disable_auto_hide", False):
+            return super().eventFilter(obj, event)
+            
         if self.isVisible():
             # 方案1: 检测失焦事件（窗口失去活动状态）
             if event.type() == QEvent.Type.WindowDeactivate:
