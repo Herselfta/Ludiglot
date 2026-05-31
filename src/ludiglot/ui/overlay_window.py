@@ -119,35 +119,32 @@ class GoldSpinBox(QSpinBox):
         opt = QStyleOptionSpinBox()
         self.initStyleOption(opt)
         
-        # 获取向上和向下按钮的物理区域
+        # 固定高度时 SC_SpinBoxUp/Down 的矩形方向是正确的，直接使用
         up_rect = self.style().subControlRect(QStyle.ComplexControl.CC_SpinBox, opt, QStyle.SubControl.SC_SpinBoxUp, self)
         down_rect = self.style().subControlRect(QStyle.ComplexControl.CC_SpinBox, opt, QStyle.SubControl.SC_SpinBoxDown, self)
         
-        # 获取鼠标相对于控件的全局位置
         mouse_pos = self.mapFromGlobal(QCursor.pos())
         
-        # 绘制向上箭头
+        # 绘制向上箭头 ▲
         if not up_rect.isEmpty():
             painter.save()
             is_hover = self.underMouse() and up_rect.contains(mouse_pos)
             color = QColor(255, 255, 255, 255) if is_hover else QColor(170, 155, 106, 220)
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(color)
-            
             cx = up_rect.x() + up_rect.width() / 2.0
             cy = up_rect.y() + up_rect.height() / 2.0
             poly = QPolygonF([QPointF(cx, cy - 2.5), QPointF(cx + 3.5, cy + 1.5), QPointF(cx - 3.5, cy + 1.5)])
             painter.drawPolygon(poly)
             painter.restore()
 
-        # 绘制向下箭头
+        # 绘制向下箭头 ▼
         if not down_rect.isEmpty():
             painter.save()
             is_hover = self.underMouse() and down_rect.contains(mouse_pos)
             color = QColor(255, 255, 255, 255) if is_hover else QColor(170, 155, 106, 220)
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(color)
-            
             cx = down_rect.x() + down_rect.width() / 2.0
             cy = down_rect.y() + down_rect.height() / 2.0
             poly = QPolygonF([QPointF(cx - 3.5, cy - 1.5), QPointF(cx + 3.5, cy - 1.5), QPointF(cx, cy + 2.5)])
@@ -168,35 +165,32 @@ class GoldDoubleSpinBox(QDoubleSpinBox):
         opt = QStyleOptionSpinBox()
         self.initStyleOption(opt)
         
-        # 获取向上和向下按钮的物理区域
+        # 固定高度时 SC_SpinBoxUp/Down 的矩形方向是正确的，直接使用
         up_rect = self.style().subControlRect(QStyle.ComplexControl.CC_SpinBox, opt, QStyle.SubControl.SC_SpinBoxUp, self)
         down_rect = self.style().subControlRect(QStyle.ComplexControl.CC_SpinBox, opt, QStyle.SubControl.SC_SpinBoxDown, self)
         
-        # 获取鼠标相对于控件的全局位置
         mouse_pos = self.mapFromGlobal(QCursor.pos())
         
-        # 绘制向上箭头
+        # 绘制向上箭头 ▲
         if not up_rect.isEmpty():
             painter.save()
             is_hover = self.underMouse() and up_rect.contains(mouse_pos)
             color = QColor(255, 255, 255, 255) if is_hover else QColor(170, 155, 106, 220)
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(color)
-            
             cx = up_rect.x() + up_rect.width() / 2.0
             cy = up_rect.y() + up_rect.height() / 2.0
             poly = QPolygonF([QPointF(cx, cy - 2.5), QPointF(cx + 3.5, cy + 1.5), QPointF(cx - 3.5, cy + 1.5)])
             painter.drawPolygon(poly)
             painter.restore()
 
-        # 绘制向下箭头
+        # 绘制向下箭头 ▼
         if not down_rect.isEmpty():
             painter.save()
             is_hover = self.underMouse() and down_rect.contains(mouse_pos)
             color = QColor(255, 255, 255, 255) if is_hover else QColor(170, 155, 106, 220)
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(color)
-            
             cx = down_rect.x() + down_rect.width() / 2.0
             cy = down_rect.y() + down_rect.height() / 2.0
             poly = QPolygonF([QPointF(cx - 3.5, cy - 1.5), QPointF(cx + 3.5, cy - 1.5), QPointF(cx, cy + 2.5)])
@@ -1066,7 +1060,9 @@ class OverlayWindow(QMainWindow):
                 color: #f0f4f8; 
                 border: 1px solid rgba(170, 155, 106, 90); 
                 border-radius: 4px; 
-                padding: 4px 22px 4px 6px; /* 22px 右边距：为右侧的增减按钮留出空间 */
+                min-height: 22px;
+                max-height: 22px;
+                padding: 0px 0px 0px 0px; 
                 font-family: "Segoe UI", "Source Han Serif SC", sans-serif;
                 font-size: 11px;
                 selection-background-color: rgba(170, 155, 106, 80);
@@ -1076,33 +1072,33 @@ class OverlayWindow(QMainWindow):
             }
             QAbstractSpinBox::up-button {
                 subcontrol-origin: border;
-                subcontrol-position: top right; /* 按钮靠右边 */
+                subcontrol-position: top right;
                 width: 18px;
-                height: 11px;
-                border-left: 1px solid rgba(170, 155, 106, 90); /* 左侧分割线 */
+                height: 11px; /* 恢复固定像素，与 down-button 共 22px 对齐，无缝填满 */
+                border-left: 1px solid rgba(170, 155, 106, 90);
                 background: rgba(170, 155, 106, 20);
-                border-top-right-radius: 3px; /* 完美贴合外框右上圆角，杜绝溢出冲突 */
+                border-top-right-radius: 3px;
             }
             QAbstractSpinBox::down-button {
                 subcontrol-origin: border;
-                subcontrol-position: bottom right; /* 按钮靠右边 */
+                subcontrol-position: bottom right;
                 width: 18px;
-                height: 11px;
-                border-left: 1px solid rgba(170, 155, 106, 90); /* 左侧分割线 */
-                border-top: 1px solid rgba(170, 155, 106, 90);
+                height: 11px; /* 11+11=22px，与控件总高完全一致，无像素缝隙 */
+                border-left: 1px solid rgba(170, 155, 106, 90);
+                /* 不加 border-top，避免叠加分割线导致视觉缝隙 */
                 background: rgba(170, 155, 106, 20);
-                border-bottom-right-radius: 3px; /* 完美贴合外框右下圆角，杜绝溢出冲突 */
+                border-bottom-right-radius: 3px;
             }
             QAbstractSpinBox::up-button:hover, QAbstractSpinBox::down-button:hover { 
                 background: rgba(170, 155, 106, 60); 
             }
             QAbstractSpinBox::up-arrow {
-                image: none; /* 彻底禁用图像，交由底层 Gold 派生类 paintEvent 强行矢量精准绘制 */
+                image: none;
                 width: 0px;
                 height: 0px;
             }
             QAbstractSpinBox::down-arrow {
-                image: none; /* 彻底禁用图像，交由底层 Gold 派生类 paintEvent 强行矢量精准绘制 */
+                image: none;
                 width: 0px;
                 height: 0px;
             }
