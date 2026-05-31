@@ -939,7 +939,8 @@ class OverlayWindow(QMainWindow):
         
         self.time_label = QLabel("00:00 / 00:00")
         self.time_label.setObjectName("TimeLabel")
-        self.time_label.setMinimumWidth(100)
+        self.time_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.time_label.setMinimumWidth(70)
         
         audio_control_layout.addWidget(self.play_pause_btn)
         audio_control_layout.addWidget(self.audio_slider, 1)
