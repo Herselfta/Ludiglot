@@ -1252,10 +1252,11 @@ class OverlayWindow(QMainWindow):
 
         self.window_menu.addSeparator()
         
-        # 菜单展开方向 - 作为一个标准菜单，保持普通关闭行为
-        direction_menu = self.window_menu.addMenu("Menu Direction")
+        # 菜单展开方向 - 使用 PersistentMenu 保证无缝去边框和精确的 2px 鸣潮圆角
+        direction_menu = PersistentMenu("Menu Direction", self.window_menu)
+        direction_menu.setStyleSheet(self.window_menu.styleSheet())
+        self.window_menu.addMenu(direction_menu)
         if direction_menu:
-            direction_menu.setStyleSheet(self.window_menu.styleSheet())
             left_action = QAction("← Left", self)
             left_action.triggered.connect(lambda: self._set_menu_direction("left"))
             direction_menu.addAction(left_action)
@@ -1309,7 +1310,7 @@ class OverlayWindow(QMainWindow):
                 font-size: 12px;
                 border: 1px solid rgba(170, 155, 106, 90);
                 border-radius: 2px;
-                padding: 4px 0px; /* 移除左右 padding，让高亮覆盖整行选项 */
+                padding: 0px; /* 彻底移除上下左右 padding，使首尾条目高亮完美触达菜单边界 */
                 margin: 0px; /* 强制外边距为0，彻底消除一切空洞的黑底缝隙 */
             }}
             QMenu::item {{
@@ -1334,7 +1335,7 @@ class OverlayWindow(QMainWindow):
             QMenu::separator {{
                 height: 1px;
                 background-color: rgba(170, 155, 106, 40);
-                margin: 4px 8px;
+                margin: 0px 8px; /* 彻底移除上下 margin，使选项高亮与分隔线之间零缝隙完美贴合 */
             }}
             QMenu::right-arrow {{
                 width: 8px;
@@ -1411,7 +1412,7 @@ class OverlayWindow(QMainWindow):
                 font-size: 12px;
                 border: 1px solid rgba(170, 155, 106, 90);
                 border-radius: 2px;
-                padding: 4px 0px; /* 移除左右 padding，让高亮覆盖整行选项 */
+                padding: 0px; /* 彻底移除上下左右 padding，使首尾条目高亮完美触达菜单边界 */
                 margin: 0px; /* 强制外边距为0，彻底消除一切空洞的黑底缝隙 */
             }}
             QMenu::item {{
@@ -1438,7 +1439,7 @@ class OverlayWindow(QMainWindow):
             QMenu::separator {{
                 height: 1px;
                 background-color: rgba(170, 155, 106, 40);
-                margin: 4px 8px;
+                margin: 0px 8px; /* 彻底移除上下 margin，使选项高亮与分隔线之间零缝隙完美贴合 */
             }}
             QMenu::right-arrow {{
                 width: 8px;
