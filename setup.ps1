@@ -1,4 +1,4 @@
-﻿# Ludiglot 一键构建脚本
+# Ludiglot 一键构建脚本
 # Windows PowerShell 版本
 
 $ErrorActionPreference = "Stop"
@@ -15,66 +15,83 @@ Write-Host ""
 Write-Host "检查 uv..." -ForegroundColor Yellow
 $uvCmd = (Get-Command uv -ErrorAction SilentlyContinue)
 $uvExe = $null
-$localUv = Join-Path $env:LOCALAPPDATA "uv\\bin"
-$localUvExe = Join-Path $localUv "uv.exe"
-if (Test-Path $localUvExe) {
-    $uvExe = $localUvExe
-    $env:Path = "$localUv;$env:Path"
+
+# 优先检查官方标准的 .local\bin 目录
+$localBinUv = Join-Path $env:USERPROFILE ".local\\bin"
+$localBinUvExe = Join-Path $localBinUv "uv.exe"
+if (Test-Path $localBinUvExe) {
+    $uvExe = $localBinUvExe
+    $env:Path = "$localBinUv;$env:Path"
     $uvCmd = (Get-Command uv -ErrorAction SilentlyContinue)
 }
-if (-not $uvCmd) {
-    Write-Host "  未找到 uv，尝试使用 winget 安装..." -ForegroundColor Yellow
-    $wingetCmd = (Get-Command winget -ErrorAction SilentlyContinue)
-    if ($wingetCmd) {
-        winget install --id Astral.Uv -e --accept-package-agreements --accept-source-agreements
-    }
 
-    $uvCmd = (Get-Command uv -ErrorAction SilentlyContinue)
-    if (-not $uvCmd) {
-        Write-Host "  winget 安装失败，尝试使用官方安装脚本..." -ForegroundColor Yellow
-        try {
-            Import-Module Microsoft.PowerShell.Security -ErrorAction SilentlyContinue | Out-Null
-            & powershell -ExecutionPolicy Bypass -Command "Invoke-RestMethod https://astral.sh/uv/install.ps1 | Invoke-Expression"
-        } catch {
-            Write-Host "  官方安装脚本失败，尝试直接下载 uv..." -ForegroundColor Yellow
-            try {
-                $arch = $env:PROCESSOR_ARCHITECTURE
-                $zipName = "uv-x86_64-pc-windows-msvc.zip"
-                if ($arch -eq "ARM64") {
-                    $zipName = "uv-aarch64-pc-windows-msvc.zip"
-                } elseif ($arch -eq "x86") {
-                    $zipName = "uv-i686-pc-windows-msvc.zip"
-                }
-                $uvUrl = "https://github.com/astral-sh/uv/releases/latest/download/$zipName"
-                $uvZip = Join-Path $env:TEMP "uv.zip"
-                $uvDir = Join-Path $env:LOCALAPPDATA "uv\\bin"
-                New-Item -ItemType Directory -Force -Path $uvDir | Out-Null
-                & curl.exe -L $uvUrl -o $uvZip
-                Expand-Archive -Path $uvZip -DestinationPath $uvDir -Force
-                Remove-Item -Force $uvZip -ErrorAction SilentlyContinue
-            } catch {
-                Write-Host "  错误: uv 安装失败" -ForegroundColor Red
-                Write-Host "  请手动安装 uv: https://astral.sh/uv" -ForegroundColor Yellow
-                exit 1
-            }
-        }
-    }
-
-    $uvCmd = (Get-Command uv -ErrorAction SilentlyContinue)
-    if (-not $uvCmd) {
-        $localUv = Join-Path $env:LOCALAPPDATA "uv\\bin"
-        $localUvExe = Join-Path $localUv "uv.exe"
-        if (Test-Path $localUvExe) {
-            $uvExe = $localUvExe
-            $env:Path = "$localUv;$env:Path"
-        }
+# 其次兜底检查旧的 AppData\Local\uv 目录（做兼容）
+if (-not $uvExe) {
+    $oldUv = Join-Path $env:LOCALAPPDATA "uv\\bin"
+    $oldUvExe = Join-Path $oldUv "uv.exe"
+    if (Test-Path $oldUvExe) {
+        $uvExe = $oldUvExe
+        $env:Path = "$oldUv;$env:Path"
         $uvCmd = (Get-Command uv -ErrorAction SilentlyContinue)
     }
+}
+
+if (-not $uvCmd -and -not $uvExe) {
+    Write-Host "  未找到 uv，优先尝试使用官方安装脚本..." -ForegroundColor Yellow
+    try {
+        Import-Module Microsoft.PowerShell.Security -ErrorAction SilentlyContinue | Out-Null
+        & powershell -ExecutionPolicy Bypass -Command "Invoke-RestMethod https://astral.sh/uv/install.ps1 | Invoke-Expression"
+        
+        # 官方脚本默认安装在 .local\bin
+        if (Test-Path $localBinUvExe) {
+            $uvExe = $localBinUvExe
+            $env:Path = "$localBinUv;$env:Path"
+        }
+    } catch {
+        Write-Host "  官方安装脚本失败，尝试使用 winget 安装..." -ForegroundColor Yellow
+        $wingetCmd = (Get-Command winget -ErrorAction SilentlyContinue)
+        if ($wingetCmd) {
+            winget install --id Astral.Uv -e --accept-package-agreements --accept-source-agreements
+        }
+    }
+
+    $uvCmd = (Get-Command uv -ErrorAction SilentlyContinue)
+    if (-not $uvCmd -and -not $uvExe) {
+        Write-Host "  依然未找到 uv，尝试直接下载官方 Release 压缩包..." -ForegroundColor Yellow
+        try {
+            $arch = $env:PROCESSOR_ARCHITECTURE
+            $zipName = "uv-x86_64-pc-windows-msvc.zip"
+            if ($arch -eq "ARM64") {
+                $zipName = "uv-aarch64-pc-windows-msvc.zip"
+            } elseif ($arch -eq "x86") {
+                $zipName = "uv-i686-pc-windows-msvc.zip"
+            }
+            $uvUrl = "https://github.com/astral-sh/uv/releases/latest/download/$zipName"
+            $uvZip = Join-Path $env:TEMP "uv.zip"
+            # 统一直接下载释放到标准的 .local\bin
+            New-Item -ItemType Directory -Force -Path $localBinUv | Out-Null
+            & curl.exe -L $uvUrl -o $uvZip
+            Expand-Archive -Path $uvZip -DestinationPath $localBinUv -Force
+            Remove-Item -Force $uvZip -ErrorAction SilentlyContinue
+            
+            if (Test-Path $localBinUvExe) {
+                $uvExe = $localBinUvExe
+                $env:Path = "$localBinUv;$env:Path"
+            }
+        } catch {
+            Write-Host "  错误: uv 自动安装失败" -ForegroundColor Red
+            Write-Host "  请手动安装 uv: https://astral.sh/uv" -ForegroundColor Yellow
+            exit 1
+        }
+    }
+
+    $uvCmd = (Get-Command uv -ErrorAction SilentlyContinue)
     if (-not $uvCmd -and -not $uvExe) {
         Write-Host "  错误: uv 安装失败或未加入 PATH" -ForegroundColor Red
         exit 1
     }
 }
+
 if (-not $uvExe) {
     $uvExe = $uvCmd.Source
 }
