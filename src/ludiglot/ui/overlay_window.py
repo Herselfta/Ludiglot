@@ -290,33 +290,30 @@ class PlayPauseButton(QPushButton):
             icon_a = int(200 * (1.0 - h) + 255 * h)
             icon_color = QColor(icon_r, icon_g, icon_b, icon_a)
 
-        # 1. 绘制背景菱形
-        from PyQt6.QtGui import QPolygonF
+        # 1. 绘制背景/边框外框：暂停态是方形，播放态平滑旋转为菱形
+        from PyQt6.QtGui import QPen
+        import math
+
         cx = rect.width() / 2.0
         cy = rect.height() / 2.0
-        margin = 1.5
-        w = rect.width() - 2.0 * margin
-        h = rect.height() - 2.0 * margin
-        p_top = QPointF(cx, cy - h / 2.0)
-        p_right = QPointF(cx + w / 2.0, cy)
-        p_bottom = QPointF(cx, cy + h / 2.0)
-        p_left = QPointF(cx - w / 2.0, cy)
-        diamond = QPolygonF([p_top, p_right, p_bottom, p_left])
+        frame_side = min(rect.width(), rect.height()) / math.sqrt(2) - 2.0
+        frame_rect = QRectF(-frame_side / 2.0, -frame_side / 2.0, frame_side, frame_side)
+        frame_rotation = self._state_val * 45.0
 
+        painter.save()
+        painter.translate(cx, cy)
+        painter.rotate(frame_rotation)
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(bg_color)
-        painter.drawPolygon(diamond)
-        
-        # 2. 绘制边框菱形
-        from PyQt6.QtGui import QPen
+        painter.drawRoundedRect(frame_rect, 2.0, 2.0)
+
         pen = QPen(border_color, 1.0 + self._hover_val * 0.4)
         painter.setPen(pen)
         painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawPolygon(diamond)
+        painter.drawRoundedRect(frame_rect, 2.0, 2.0)
+        painter.restore()
 
-        # 3. 绘制图标（以中心为锚点应用变换）
-        cx = rect.width() / 2.0
-        cy = rect.height() / 2.0
+        # 2. 绘制图标（以中心为锚点应用变换）
         
         # 播放三角形（在 state_val 趋向 1.0 时顺时针旋转 90 度并淡出）
         if self._state_val < 0.99:
