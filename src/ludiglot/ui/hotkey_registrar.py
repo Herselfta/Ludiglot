@@ -25,8 +25,6 @@ class HotkeyRegistration(Protocol):
 
 
 class HotkeyAdapter(Protocol):
-    name: str
-
     def register(self, bindings: tuple[HotkeyBinding, ...]) -> HotkeyRegistration | None:
         ...
 

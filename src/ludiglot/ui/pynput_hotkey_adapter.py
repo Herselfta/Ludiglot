@@ -1,16 +1,9 @@
 from __future__ import annotations
 
-import threading
 from typing import Any, Callable
 
+from ludiglot.ui.capture_session import ThreadStarter, start_daemon_thread
 from ludiglot.ui.hotkey_registrar import HotkeyBinding
-
-ThreadStarter = Callable[[Callable[[], None]], None]
-
-
-def start_daemon_thread(target: Callable[[], None]) -> None:
-    threading.Thread(target=target, daemon=True).start()
-
 
 def convert_hotkey_for_pynput(hotkey: str) -> str:
     key = hotkey.lower().replace("ctrl", "<ctrl>").replace("shift", "<shift>")
@@ -33,8 +26,6 @@ class PynputHotkeyRegistration:
 
 
 class PynputGlobalHotkeyAdapter:
-    name = "pynput"
-
     def __init__(
         self,
         *,

@@ -59,6 +59,14 @@ class _WinHotkeyFilter(QAbstractNativeEventFilter):
         return False, 0
 
 
+def _unregister_hotkeys(user32: Any, hotkey_ids: list[int]) -> None:
+    for hotkey_id in hotkey_ids:
+        try:
+            user32.UnregisterHotKey(None, hotkey_id)
+        except Exception:
+            pass
+
+
 class WindowsNativeHotkeyRegistration:
     def __init__(
         self,
@@ -78,11 +86,7 @@ class WindowsNativeHotkeyRegistration:
         if self._stopped:
             return
         self._stopped = True
-        for hotkey_id in self._registered_ids:
-            try:
-                self._user32.UnregisterHotKey(None, hotkey_id)
-            except Exception:
-                pass
+        _unregister_hotkeys(self._user32, self._registered_ids)
         if self._app is not None and self._native_filter is not None:
             try:
                 self._app.removeNativeEventFilter(self._native_filter)
@@ -93,8 +97,6 @@ class WindowsNativeHotkeyRegistration:
 
 
 class WindowsNativeHotkeyAdapter:
-    name = "WinAPI"
-
     def __init__(
         self,
         *,
@@ -147,11 +149,7 @@ class WindowsNativeHotkeyAdapter:
         )
 
     def _unregister_partial(self, user32: Any, registered: list[int]) -> None:
-        for hotkey_id in registered:
-            try:
-                user32.UnregisterHotKey(None, hotkey_id)
-            except Exception:
-                pass
+        _unregister_hotkeys(user32, registered)
 
     def _default_user32_provider(self) -> Any:
         import ctypes
