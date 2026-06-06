@@ -6,6 +6,7 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 OVERLAY_WINDOW = PROJECT_ROOT / "src" / "ludiglot" / "ui" / "overlay_window.py"
+OVERLAY_COMPOSITION = PROJECT_ROOT / "src" / "ludiglot" / "ui" / "overlay_composition.py"
 
 
 def _overlay_class():
@@ -13,15 +14,19 @@ def _overlay_class():
     return next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "OverlayWindow")
 
 
+def _composition_tree():
+    return ast.parse(OVERLAY_COMPOSITION.read_text(encoding="utf-8"))
+
+
 def _keyword(call: ast.Call, name: str) -> ast.expr:
     return next(keyword.value for keyword in call.keywords if keyword.arg == name)
 
 
 def test_hotkey_registrar_wiring_uses_existing_overlay_callbacks():
-    overlay_class = _overlay_class()
+    tree = _composition_tree()
     registrar_call = None
     callbacks_call = None
-    for node in ast.walk(overlay_class):
+    for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
         if isinstance(node.func, ast.Name) and node.func.id == "HotkeyRegistrar":
@@ -43,7 +48,7 @@ def test_hotkey_registrar_wiring_uses_existing_overlay_callbacks():
     assert isinstance(capture.body.func.value, ast.Attribute)
     assert capture.body.func.value.attr == "capture_requested"
     assert isinstance(capture.body.func.value.value, ast.Name)
-    assert capture.body.func.value.value.id == "self"
+    assert capture.body.func.value.value.id == "window"
     assert len(capture.body.args) == 1
     assert isinstance(capture.body.args[0], ast.Constant)
     assert capture.body.args[0].value is True
@@ -51,7 +56,7 @@ def test_hotkey_registrar_wiring_uses_existing_overlay_callbacks():
     toggle = _keyword(callbacks_call, "toggle")
     assert isinstance(toggle, ast.Attribute)
     assert isinstance(toggle.value, ast.Name)
-    assert toggle.value.id == "self"
+    assert toggle.value.id == "window"
     assert toggle.attr == "_toggle_visibility"
 
     for keyword_name, signal_name in {"log": "log", "error": "error"}.items():
@@ -63,7 +68,31 @@ def test_hotkey_registrar_wiring_uses_existing_overlay_callbacks():
         assert isinstance(value.value.value, ast.Attribute)
         assert value.value.value.attr == "signals"
         assert isinstance(value.value.value.value, ast.Name)
-        assert value.value.value.value.id == "self"
+        assert value.value.value.value.id == "window"
+
+
+def test_hotkey_registrar_uses_native_primary_and_pynput_fallback_adapters():
+    tree = _composition_tree()
+    registrar_call = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "HotkeyRegistrar"
+    )
+
+    primary_adapter = _keyword(registrar_call, "primary_adapter")
+    assert isinstance(primary_adapter, ast.Call)
+    assert isinstance(primary_adapter.func, ast.Name)
+    assert primary_adapter.func.id == "WindowsNativeHotkeyAdapter"
+    application_provider = _keyword(primary_adapter, "application_provider")
+    assert isinstance(application_provider, ast.Attribute)
+    assert application_provider.attr == "instance"
+    assert isinstance(application_provider.value, ast.Name)
+    assert application_provider.value.id == "QApplication"
+
+    fallback_adapter = _keyword(registrar_call, "fallback_adapter")
+    assert isinstance(fallback_adapter, ast.Call)
+    assert isinstance(fallback_adapter.func, ast.Name)
+    assert fallback_adapter.func.id == "PynputGlobalHotkeyAdapter"
 
 
 def test_hotkey_registrar_starts_and_stops_with_overlay_lifecycle():

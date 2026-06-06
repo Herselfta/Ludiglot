@@ -15,7 +15,7 @@ from ludiglot.core.config import load_config
 from ludiglot.core.ocr import OCREngine, group_ocr_lines
 from ludiglot.core.matcher import TextMatcher
 from ludiglot.core.audio_mapper import AudioCacheIndex
-from ludiglot.core.audio_player import AudioPlayer
+from ludiglot.ui.qt_audio_player import AudioPlayer
 from ludiglot.core.audio_resolver import AudioResolver, get_voice_event_index
 from ludiglot.core.audio_extract import find_wem_by_hash
 

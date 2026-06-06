@@ -16,7 +16,7 @@ from ludiglot.core.audio_extract import (
     default_vgmstream_path,
 )
 from ludiglot.core.audio_mapper import AudioCacheIndex
-from ludiglot.core.audio_player import AudioPlayer
+from ludiglot.ui.qt_audio_player import AudioPlayer
 from ludiglot.core.audio_resolver import AudioResolver, get_voice_event_index
 from ludiglot.core.capture_input import CaptureInputAdapters, capture_input_to_memory, capture_options_from_config
 from ludiglot.core.config import load_config

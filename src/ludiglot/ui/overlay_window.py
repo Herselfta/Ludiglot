@@ -15,10 +15,8 @@ from PyQt6.QtWidgets import (
     QSystemTrayIcon, QFrame
 )
 
-from ludiglot.core.audio_player import AudioPlayer
 from ludiglot.core.config import AppConfig, load_config
 from ludiglot.core.overlay_runtime import (
-    OverlayRuntimeCallbacks,
     create_overlay_ocr_engine,
     initialize_overlay_runtime,
 )
@@ -34,16 +32,17 @@ from ludiglot.core.preferences import (
     WindowSize,
     clamp_window_position,
 )
-from ludiglot.ui.audio_controls_presenter import AudioControlsPresenter
-from ludiglot.ui.audio_playback_ui_controller import AudioPlaybackUiController
-from ludiglot.ui.capture_session import CaptureSessionCallbacks, OverlayCaptureSession
-from ludiglot.ui.hotkey_registrar import HotkeyRegistrar, HotkeyRegistrarCallbacks
-from ludiglot.ui.pynput_hotkey_adapter import PynputGlobalHotkeyAdapter
-from ludiglot.ui.qt_audio_controls_adapter import QtAudioControlsAdapter
-from ludiglot.ui.qt_capture_adapter import QtCaptureAdapter
-from ludiglot.ui.qt_hotkey_adapter import WindowsNativeHotkeyAdapter
-from ludiglot.ui.qt_result_presentation_adapter import QtResultPresentationAdapter
-from ludiglot.ui.result_presentation_controller import ResultPresentationController
+from ludiglot.ui.overlay_composition import (
+    connect_overlay_composition_signals,
+    create_runtime_callbacks,
+    install_app_event_filter,
+    install_audio_player,
+    install_audio_playback_controls,
+    install_capture_session,
+    install_hotkey_registrar,
+    install_result_presentation,
+    install_sync_timer,
+)
 from ludiglot.ui.waveform_progress_bar import AudioWaveformProgressBar
 
 
@@ -681,42 +680,22 @@ class OverlayWindow(QMainWindow):
         self.matcher = None
         self.audio_resolver = None
         self.skill_param_resolver = None
-        runtime_callbacks = OverlayRuntimeCallbacks(
-            status=self.signals.status.emit,
-            log=self.signals.log.emit,
-            error=self.signals.error.emit,
-        )
+        runtime_callbacks = create_runtime_callbacks(self)
         self.engine = create_overlay_ocr_engine(config, runtime_callbacks)
         self.db: Dict[str, Any] = {}
         self.voice_map: Dict[str, list[str]] = {}
         self.voice_event_index = None
         self.audio_index = None
         self.audio_runtime: OverlayAudioRuntime | None = None
-        self.player = AudioPlayer()
-        self._hotkeys = HotkeyRegistrar(
-            config_provider=lambda: self.config,
-            callbacks=HotkeyRegistrarCallbacks(
-                capture=lambda: self.capture_requested.emit(True),
-                toggle=self._toggle_visibility,
-                log=self.signals.log.emit,
-                error=self.signals.error.emit,
-            ),
-            primary_adapter=WindowsNativeHotkeyAdapter(application_provider=QApplication.instance),
-            fallback_adapter=PynputGlobalHotkeyAdapter(),
-        )
+        install_audio_player(self)
+        install_hotkey_registrar(self)
         self._dragging = False
         self._drag_pos: QPoint | None = None
         self._resizing = False
         self._resize_edge = None  # 'left', 'right', 'top', 'bottom', 'topleft', 'topright', 'bottomleft', 'bottomright'
         self._resize_start_geometry = None
         self._resize_start_pos = None
-        
-        # 音频进度更新定时器
-        from PyQt6.QtCore import QTimer
-        self.audio_timer = QTimer(self)
-        self.audio_timer.timeout.connect(self._update_audio_progress)
-        self.audio_timer.setInterval(100)  # 每100ms更新一次
-        
+
         # UI 状态
         self.current_font_size = 13
         self.current_font_weight = "SemiBold"
@@ -727,42 +706,8 @@ class OverlayWindow(QMainWindow):
 
         # 1. 先初始化 UI
         self._setup_ui()
-        self.audio_controls_adapter = QtAudioControlsAdapter(
-            play_pause_button=self.play_pause_btn,
-            slider=self.audio_slider,
-            time_label=self.time_label,
-            timer=self.audio_timer,
-            status=self.signals.status.emit,
-        )
-        self.audio_ui = AudioPlaybackUiController(
-            config_provider=lambda: self.config,
-            runtime_provider=lambda: self.audio_runtime,
-            player=self.player,
-            controls=self.audio_controls_adapter,
-            presenter=AudioControlsPresenter(),
-            status=self.signals.status.emit,
-            log=self.signals.log.emit,
-            error=self.signals.error.emit,
-            audio_index_updated=self._set_audio_index,
-        )
-        self.result_presentation_view = QtResultPresentationAdapter(
-            source_editor=self.source_label,
-            target_editor=self.cn_label,
-            show_single_result=self.show_and_activate,
-            show_multi_result=self.show_and_activate,
-        )
-        self.result_presentation = ResultPresentationController(
-            config_provider=lambda: self.config,
-            preferences_provider=self._display_preferences,
-            param_resolver_provider=lambda: self.skill_param_resolver,
-            title_resolver=self._translate_title,
-            voice_map_provider=lambda: self.voice_map,
-            voice_event_index_provider=lambda: self.voice_event_index,
-            audio=self.audio_ui,
-            view=self.result_presentation_view,
-            log=self.signals.log.emit,
-            error=self.signals.error.emit,
-        )
+        install_audio_playback_controls(self)
+        install_result_presentation(self)
         # 2. 连接所有信号（确保日志等能正常工作）
         self._connect_signals()
         # 3. 恢复配置（覆盖默认值，并调整窗口尺寸）
@@ -771,35 +716,13 @@ class OverlayWindow(QMainWindow):
         self._load_style()
         self._apply_font_settings()
 
-        self.capture_adapter = QtCaptureAdapter(self.config, log=self.signals.log.emit)
-        self.capture_session = OverlayCaptureSession(
-            config_provider=lambda: self.config,
-            ocr_engine_provider=lambda: self.engine,
-            matcher_provider=lambda: self.matcher,
-            capture_adapter=self.capture_adapter,
-            callbacks=CaptureSessionCallbacks(
-                status=self.signals.status.emit,
-                log=self.signals.log.emit,
-                error=self.signals.error.emit,
-                result=self.signals.result.emit,
-            ),
-            stop_audio=self.stop_audio,
-            clear_result_audio_state=self._clear_capture_audio_state,
-        )
-        self.capture_requested.connect(self.capture_session.trigger)
-        self.resources_initialized.connect(self._on_runtime_resources_initialized)
-        
-        app = QApplication.instance()
-        if app:
-            app.installEventFilter(self)
+        install_capture_session(self)
+        connect_overlay_composition_signals(self)
+        install_app_event_filter(self)
 
         threading.Thread(target=self._initialize_resources, daemon=True).start()
         self._hotkeys.start()
-        
-        # 定时同步窗口位置到外部 config
-        self._sync_config_timer = QTimer(self)
-        self._sync_config_timer.timeout.connect(self._persist_window_position)
-        self._sync_config_timer.start(5000)  # 每 5 秒同步一次
+        install_sync_timer(self)
 
     def _install_terminal_logger(self) -> None:
         """将 stdout/stderr/Qt警告 同步写入日志文件。"""
@@ -1622,11 +1545,7 @@ class OverlayWindow(QMainWindow):
         self.signals.log.connect(self._append_log)
 
     def _initialize_resources(self) -> None:
-        callbacks = OverlayRuntimeCallbacks(
-            status=self.signals.status.emit,
-            log=self.signals.log.emit,
-            error=self.signals.error.emit,
-        )
+        callbacks = create_runtime_callbacks(self)
         result = initialize_overlay_runtime(self.config, self.engine, callbacks)
         if not result.success or result.resources is None:
             return
