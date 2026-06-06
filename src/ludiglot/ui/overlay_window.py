@@ -23,11 +23,7 @@ from ludiglot.core.overlay_runtime import (
     initialize_overlay_runtime,
 )
 from ludiglot.core.overlay_audio_runtime import OverlayAudioRuntime
-from ludiglot.core.display_shaper import (
-    DisplayPreferences,
-    convert_game_html,
-    shape_translation_display,
-)
+from ludiglot.core.display_shaper import DisplayPreferences
 from ludiglot.core.preferences import (
     FONT_SIZE_MAX,
     FONT_SIZE_MIN,
@@ -42,7 +38,8 @@ from ludiglot.ui.audio_controls_presenter import AudioControlsPresenter
 from ludiglot.ui.audio_playback_ui_controller import AudioPlaybackUiController
 from ludiglot.ui.capture_session import CaptureSessionCallbacks, OverlayCaptureSession
 from ludiglot.ui.qt_audio_controls_adapter import QtAudioControlsAdapter
-from ludiglot.ui.qt_capture_adapter import QtCaptureAdapter
+from ludiglot.ui.qt_result_presentation_adapter import QtResultPresentationAdapter
+from ludiglot.ui.result_presentation_controller import ResultPresentationController
 from ludiglot.ui.waveform_progress_bar import AudioWaveformProgressBar
 
 
@@ -694,7 +691,6 @@ class OverlayWindow(QMainWindow):
         self.voice_event_index = None
         self.audio_index = None
         self.audio_runtime: OverlayAudioRuntime | None = None
-        self.last_match: Dict[str, Any] | None = None
         self.player = AudioPlayer()
         self._hotkey_listener = None
         self._win_hotkey_filter = None
@@ -719,11 +715,7 @@ class OverlayWindow(QMainWindow):
         self.current_line_spacing = 1.2
         self.current_font_en = config.font_en
         self.current_font_cn = config.font_cn
-        self._last_en_raw: str | None = None
-        self._last_cn_raw: str | None = None
-        self._last_en_is_html = False
-        self._last_cn_is_html = False
-        
+
         # 1. 先初始化 UI
         self._setup_ui()
         self.audio_controls_adapter = QtAudioControlsAdapter(
@@ -743,6 +735,24 @@ class OverlayWindow(QMainWindow):
             log=self.signals.log.emit,
             error=self.signals.error.emit,
             audio_index_updated=self._set_audio_index,
+        )
+        self.result_presentation_view = QtResultPresentationAdapter(
+            source_editor=self.source_label,
+            target_editor=self.cn_label,
+            show_single_result=self.show_and_activate,
+            show_multi_result=self._show_multi_result_window,
+        )
+        self.result_presentation = ResultPresentationController(
+            config_provider=lambda: self.config,
+            preferences_provider=self._display_preferences,
+            param_resolver_provider=lambda: self.skill_param_resolver,
+            title_resolver=self._translate_title,
+            voice_map_provider=lambda: self.voice_map,
+            voice_event_index_provider=lambda: self.voice_event_index,
+            audio=self.audio_ui,
+            view=self.result_presentation_view,
+            log=self.signals.log.emit,
+            error=self.signals.error.emit,
         )
         # 2. 连接所有信号（确保日志等能正常工作）
         self._connect_signals()
@@ -1507,98 +1517,15 @@ class OverlayWindow(QMainWindow):
         }
         return weight_map.get(self.current_font_weight, "600")
     
-    def _build_content_fonts(self) -> tuple[QFont, QFont]:
-        """构造英文/中文内容字体对象。"""
-        # 确保字号合法（避免Qt警告）- 处理所有边界情况
-        try:
-            size_val = int(self.current_font_size) if self.current_font_size else 13
-        except (ValueError, TypeError):
-            size_val = 13
-        valid_size = max(8, min(72, size_val))
-
-        weight_map = {
-            "Light": QFont.Weight.Light,
-            "Normal": QFont.Weight.Normal,
-            "SemiBold": QFont.Weight.DemiBold,
-            "Bold": QFont.Weight.Bold,
-            "Heavy": QFont.Weight.Black,
-        }
-        weight_val = weight_map.get(self.current_font_weight, QFont.Weight.DemiBold)
-
-        en_font = QFont()
-        en_font.setFamily(self.current_font_en)
-        en_font.setPointSize(valid_size)
-        en_font.setWeight(weight_val)
-        en_font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, self.current_letter_spacing)
-
-        cn_font = QFont()
-        cn_font.setFamily(self.current_font_cn)
-        cn_font.setPointSize(valid_size)
-        cn_font.setWeight(weight_val)
-        cn_font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, self.current_letter_spacing)
-        return en_font, cn_font
-
-    def _apply_text_document_style(self, editor: QTextEdit, font: QFont, force_char_style: bool) -> None:
-        """对 QTextEdit 文档应用实时字体/行距设置。"""
-        from PyQt6.QtGui import QTextCursor, QTextBlockFormat, QTextCharFormat
-
-        doc = editor.document()
-        doc.setDefaultFont(font)
-
-        cursor = QTextCursor(doc)
-        cursor.select(QTextCursor.SelectionType.Document)
-
-        # 纯文本模式下强制覆盖字符格式，避免被 QSS 固定字号/字重锁死
-        if force_char_style:
-            char_fmt = QTextCharFormat()
-            char_fmt.setFont(font)
-            cursor.mergeCharFormat(char_fmt)
-
-        # Qt 对 QTextEdit 的 QSS line-height 支持有限，改用文档块格式保证实时生效
-        try:
-            line_height_ratio = float(self.current_line_spacing)
-        except (TypeError, ValueError):
-            line_height_ratio = 1.2
-        line_height_percent = int(max(50, min(400, line_height_ratio * 100)))
-        block_fmt = QTextBlockFormat()
-        try:
-            # PyQt6 expects int for heightType; enum object may raise TypeError.
-            height_type = int(QTextBlockFormat.LineHeightTypes.ProportionalHeight.value)
-        except Exception:
-            height_type = int(getattr(QTextBlockFormat, "ProportionalHeight", 1))
-        block_fmt.setLineHeight(float(line_height_percent), height_type)
-        cursor.mergeBlockFormat(block_fmt)
-
     def _apply_font_settings(self):
         """应用字体设置到所有UI元素"""
-        en_font, cn_font = self._build_content_fonts()
-
-        # 应用到控件默认字体
-        self.source_label.setFont(en_font)
-        self.cn_label.setFont(cn_font)
-
-        # 重新渲染文本，并对文档层强制应用字体/行距
-        self._refresh_text_display()
-        self._apply_text_document_style(self.source_label, en_font, force_char_style=not self._last_en_is_html)
-        self._apply_text_document_style(self.cn_label, cn_font, force_char_style=not self._last_cn_is_html)
+        self.result_presentation.refresh_font_settings()
 
         self.signals.log.emit(
             f"[UI] 字体设置：{self.current_font_size}pt, {self.current_font_weight}, "
             f"字距{self.current_letter_spacing}px, 行距{self.current_line_spacing:.1f}x"
         )
 
-    def _refresh_text_display(self) -> None:
-        if self._last_en_raw is not None:
-            if self._last_en_is_html:
-                self.source_label.setHtml(self._convert_game_html(self._last_en_raw, lang="en"))
-            else:
-                self.source_label.setPlainText(self._last_en_raw)
-        if self._last_cn_raw is not None:
-            if self._last_cn_is_html:
-                self.cn_label.setHtml(self._convert_game_html(self._last_cn_raw, lang="cn"))
-            else:
-                self.cn_label.setPlainText(self._last_cn_raw)
-    
     def _adjust_font_weight(self, weight: str):
         """调整字体粗细"""
         self.current_font_weight = weight
@@ -1879,22 +1806,6 @@ class OverlayWindow(QMainWindow):
     def _clear_capture_audio_state(self) -> None:
         self.audio_ui.clear_candidate()
 
-    def _is_voice_eligible(self, text_key: str | None) -> bool:
-        if not text_key:
-            return False
-        prefixes = (
-            "Term",  # UI/术语
-            "SkillInput_",
-            "SkillTag_",
-            "WeaponConf_",
-            "ComboTeaching_",
-            "ItemInfo_",
-            "RogueRes_",
-            "Flow_",
-            "POI_",
-        )
-        return not text_key.startswith(prefixes)
-
     def _display_preferences(self) -> DisplayPreferences:
         return DisplayPreferences(
             gender_preference=getattr(self.config, "gender_preference", "female"),
@@ -1906,76 +1817,8 @@ class OverlayWindow(QMainWindow):
             letter_spacing=float(self.current_letter_spacing) if self.current_letter_spacing else 0.0,
         )
 
-    def _apply_display_pane(self, widget: QTextEdit, pane, *, lang: str) -> bool:
-        if pane.is_html and pane.rendered_html is not None:
-            widget.setHtml(pane.rendered_html)
-            return True
-        widget.setPlainText(pane.display_text)
-        return False
-
     def _show_result(self, result: Dict[str, Any]) -> None:
-        import time
-        t_show_start = time.time()
-        self.signals.log.emit("[DEBUG] _show_result called")
-        self.signals.log.emit("[PERF] _show_result 开始")
-
-        try:
-            self.stop_audio(emit_status=False)
-            self.last_match = result
-            self.audio_ui.clear_candidate()
-
-            model = shape_translation_display(
-                result,
-                preferences=self._display_preferences(),
-                param_resolver=self.skill_param_resolver,
-                title_resolver=self._translate_title,
-                voice_map=self.voice_map,
-                voice_event_index=self.voice_event_index,
-            )
-
-            self.signals.log.emit("[WINDOW] 设置文本内容")
-            self._last_en_is_html = self._apply_display_pane(self.source_label, model.source, lang="en")
-            self._last_cn_is_html = self._apply_display_pane(self.cn_label, model.target, lang="cn")
-            self._last_en_raw = model.source.display_text
-            self._last_cn_raw = model.target.display_text
-
-            for line in model.log_lines:
-                self.signals.log.emit(line)
-
-            audio_candidate = model.audio_candidate
-            t_audio = time.time()
-            has_audio = self.audio_ui.load_result_candidate(audio_candidate, is_multi=model.is_multi)
-            self.signals.log.emit(f"[PERF] 音频解析: {(time.time()-t_audio)*1000:.1f}ms")
-
-            en_font, cn_font = self._build_content_fonts()
-            self._apply_text_document_style(self.source_label, en_font, force_char_style=not self._last_en_is_html)
-            self._apply_text_document_style(self.cn_label, cn_font, force_char_style=not self._last_cn_is_html)
-
-            if model.is_multi:
-                self.show()
-                self.signals.log.emit("[WINDOW] 已调用show()")
-                self.raise_()
-                self.signals.log.emit("[WINDOW] 已调用raise_()")
-                self.activateWindow()
-                self.signals.log.emit("[WINDOW] 窗口激活完成")
-            else:
-                self.signals.log.emit("[DEBUG] Calling show_and_activate...")
-                self.show_and_activate()
-                self.signals.log.emit("[DEBUG] show_and_activate returned.")
-
-            if self.config.play_audio and has_audio and self.audio_ui.has_current_audio:
-                self.signals.log.emit("[DEBUG] Calling play_audio...")
-                self.play_audio()
-                self.signals.log.emit("[DEBUG] play_audio returned.")
-
-            self.signals.log.emit(f"[PERF] _show_result 总耗时: {(time.time()-t_show_start)*1000:.1f}ms")
-        except Exception as exc:
-            self.signals.error.emit(f"显示结果失败: {exc}")
-            import traceback
-            self.signals.log.emit(f"[ERROR] {traceback.format_exc()}")
-
-    def _convert_game_html(self, text: str, lang: str = "cn") -> str:
-        return convert_game_html(text, lang=lang, preferences=self._display_preferences())
+        self.result_presentation.present_result(result)
 
     def _show_error(self, message: str) -> None:
         self.status_label.setText(message)
