@@ -1459,9 +1459,7 @@ class OverlayWindow(QMainWindow):
         if not result.success or result.resources is None:
             return False
 
-        self._apply_runtime_resources(result.resources)
-        self.signals.status.emit("就绪")
-        self.resources_loaded.emit()
+        self._on_runtime_resources_initialized(result.resources)
         return True
 
     def _on_runtime_resources_initialized(self, resources) -> None:

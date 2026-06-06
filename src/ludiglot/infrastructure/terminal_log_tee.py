@@ -8,6 +8,16 @@ from typing import TextIO
 _STREAM_LOCK = threading.Lock()
 
 
+def _append_to_log(log_path: Path, data: str) -> None:
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("a", encoding="utf-8") as f:
+            f.write(data)
+    except Exception:
+        # Best-effort file logging; ignore write errors
+        pass
+
+
 class _TeeStream:
     def __init__(self, stream: TextIO, log_path: Path) -> None:
         self._stream = stream
@@ -24,13 +34,7 @@ class _TeeStream:
             except Exception:
                 # Best-effort output; ignore stream write errors
                 pass
-            try:
-                self._log_path.parent.mkdir(parents=True, exist_ok=True)
-                with self._log_path.open("a", encoding="utf-8") as f:
-                    f.write(data)
-            except Exception:
-                # Best-effort file logging; ignore write errors
-                pass
+            _append_to_log(self._log_path, data)
             return written
 
     def flush(self) -> None:
@@ -56,11 +60,6 @@ def install_process_log_tee(log_path: Path) -> None:
 
     def qt_message_handler(mode, context, message):
         log_msg = f"[Qt {mode.name}] {message}\n"
-        try:
-            log_path.parent.mkdir(parents=True, exist_ok=True)
-            with log_path.open("a", encoding="utf-8") as f:
-                f.write(log_msg)
-        except Exception:
-            pass
+        _append_to_log(log_path, log_msg)
 
     qInstallMessageHandler(qt_message_handler)

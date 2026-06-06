@@ -36,8 +36,7 @@ def test_runtime_refresh_reuses_overlay_runtime_initialization():
     source = ast.unparse(method)
 
     assert "initialize_overlay_runtime" in source
-    assert "_apply_runtime_resources" in source
-    assert "resources_loaded.emit" in source
+    assert "_on_runtime_resources_initialized" in source
 
 
 def test_overlay_window_no_longer_performs_partial_database_reload():

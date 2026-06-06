@@ -37,28 +37,25 @@ def run_gui(config_path: Path) -> None:
     menu = QMenu()
     # 修复：明确 Show/Hide 的职责，不再使用 toggle，解决状态不一致导致的“双击才能显示”问题
     show_action = menu.addAction("Show")
+    show_action.triggered.connect(window.show_and_activate)
     hide_action = menu.addAction("Hide")
+    hide_action.triggered.connect(window.hide)
     menu.addSeparator()
     capture_action = menu.addAction("Capture")
+    capture_action.triggered.connect(lambda: window.capture_requested.emit(True))
     reset_action = menu.addAction("Reset Window Position")
+    reset_action.triggered.connect(window.reset_window_position)
     quit_action = menu.addAction("Quit")
+    quit_action.triggered.connect(app.quit)
 
-    if show_action:
-        show_action.triggered.connect(window.show_and_activate)
-    if hide_action:
-        hide_action.triggered.connect(window.hide)
-    if capture_action:
-        capture_action.triggered.connect(lambda: window.capture_requested.emit(True))
-    if reset_action:
-        reset_action.triggered.connect(window.reset_window_position)
-    if quit_action:
-        quit_action.triggered.connect(app.quit)
+    def handle_tray_activation(reason: QSystemTrayIcon.ActivationReason) -> None:
+        if reason == QSystemTrayIcon.ActivationReason.Trigger:
+            window._toggle_visibility()
+        elif reason == QSystemTrayIcon.ActivationReason.DoubleClick:
+            window.capture_requested.emit(True)
 
     tray.setContextMenu(menu)
-    # 单击图标切换显示/隐藏
-    tray.activated.connect(lambda reason: window._toggle_visibility() if reason == QSystemTrayIcon.ActivationReason.Trigger else None)
-    # 双击图标触发捕获
-    tray.activated.connect(lambda reason: window.capture_requested.emit(True) if reason == QSystemTrayIcon.ActivationReason.DoubleClick else None)
+    tray.activated.connect(handle_tray_activation)
     tray.show()
 
     print("[DEBUG] Entering app.exec()", flush=True)
