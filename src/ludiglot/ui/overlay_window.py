@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import sys
 import threading
 from pathlib import Path
@@ -12,10 +11,10 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QTextEdit, QMenu, QComboBox, QSizePolicy,
     QSlider, QSpinBox, QDoubleSpinBox, QWidgetAction, QStyle,
-    QSystemTrayIcon, QFrame
+    QFrame
 )
 
-from ludiglot.core.config import AppConfig, load_config
+from ludiglot.core.config import AppConfig
 from ludiglot.core.overlay_runtime import (
     create_overlay_ocr_engine,
     initialize_overlay_runtime,
@@ -32,6 +31,8 @@ from ludiglot.core.preferences import (
     WindowSize,
     clamp_window_position,
 )
+from ludiglot.infrastructure.terminal_log_tee import install_process_log_tee
+from ludiglot.ui.database_update_controller import DatabaseUpdateController
 from ludiglot.ui.overlay_composition import (
     connect_overlay_composition_signals,
     create_runtime_callbacks,
@@ -676,7 +677,7 @@ class OverlayWindow(QMainWindow):
         self._config_path = config_path
         self.signals = UiSignals()
         self.log_path = Path(__file__).resolve().parents[3] / "log" / "gui.log"
-        self._install_terminal_logger()
+        install_process_log_tee(self.log_path)
         self.matcher = None
         self.audio_resolver = None
         self.skill_param_resolver = None
@@ -689,6 +690,13 @@ class OverlayWindow(QMainWindow):
         self.audio_runtime: OverlayAudioRuntime | None = None
         install_audio_player(self)
         install_hotkey_registrar(self)
+        self.database_update_controller = DatabaseUpdateController(
+            parent=self,
+            config_provider=lambda: self.config,
+            config_path=self._config_path,
+            refresh_runtime=self._refresh_runtime_resources,
+            log=self.signals.log.emit,
+        )
         self._dragging = False
         self._drag_pos: QPoint | None = None
         self._resizing = False
@@ -723,60 +731,6 @@ class OverlayWindow(QMainWindow):
         threading.Thread(target=self._initialize_resources, daemon=True).start()
         self._hotkeys.start()
         install_sync_timer(self)
-
-    def _install_terminal_logger(self) -> None:
-        """将 stdout/stderr/Qt警告 同步写入日志文件。"""
-        if hasattr(sys.stdout, "_ludiglot_tee"):
-            return
-
-        stream_lock = threading.Lock()
-
-        class _TeeStream:
-            def __init__(self, stream, log_path: Path) -> None:
-                self._stream = stream
-                self._log_path = log_path
-                self._ludiglot_tee = True
-
-            def write(self, data):
-                if not data:
-                    return
-                with stream_lock:
-                    try:
-                        self._stream.write(data)
-                    except Exception:
-                        # Best-effort output; ignore stream write errors
-                        pass
-                    try:
-                        self._log_path.parent.mkdir(parents=True, exist_ok=True)
-                        with self._log_path.open("a", encoding="utf-8") as f:
-                            f.write(data)
-                    except Exception:
-                        # Best-effort file logging; ignore write errors
-                        pass
-
-            def flush(self):
-                with stream_lock:
-                    try:
-                        self._stream.flush()
-                    except Exception:
-                        # Best-effort flush; ignore stream flush errors
-                        pass
-
-        sys.stdout = _TeeStream(sys.stdout, self.log_path)
-        sys.stderr = _TeeStream(sys.stderr, self.log_path)
-        
-        # 捕获Qt警告和错误
-        def qt_message_handler(mode, context, message):
-            log_msg = f"[Qt {mode.name}] {message}\n"
-            try:
-                self.log_path.parent.mkdir(parents=True, exist_ok=True)
-                with self.log_path.open("a", encoding="utf-8") as f:
-                    f.write(log_msg)
-            except Exception:
-                pass
-        
-        from PyQt6.QtCore import qInstallMessageHandler
-        qInstallMessageHandler(qt_message_handler)
 
     def _setup_ui(self) -> None:
         self.setWindowFlags(
@@ -1471,60 +1425,7 @@ class OverlayWindow(QMainWindow):
     
     def _update_database(self) -> None:
         """更新数据库：从游戏 Pak 重新解包并构建"""
-        from ludiglot.ui.dialogs import StyledDialog, StyledProgressDialog
-        from ludiglot.ui.db_updater import DatabaseUpdateThread
-        
-        # 检查 Pak 配置
-        if not (self.config.game_pak_root or self.config.game_install_root):
-            StyledDialog.warning(
-                self,
-                "配置错误",
-                "未设置游戏路径。\n请在 config/settings.json 中配置 game_pak_root 或 game_install_root。"
-            )
-            return
-        
-        # 确认对话框
-        reply = StyledDialog.question(
-            self,
-            "更新数据库",
-            f"即将从游戏 Pak 解包并重建数据库。\n\n"
-            f"游戏路径: {self.config.game_pak_root or self.config.game_install_root}\n"
-            f"输出文件: {self.config.db_path}\n\n"
-            f"此操作可能需要几分钟。是否继续？"
-        )
-        
-        from PyQt6.QtWidgets import QDialog
-        if reply != QDialog.DialogCode.Accepted:
-            return
-        
-        # 创建进度对话框
-        progress = StyledProgressDialog("Database Update", "正在更新数据库...", self)
-        progress.show()
-        
-        # 启动更新线程
-        self.update_thread = DatabaseUpdateThread(self._config_path, self.config.db_path)
-        
-        def on_progress(msg: str):
-            progress.setLabelText(msg)
-            self.signals.log.emit(f"[DB UPDATE] {msg}")
-        
-        def on_finished(success: bool, message: str):
-            progress.close()
-            if success:
-                # 重新加载数据库
-                try:
-                    self.db = json.loads(self.config.db_path.read_text(encoding="utf-8"))
-                    StyledDialog.information(self, "成功", message)
-                    self.signals.log.emit(f"[DB UPDATE] 成功：{message}")
-                except Exception as e:
-                    StyledDialog.warning(self, "警告", f"数据库更新成功，但重新加载失败：{e}")
-            else:
-                StyledDialog.critical(self, "失败", f"数据库更新失败：\n{message}")
-                self.signals.log.emit(f"[DB UPDATE] 失败：{message}")
-        
-        self.update_thread.progress.connect(on_progress)
-        self.update_thread.finished.connect(on_finished)
-        self.update_thread.start()
+        self.database_update_controller.start()
 
     def _load_style(self) -> None:
         try:
@@ -1551,6 +1452,17 @@ class OverlayWindow(QMainWindow):
             return
 
         self.resources_initialized.emit(result.resources)
+
+    def _refresh_runtime_resources(self) -> bool:
+        callbacks = create_runtime_callbacks(self)
+        result = initialize_overlay_runtime(self.config, self.engine, callbacks)
+        if not result.success or result.resources is None:
+            return False
+
+        self._apply_runtime_resources(result.resources)
+        self.signals.status.emit("就绪")
+        self.resources_loaded.emit()
+        return True
 
     def _on_runtime_resources_initialized(self, resources) -> None:
         self._apply_runtime_resources(resources)
@@ -1659,17 +1571,6 @@ class OverlayWindow(QMainWindow):
             pass
 
         self.log_box.append(message)
-        
-        # 若 stdout 已被 Tee，_TeeStream 已经处理过写入文件了
-        if hasattr(sys.stdout, "_ludiglot_tee"):
-            return
-            
-        try:
-            self.log_path.parent.mkdir(parents=True, exist_ok=True)
-            with self.log_path.open("a", encoding="utf-8") as f:
-                f.write(msg_with_newline)
-        except Exception:
-            pass
 
     def show_and_activate(self) -> None:
         """显示并激活窗口，确保焦点。"""
@@ -1999,65 +1900,3 @@ class OverlayWindow(QMainWindow):
         y = geo.top() + max((geo.height() - self.height()) // 2, 0)
         self.move(x, y)
         self._persist_window_position()
-
-
-def run_gui(config_path: Path) -> None:
-    app = QApplication([])
-    app.setFont(QFont("Segoe UI", 10))
-    app.setQuitOnLastWindowClosed(False)
-    
-    try:
-        config = load_config(config_path)
-    except Exception as e:
-        # 在终端显示错误信息，不使用GUI窗口
-        print("\n" + "="*70)
-        print("❌ Ludiglot 启动失败")
-        print("="*70)
-        print("\n加载配置或数据失败：")
-        print(f"\n{e}")
-        print("\n" + "="*70 + "\n")
-        return
-
-    window = OverlayWindow(config, config_path)
-    window.hide()
-
-    tray = QSystemTrayIcon(app)
-    style = app.style()
-    if style:
-        tray.setIcon(style.standardIcon(style.StandardPixmap.SP_ComputerIcon))
-    
-    menu = QMenu()
-    # 修复：明确 Show/Hide 的职责，不再使用 toggle，解决状态不一致导致的“双击才能显示”问题
-    show_action = menu.addAction("Show")
-    hide_action = menu.addAction("Hide")
-    menu.addSeparator()
-    capture_action = menu.addAction("Capture")
-    reset_action = menu.addAction("Reset Window Position")
-    quit_action = menu.addAction("Quit")
-
-    if show_action:
-        show_action.triggered.connect(window.show_and_activate)
-    if hide_action:
-        hide_action.triggered.connect(window.hide)
-    if capture_action:
-        capture_action.triggered.connect(lambda: window.capture_requested.emit(True))
-    if reset_action:
-        reset_action.triggered.connect(window.reset_window_position)
-    if quit_action:
-        quit_action.triggered.connect(app.quit)
-
-    tray.setContextMenu(menu)
-    # 单击图标切换显示/隐藏
-    tray.activated.connect(lambda reason: window._toggle_visibility() if reason == QSystemTrayIcon.ActivationReason.Trigger else None)
-    # 双击图标触发捕获
-    tray.activated.connect(lambda reason: window.capture_requested.emit(True) if reason == QSystemTrayIcon.ActivationReason.DoubleClick else None)
-    tray.show()
-
-    print("[DEBUG] Entering app.exec()", flush=True)
-    try:
-        ret = app.exec()
-        print(f"[DEBUG] app.exec() returned with {ret}", flush=True)
-    except Exception as e:
-        print(f"[ERROR] Exception in app.exec(): {e}", flush=True)
-    finally:
-        print("[DEBUG] Application exiting.", flush=True)

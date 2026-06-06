@@ -16,7 +16,7 @@ from ludiglot.core.audio_extract import (
     default_vgmstream_path,
 )
 from ludiglot.core.audio_mapper import AudioCacheIndex
-from ludiglot.ui.qt_audio_player import AudioPlayer
+from ludiglot.infrastructure.qt_audio_player import AudioPlayer
 from ludiglot.core.audio_resolver import AudioResolver, get_voice_event_index
 from ludiglot.core.capture_input import CaptureInputAdapters, capture_input_to_memory, capture_options_from_config
 from ludiglot.core.config import load_config
@@ -32,7 +32,6 @@ from ludiglot.core.text_builder import (
     save_text_db,
 )
 from ludiglot.core.wwise_hash import WwiseHash
-from ludiglot.ui.overlay_window import run_gui
 
 
 # 旧的 WutheringData 克隆逻辑已移除
@@ -433,6 +432,7 @@ def cmd_audio_build(args: argparse.Namespace) -> None:
                 print(f"测试播放失败：未找到对应音频 {args.test_text_key}")
 
     if args.start_gui:
+        from ludiglot.ui.app_shell import run_gui
         run_gui(Path(args.config))
 
 
@@ -532,6 +532,7 @@ def cmd_gui(args: argparse.Namespace) -> None:
         print("\n❌ 启动已取消。")
         return
     
+    from ludiglot.ui.app_shell import run_gui
     run_gui(config_path)
 
 

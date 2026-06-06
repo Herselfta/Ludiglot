@@ -12,7 +12,7 @@ from ludiglot.ui.capture_session import CaptureSessionCallbacks, OverlayCaptureS
 from ludiglot.ui.hotkey_registrar import HotkeyRegistrar, HotkeyRegistrarCallbacks
 from ludiglot.ui.pynput_hotkey_adapter import PynputGlobalHotkeyAdapter
 from ludiglot.ui.qt_audio_controls_adapter import QtAudioControlsAdapter
-from ludiglot.ui.qt_audio_player import AudioPlayer
+from ludiglot.infrastructure.qt_audio_player import AudioPlayer
 from ludiglot.ui.qt_capture_adapter import QtCaptureAdapter
 from ludiglot.ui.qt_hotkey_adapter import WindowsNativeHotkeyAdapter
 from ludiglot.ui.qt_result_presentation_adapter import QtResultPresentationAdapter
