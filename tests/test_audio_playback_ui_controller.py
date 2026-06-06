@@ -261,6 +261,20 @@ def test_seek_finished_updates_preview_and_records_debounce_time():
     assert controls.states[-1].time_text == "01:00 / 01:20"
 
 
+def test_seek_finished_while_playing_keeps_playing_controls():
+    controller, _, player, controls, clock, _ = make_controller()
+    player.playing = True
+    player.duration = 80_000
+    clock.value = 50.0
+
+    controller.seek_finished(0.75)
+
+    assert ("seek", 0.75) in player.calls
+    assert controls.states[-1].progress == 0.75
+    assert controls.states[-1].playing is True
+    assert controls.states[-1].timer_running is True
+
+
 def test_update_progress_within_seek_debounce_does_not_overwrite_progress():
     controller, _, player, controls, clock, _ = make_controller()
     player.duration = 80_000

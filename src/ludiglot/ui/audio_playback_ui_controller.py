@@ -159,10 +159,14 @@ class AudioPlaybackUiController:
 
     def seek_finished(self, position: float) -> None:
         self._last_seek_time = self._clock()
+        was_playing = self._player.is_playing()
         self._player.seek(position)
         duration = self._player.get_duration()
         if duration > 0:
-            self._controls.apply(self._presenter.seeked(position, duration))
+            if was_playing:
+                self._controls.apply(self._presenter.progress(position, duration))
+            else:
+                self._controls.apply(self._presenter.seeked(position, duration))
 
     def update_progress(self) -> None:
         if self._last_seek_time is not None and self._clock() - self._last_seek_time < 0.2:
