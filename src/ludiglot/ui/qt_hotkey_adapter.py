@@ -130,11 +130,11 @@ class WindowsNativeHotkeyAdapter:
                 registered.append(hotkey_id)
                 callback_map[hotkey_id] = binding.callback
             elif binding.name == "capture":
-                self._unregister_partial(user32, registered)
+                _unregister_hotkeys(user32, registered)
                 return None
 
         if HOTKEY_IDS["capture"] not in registered:
-            self._unregister_partial(user32, registered)
+            _unregister_hotkeys(user32, registered)
             return None
 
         native_filter = _WinHotkeyFilter(callback_map, msg_type)
@@ -147,9 +147,6 @@ class WindowsNativeHotkeyAdapter:
             native_filter=native_filter,
             app=app,
         )
-
-    def _unregister_partial(self, user32: Any, registered: list[int]) -> None:
-        _unregister_hotkeys(user32, registered)
 
     def _default_user32_provider(self) -> Any:
         import ctypes

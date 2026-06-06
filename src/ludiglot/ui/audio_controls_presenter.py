@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 
 @dataclass(frozen=True)
@@ -17,25 +17,10 @@ class AudioControlsViewState:
 
 class AudioControlsPresenter:
     def disabled(self, status_message: str | None = None) -> AudioControlsViewState:
-        return AudioControlsViewState(
-            enabled=False,
-            playing=False,
-            progress=0.0,
-            duration_ms=0,
-            time_text="00:00 / 00:00",
-            timer_running=False,
-            status_message=status_message,
-        )
+        return self._state(status_message=status_message)
 
     def ready(self) -> AudioControlsViewState:
-        return AudioControlsViewState(
-            enabled=True,
-            playing=False,
-            progress=0.0,
-            duration_ms=0,
-            time_text="00:00 / 00:00",
-            timer_running=False,
-        )
+        return self._state(enabled=True)
 
     def playing(
         self,
@@ -44,57 +29,67 @@ class AudioControlsPresenter:
         duration_ms: int = 0,
     ) -> AudioControlsViewState:
         status = f"正在播放: {source_name}" if source_name else "正在播放"
-        return AudioControlsViewState(
+        return self._state(
             enabled=True,
             playing=True,
-            progress=self._clamp_progress(progress),
-            duration_ms=max(0, int(duration_ms)),
-            time_text=self._time_text(progress, duration_ms),
+            progress=progress,
+            duration_ms=duration_ms,
             timer_running=True,
             status_message=status,
         )
 
     def paused(self, progress: float, duration_ms: int) -> AudioControlsViewState:
-        return AudioControlsViewState(
+        return self._state(
             enabled=True,
-            playing=False,
-            progress=self._clamp_progress(progress),
-            duration_ms=max(0, int(duration_ms)),
-            time_text=self._time_text(progress, duration_ms),
-            timer_running=False,
+            progress=progress,
+            duration_ms=duration_ms,
             status_message="已暂停",
         )
 
     def seeked(self, position: float, duration_ms: int) -> AudioControlsViewState:
-        return AudioControlsViewState(
-            enabled=True,
-            playing=False,
-            progress=self._clamp_progress(position),
-            duration_ms=max(0, int(duration_ms)),
-            time_text=self._time_text(position, duration_ms),
-            timer_running=False,
-        )
+        return self._state(enabled=True, progress=position, duration_ms=duration_ms)
 
-    def progress(self, position: float, duration_ms: int) -> AudioControlsViewState:
-        return AudioControlsViewState(
+    def progress(
+        self,
+        position: float,
+        duration_ms: int,
+        *,
+        update_progress: bool = True,
+    ) -> AudioControlsViewState:
+        return self._state(
             enabled=True,
             playing=True,
-            progress=self._clamp_progress(position),
-            duration_ms=max(0, int(duration_ms)),
-            time_text=self._time_text(position, duration_ms),
+            progress=position,
+            duration_ms=duration_ms,
             timer_running=True,
+            update_progress=update_progress,
         )
 
     def ended(self, duration_ms: int) -> AudioControlsViewState:
-        return AudioControlsViewState(
+        return self._state(
             enabled=True,
-            playing=False,
             progress=1.0,
-            duration_ms=max(0, int(duration_ms)),
-            time_text=self._time_text(1.0, duration_ms),
-            timer_running=False,
+            duration_ms=duration_ms,
             status_message="播放已结束",
         )
+
+    def _state(self, **overrides) -> AudioControlsViewState:
+        base = AudioControlsViewState(
+            enabled=False,
+            playing=False,
+            progress=0.0,
+            duration_ms=0,
+            time_text="00:00 / 00:00",
+            timer_running=False,
+        )
+        if "progress" in overrides:
+            overrides["progress"] = self._clamp_progress(overrides["progress"])
+        if "duration_ms" in overrides:
+            overrides["duration_ms"] = max(0, int(overrides["duration_ms"]))
+        state = replace(base, **overrides)
+        if state.duration_ms > 0:
+            state = replace(state, time_text=self._time_text(state.progress, state.duration_ms))
+        return state
 
     def _time_text(self, progress: float, duration_ms: int) -> str:
         duration_ms = max(0, int(duration_ms))

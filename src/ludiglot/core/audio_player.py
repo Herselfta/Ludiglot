@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Optional, Any
+from typing import Any
 
 
 class AudioPlayer:
@@ -116,6 +116,26 @@ class AudioPlayer:
         if self._player:
             return self._player.duration()
         return 0
+
+    def has_reached_end(self) -> bool:
+        """返回 Qt 后端是否已经自然播放到结尾。"""
+        if not self._player:
+            return False
+        try:
+            from PyQt6.QtMultimedia import QMediaPlayer
+            return self._player.mediaStatus() == QMediaPlayer.MediaStatus.EndOfMedia
+        except Exception:
+            return False
+
+    def current_source_name(self) -> str | None:
+        """返回当前播放源的文件名。"""
+        if not self._player:
+            return None
+        try:
+            src_path = self._player.source().toLocalFile()
+            return Path(src_path).name if src_path else None
+        except Exception:
+            return None
 
     def _play_fallback(self, path: str) -> None:
         try:

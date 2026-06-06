@@ -6,6 +6,7 @@ from PyQt6.QtGui import QFont, QTextBlockFormat, QTextCharFormat, QTextCursor
 from PyQt6.QtWidgets import QTextEdit
 
 from ludiglot.core.display_shaper import DisplayPreferences, convert_game_html
+from ludiglot.core.preferences import FONT_SIZE_MAX, FONT_SIZE_MIN
 from ludiglot.ui.result_presentation_controller import CurrentDisplayState
 
 
@@ -28,8 +29,7 @@ class QtResultPresentationAdapter:
         self._apply_current_styles(state, preferences)
 
     def refresh_font_settings(self, state: CurrentDisplayState, preferences: DisplayPreferences) -> None:
-        self._render_current_state(state, preferences, render_empty=False)
-        self._apply_current_styles(state, preferences)
+        self.apply_display_state(state, preferences)
 
     def activate_for_result(self, *, is_multi: bool) -> None:
         if is_multi:
@@ -102,7 +102,7 @@ class QtResultPresentationAdapter:
             size_val = int(preferences.font_size) if preferences.font_size else 13
         except (ValueError, TypeError):
             size_val = 13
-        valid_size = max(8, min(72, size_val))
+        valid_size = max(FONT_SIZE_MIN, min(FONT_SIZE_MAX, size_val))
 
         weight_map = {
             "300": QFont.Weight.Light,

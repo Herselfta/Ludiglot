@@ -16,24 +16,28 @@ Write-Host "检查 uv..." -ForegroundColor Yellow
 $uvCmd = (Get-Command uv -ErrorAction SilentlyContinue)
 $uvExe = $null
 
+function Use-UvPath {
+    param([string]$Dir)
+
+    $candidate = Join-Path $Dir "uv.exe"
+    if (-not (Test-Path $candidate)) {
+        return $false
+    }
+
+    $script:uvExe = $candidate
+    $env:Path = "$Dir;$env:Path"
+    $script:uvCmd = (Get-Command uv -ErrorAction SilentlyContinue)
+    return $true
+}
+
 # 优先检查官方标准的 .local\bin 目录
 $localBinUv = Join-Path $env:USERPROFILE ".local\\bin"
-$localBinUvExe = Join-Path $localBinUv "uv.exe"
-if (Test-Path $localBinUvExe) {
-    $uvExe = $localBinUvExe
-    $env:Path = "$localBinUv;$env:Path"
-    $uvCmd = (Get-Command uv -ErrorAction SilentlyContinue)
-}
+[void](Use-UvPath $localBinUv)
 
 # 其次兜底检查旧的 AppData\Local\uv 目录（做兼容）
 if (-not $uvExe) {
     $oldUv = Join-Path $env:LOCALAPPDATA "uv\\bin"
-    $oldUvExe = Join-Path $oldUv "uv.exe"
-    if (Test-Path $oldUvExe) {
-        $uvExe = $oldUvExe
-        $env:Path = "$oldUv;$env:Path"
-        $uvCmd = (Get-Command uv -ErrorAction SilentlyContinue)
-    }
+    [void](Use-UvPath $oldUv)
 }
 
 if (-not $uvCmd -and -not $uvExe) {
@@ -43,10 +47,7 @@ if (-not $uvCmd -and -not $uvExe) {
         & powershell -ExecutionPolicy Bypass -Command "Invoke-RestMethod https://astral.sh/uv/install.ps1 | Invoke-Expression"
         
         # 官方脚本默认安装在 .local\bin
-        if (Test-Path $localBinUvExe) {
-            $uvExe = $localBinUvExe
-            $env:Path = "$localBinUv;$env:Path"
-        }
+        [void](Use-UvPath $localBinUv)
     } catch {
         Write-Host "  官方安装脚本失败，尝试使用 winget 安装..." -ForegroundColor Yellow
         $wingetCmd = (Get-Command winget -ErrorAction SilentlyContinue)
@@ -74,10 +75,7 @@ if (-not $uvCmd -and -not $uvExe) {
             Expand-Archive -Path $uvZip -DestinationPath $localBinUv -Force
             Remove-Item -Force $uvZip -ErrorAction SilentlyContinue
             
-            if (Test-Path $localBinUvExe) {
-                $uvExe = $localBinUvExe
-                $env:Path = "$localBinUv;$env:Path"
-            }
+            [void](Use-UvPath $localBinUv)
         } catch {
             Write-Host "  错误: uv 自动安装失败" -ForegroundColor Red
             Write-Host "  请手动安装 uv: https://astral.sh/uv" -ForegroundColor Yellow

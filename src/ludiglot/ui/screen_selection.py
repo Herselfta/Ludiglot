@@ -95,19 +95,15 @@ class ScreenSelector(QObject):
                 overlay.activateWindow()
 
             self._loop.exec()
-
-            # 清理
-            for overlay in self._overlays:
-                overlay.close()
-
             return self._selected_rect
         except Exception as e:
             print(f"[ScreenSelector ERROR] {e}")
             import traceback
             traceback.print_exc()
+            return None
+        finally:
             for overlay in self._overlays:
                 overlay.close()
-            return None
 
     def _on_region_selected(self, rect: QRect) -> None:
         # 当任意一个屏幕完成了选区，保存结果并退出循环

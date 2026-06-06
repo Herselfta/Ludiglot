@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from pathlib import Path
+from dataclasses import replace
 from typing import Any, Callable, Protocol
 
 from ludiglot.core.audio_playback_orchestrator import AudioIntent, AudioPlaybackIdentity
@@ -23,6 +23,8 @@ class AudioPlayerProtocol(Protocol):
     def is_playing(self) -> bool: ...
     def get_position(self) -> float: ...
     def get_duration(self) -> int: ...
+    def has_reached_end(self) -> bool: ...
+    def current_source_name(self) -> str | None: ...
 
 
 class AudioPlaybackUiController:
@@ -175,15 +177,7 @@ class AudioPlaybackUiController:
             if duration > 0:
                 state = self._presenter.ended(duration)
                 if not is_natural_end:
-                    state = AudioControlsViewState(
-                        enabled=state.enabled,
-                        playing=state.playing,
-                        progress=state.progress,
-                        duration_ms=state.duration_ms,
-                        time_text=state.time_text,
-                        timer_running=state.timer_running,
-                        status_message=None,
-                    )
+                    state = replace(state, status_message=None)
                 self._controls.apply(state)
             else:
                 self._controls.apply(self._presenter.disabled())
@@ -192,18 +186,11 @@ class AudioPlaybackUiController:
         position = self._player.get_position()
         duration = self._player.get_duration()
         if duration > 0:
-            state = self._presenter.progress(position, duration)
-            if self._controls.is_dragging():
-                state = AudioControlsViewState(
-                    enabled=state.enabled,
-                    playing=state.playing,
-                    progress=state.progress,
-                    duration_ms=state.duration_ms,
-                    time_text=state.time_text,
-                    timer_running=state.timer_running,
-                    status_message=state.status_message,
-                    update_progress=False,
-                )
+            state = self._presenter.progress(
+                position,
+                duration,
+                update_progress=not self._controls.is_dragging(),
+            )
             self._controls.apply(state)
 
     def _load_intent(self, intent: AudioIntent, *, log_prefix: str) -> bool:
@@ -225,31 +212,13 @@ class AudioPlaybackUiController:
         return False
 
     def _has_reached_end(self) -> bool:
-        if hasattr(self._player, "has_reached_end"):
-            try:
-                return bool(self._player.has_reached_end())
-            except Exception:
-                return False
-        backend = getattr(self._player, "_player", None)
-        if backend is None:
-            return False
         try:
-            from PyQt6.QtMultimedia import QMediaPlayer
-            return backend.mediaStatus() == QMediaPlayer.MediaStatus.EndOfMedia
+            return bool(self._player.has_reached_end())
         except Exception:
             return False
 
     def _player_source_name(self) -> str | None:
-        if hasattr(self._player, "current_source_name"):
-            try:
-                return self._player.current_source_name()
-            except Exception:
-                return None
-        backend = getattr(self._player, "_player", None)
-        if backend is None:
-            return None
         try:
-            src_path = backend.source().toLocalFile()
-            return Path(src_path).name if src_path else None
+            return self._player.current_source_name()
         except Exception:
             return None
