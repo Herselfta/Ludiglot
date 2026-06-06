@@ -6,7 +6,7 @@ import threading
 from pathlib import Path
 from typing import Any, Dict
 
-from PyQt6.QtCore import Qt, pyqtSignal, QObject, QTimer, QPoint, QPointF, QRect, QRectF, QAbstractNativeEventFilter, QEvent
+from PyQt6.QtCore import Qt, pyqtSignal, QObject, QTimer, QPoint, QPointF, QRect, QRectF, QEvent
 from PyQt6.QtGui import QFont, QTextOption, QColor, QAction, QActionGroup, QCursor, QPainter, QGuiApplication
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -37,8 +37,11 @@ from ludiglot.core.preferences import (
 from ludiglot.ui.audio_controls_presenter import AudioControlsPresenter
 from ludiglot.ui.audio_playback_ui_controller import AudioPlaybackUiController
 from ludiglot.ui.capture_session import CaptureSessionCallbacks, OverlayCaptureSession
+from ludiglot.ui.hotkey_registrar import HotkeyRegistrar, HotkeyRegistrarCallbacks
+from ludiglot.ui.pynput_hotkey_adapter import PynputGlobalHotkeyAdapter
 from ludiglot.ui.qt_audio_controls_adapter import QtAudioControlsAdapter
 from ludiglot.ui.qt_capture_adapter import QtCaptureAdapter
+from ludiglot.ui.qt_hotkey_adapter import WindowsNativeHotkeyAdapter
 from ludiglot.ui.qt_result_presentation_adapter import QtResultPresentationAdapter
 from ludiglot.ui.result_presentation_controller import ResultPresentationController
 from ludiglot.ui.waveform_progress_bar import AudioWaveformProgressBar
@@ -693,9 +696,17 @@ class OverlayWindow(QMainWindow):
         self.audio_index = None
         self.audio_runtime: OverlayAudioRuntime | None = None
         self.player = AudioPlayer()
-        self._hotkey_listener = None
-        self._win_hotkey_filter = None
-        self._win_hotkey_ids: list[int] = []
+        self._hotkeys = HotkeyRegistrar(
+            config_provider=lambda: self.config,
+            callbacks=HotkeyRegistrarCallbacks(
+                capture=lambda: self.capture_requested.emit(True),
+                toggle=self._toggle_visibility,
+                log=self.signals.log.emit,
+                error=self.signals.error.emit,
+            ),
+            primary_adapter=WindowsNativeHotkeyAdapter(application_provider=QApplication.instance),
+            fallback_adapter=PynputGlobalHotkeyAdapter(),
+        )
         self._dragging = False
         self._drag_pos: QPoint | None = None
         self._resizing = False
@@ -786,7 +797,7 @@ class OverlayWindow(QMainWindow):
             app.installEventFilter(self)
 
         threading.Thread(target=self._initialize_resources, daemon=True).start()
-        self._start_hotkeys()
+        self._hotkeys.start()
         
         # 定时同步窗口位置到外部 config
         self._sync_config_timer = QTimer(self)
@@ -1645,111 +1656,6 @@ class OverlayWindow(QMainWindow):
             self.signals.log.emit,
         )
 
-    def _start_hotkeys(self) -> None:
-        if not self.config.hotkey_capture:
-            return
-        if self._register_windows_hotkeys():
-            msg = f"[HOTKEY] 已注册(WinAPI): {self.config.hotkey_capture}"
-            if self.config.hotkey_toggle:
-                msg += f" / {self.config.hotkey_toggle}"
-            self.signals.log.emit(msg)
-            return
-        try:
-            from pynput import keyboard
-        except Exception as exc:
-            self.signals.error.emit(f"全局热键不可用: {exc}")
-            return
-
-        hotkey = self._convert_hotkey(self.config.hotkey_capture)
-        bindings = {hotkey: lambda: self.capture_requested.emit(True)}
-        if self.config.hotkey_toggle:
-            toggle_hotkey = self._convert_hotkey(self.config.hotkey_toggle)
-            bindings[toggle_hotkey] = self._toggle_visibility
-
-        self._hotkey_listener = keyboard.GlobalHotKeys(bindings)
-        threading.Thread(target=self._hotkey_listener.run, daemon=True).start()
-        
-        msg = f"[HOTKEY] 已注册: {self.config.hotkey_capture}"
-        if self.config.hotkey_toggle:
-            msg += f" / {self.config.hotkey_toggle}"
-        self.signals.log.emit(msg)
-
-    def _register_windows_hotkeys(self) -> bool:
-        try:
-            import ctypes
-            import ctypes.wintypes
-        except Exception:
-            return False
-        hotkey = self._parse_win_hotkey(self.config.hotkey_capture)
-        if hotkey is None:
-            return False
-        hotkeys: list[tuple[int, int, int]] = [(1, hotkey[0], hotkey[1])]
-        if self.config.hotkey_toggle:
-            toggle = self._parse_win_hotkey(self.config.hotkey_toggle)
-            if toggle is not None:
-                hotkeys.append((2, toggle[0], toggle[1]))
-        user32 = ctypes.windll.user32
-        registered: list[int] = []
-        for hotkey_id, modifiers, vk in hotkeys:
-            if user32.RegisterHotKey(None, hotkey_id, modifiers, vk):
-                registered.append(hotkey_id)
-        if not registered:
-            return False
-
-        class _WinHotkeyFilter(QAbstractNativeEventFilter):
-            def __init__(self, callback_map: dict[int, Any]):
-                super().__init__()
-                self._callback_map = callback_map
-
-            def nativeEventFilter(self, eventType, message):
-                if eventType != "windows_generic_MSG":
-                    return False, 0
-                msg = ctypes.wintypes.MSG.from_address(int(message))
-                if msg.message == 0x0312:
-                    hotkey_id = int(msg.wParam)
-                    callback = self._callback_map.get(hotkey_id)
-                    if callback:
-                        callback()
-                        return True, 1
-                return False, 0
-
-        callback_map = {1: lambda: self.capture_requested.emit(True)}
-        if self.config.hotkey_toggle:
-            callback_map[2] = self._toggle_visibility
-        self._win_hotkey_filter = _WinHotkeyFilter(callback_map)
-        app = QApplication.instance()
-        if app:
-            app.installNativeEventFilter(self._win_hotkey_filter)
-        self._win_hotkey_ids = registered
-        return True
-
-    def _parse_win_hotkey(self, hotkey: str) -> tuple[int, int] | None:
-        parts = [p.strip().lower() for p in hotkey.split("+") if p.strip()]
-        if not parts:
-            return None
-        modifiers = 0
-        vk = None
-        for part in parts:
-            if part in {"ctrl", "control"}:
-                modifiers |= 0x0002
-            elif part == "alt":
-                modifiers |= 0x0001
-            elif part == "shift":
-                modifiers |= 0x0004
-            elif part in {"win", "cmd"}:
-                modifiers |= 0x0008
-            else:
-                if len(part) == 1:
-                    vk = ord(part.upper())
-        if vk is None:
-            return None
-        return modifiers, vk
-
-    def _convert_hotkey(self, hotkey: str) -> str:
-        key = hotkey.lower().replace("ctrl", "<ctrl>").replace("shift", "<shift>")
-        key = key.replace("alt", "<alt>").replace("win", "<cmd>")
-        return key
-
     def _toggle_visibility(self) -> None:
         """切换窗口显示/隐藏状态，使用isHidden()避免状态不同步问题。"""
         if self.isHidden():
@@ -1876,7 +1782,8 @@ class OverlayWindow(QMainWindow):
             self._persist_window_position()
         except:
             pass
-        self._unregister_windows_hotkeys()
+        if hasattr(self, "_hotkeys"):
+            self._hotkeys.stop()
         super().closeEvent(event)
     
     def hideEvent(self, event) -> None:
@@ -2175,21 +2082,6 @@ class OverlayWindow(QMainWindow):
         y = geo.top() + max((geo.height() - self.height()) // 2, 0)
         self.move(x, y)
         self._persist_window_position()
-
-    def _unregister_windows_hotkeys(self) -> None:
-        if not self._win_hotkey_ids:
-            return
-        try:
-            import ctypes
-        except Exception:
-            return
-        user32 = ctypes.windll.user32
-        for hotkey_id in self._win_hotkey_ids:
-            try:
-                user32.UnregisterHotKey(None, hotkey_id)
-            except Exception:
-                pass
-        self._win_hotkey_ids = []
 
 
 def run_gui(config_path: Path) -> None:
