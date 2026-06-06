@@ -863,8 +863,9 @@ class OverlayWindow(QMainWindow):
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.Tool
         )
-        # 启用半透明背景
+        # 启用半透明背景，并给整个前端浮层一层轻微透明度，让覆盖窗口不再完全遮挡后方内容
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setWindowOpacity(0.92)
         self.setMouseTracking(True)  # 启用鼠标跟踪以便更新光标样式
         # 设置焦点策略以便接收焦点事件
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
