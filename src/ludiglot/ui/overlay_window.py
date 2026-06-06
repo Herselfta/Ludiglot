@@ -38,6 +38,7 @@ from ludiglot.ui.audio_controls_presenter import AudioControlsPresenter
 from ludiglot.ui.audio_playback_ui_controller import AudioPlaybackUiController
 from ludiglot.ui.capture_session import CaptureSessionCallbacks, OverlayCaptureSession
 from ludiglot.ui.qt_audio_controls_adapter import QtAudioControlsAdapter
+from ludiglot.ui.qt_capture_adapter import QtCaptureAdapter
 from ludiglot.ui.qt_result_presentation_adapter import QtResultPresentationAdapter
 from ludiglot.ui.result_presentation_controller import ResultPresentationController
 from ludiglot.ui.waveform_progress_bar import AudioWaveformProgressBar
@@ -740,7 +741,7 @@ class OverlayWindow(QMainWindow):
             source_editor=self.source_label,
             target_editor=self.cn_label,
             show_single_result=self.show_and_activate,
-            show_multi_result=self._show_multi_result_window,
+            show_multi_result=self.show_and_activate,
         )
         self.result_presentation = ResultPresentationController(
             config_provider=lambda: self.config,
