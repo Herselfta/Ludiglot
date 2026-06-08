@@ -215,6 +215,30 @@ def resolve_display_placeholders(
     return re.sub(r"\{([^{}]{1,120})\}", replace_gender_token, out)
 
 
+def _normalize_safe_span_style(style: str) -> str | None:
+    declarations: dict[str, str] = {}
+    for raw_decl in str(style or "").split(";"):
+        if ":" not in raw_decl:
+            continue
+        key, value = raw_decl.split(":", 1)
+        key = key.strip().lower()
+        value = value.strip()
+        if key:
+            declarations[key] = value
+
+    color = declarations.get("color")
+    font_weight = declarations.get("font-weight")
+    if not color or not font_weight:
+        return None
+    color_match = re.fullmatch(r"#[0-9a-fA-F]{6}(?:[0-9a-fA-F]{2})?", color)
+    if not color_match:
+        return None
+    font_weight_norm = font_weight.lower()
+    if font_weight_norm not in {"bold", "600", "700"}:
+        return None
+    return f"color: {color_match.group(0)}; font-weight: {font_weight_norm};"
+
+
 def contains_game_markup(text: str) -> bool:
     return bool(text) and (("<" in text and ">" in text) or "【" in text)
 
@@ -249,7 +273,19 @@ def convert_game_html(text: str, *, lang: str = "cn", preferences: DisplayPrefer
     def replace_color_tag(match: re.Match[str]) -> str:
         return f'<span style="color: {resolve_color_token(match.group(1))}">{match.group(2)}</span>'
 
+    def replace_safe_span_tag(match: re.Match[str]) -> str:
+        style = _normalize_safe_span_style(match.group(2))
+        if style is None:
+            return match.group(0)
+        return f'<span style="{style}">{match.group(3)}</span>'
+
     html_body = html.escape(text, quote=False)
+    html_body = re.sub(
+        r"&lt;span\s+style=(['\"])(.*?)\1&gt;(.*?)&lt;/span&gt;",
+        replace_safe_span_tag,
+        html_body,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
     html_body = re.sub(r"&lt;color=([^&]+)&gt;(.*?)&lt;/color&gt;", replace_color_tag, html_body, flags=re.DOTALL | re.IGNORECASE)
     html_body = re.sub(
         r"&lt;te\s+href=\d+&gt;(.*?)&lt;/te&gt;",

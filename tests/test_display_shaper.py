@@ -91,6 +91,18 @@ def test_convert_game_html_converts_game_markup_and_wraps_preferences():
     assert '<span style="color: #fbbf24; font-weight: bold;">【Key】</span><br>Next' in html
 
 
+def test_convert_game_html_preserves_internal_safe_span_styles():
+    html = convert_game_html(
+        "<span style='color: #d4af37; font-weight: bold;'>思考</span>\n大致的情况我了解了。",
+        lang="cn",
+        preferences=prefs(),
+    )
+
+    assert "&lt;span" not in html
+    assert "&lt;/span&gt;" not in html
+    assert '<span style="color: #d4af37; font-weight: bold;">思考</span><br>大致的情况我了解了。' in html
+
+
 def test_convert_game_html_escapes_unknown_markup_literals():
     html = convert_game_html("A < B & C <unknown>tag</unknown>", lang="en", preferences=prefs())
 
