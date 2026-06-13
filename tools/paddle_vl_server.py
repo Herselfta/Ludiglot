@@ -14,6 +14,7 @@ ssl._create_default_https_context = ssl._create_unverified_context
 os.environ["PYTHONHTTPSVERIFY"] = "0"
 os.environ["CURL_CA_BUNDLE"] = ""
 os.environ["FLAGS_enable_pir_api"] = "0"
+os.environ["FLAGS_allocator_strategy"] = "auto_growth"
 
 import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
