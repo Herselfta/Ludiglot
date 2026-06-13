@@ -278,15 +278,82 @@ if ($LASTEXITCODE -eq 0) {
 }
 
 Write-Host ""
-Write-Host "检查并安装可选的 PaddleOCR-VL 依赖..." -ForegroundColor Yellow
-Write-Host "  - PaddleOCR & PaddlePaddle..." -NoNewline
+Write-Host "检查并配置可选的 PaddleOCR-VL 大模型后端..." -ForegroundColor Yellow
+
+$paddleInstalled = $false
 & $venvPython -c "import paddleocr" 2>$null
-if ($LASTEXITCODE -eq 0) {
-    Write-Host " 已安装" -ForegroundColor Green
-} else {
-    Write-Host " 未安装" -ForegroundColor Yellow
-    $answer = Read-Host "    是否安装 PaddleOCR-VL 支持? (y/N)"
-    if ($answer -eq "y" -or $answer -eq "Y") {
+if ($LASTEXITCODE -eq 0) { $paddleInstalled = $true }
+
+$ggufInstalled = $false
+if ((Test-Path "tools/llama/llama-server.exe") -and (Test-Path "tools/llama/PaddleOCR-VL-1.6-GGUF.gguf")) { $ggufInstalled = $true }
+
+if ($paddleInstalled) {
+    Write-Host "  - 已检测到飞桨 (Paddle) 原生后端运行环境。" -ForegroundColor Green
+}
+if ($ggufInstalled) {
+    Write-Host "  - 已检测到 GGUF (llama.cpp) 极速版运行环境。" -ForegroundColor Green
+}
+
+if (-not $paddleInstalled -and -not $ggufInstalled) {
+    Write-Host "  - 未检测到任何 PaddleOCR-VL 运行环境。" -ForegroundColor Yellow
+    Write-Host "    我们提供两种部署方案：" -ForegroundColor Yellow
+    Write-Host "      [1] GGUF 极速版 (推荐！仅需下载模型与 exe，显存小、响应快，免 4GB 依赖包)" -ForegroundColor Green
+    Write-Host "      [2] 飞桨原生 Python 版 (传统的 PaddlePaddle GPU/CPU 依赖包部署)" -ForegroundColor Yellow
+    Write-Host "      [N] 暂不配置 (可随时稍后配置)" -ForegroundColor Cyan
+    
+    $answer = Read-Host "    请选择部署方案 (1/2/N)"
+    if ($answer -eq "1") {
+        Write-Host "    正在准备 GGUF 极速版环境..." -ForegroundColor Yellow
+        New-Item -ItemType Directory -Force -Path "tools/llama" | Out-Null
+        
+        $modelFile = "tools/llama/PaddleOCR-VL-1.6-GGUF.gguf"
+        $mmprojFile = "tools/llama/PaddleOCR-VL-1.6-GGUF-mmproj.gguf"
+        
+        $dlAnswer = Read-Host "      是否尝试自动从 Hugging Face 下载 GGUF 模型文件? (约 1.8GB) (y/N)"
+        if ($dlAnswer -eq "y" -or $dlAnswer -eq "Y") {
+            Write-Host "      正在启动下载任务 (如果因网络慢而卡死，请开启系统代理或稍后手动下载)..." -ForegroundColor Yellow
+            try {
+                if (-not (Test-Path $modelFile)) {
+                    Write-Host "      正在下载 PaddleOCR-VL-1.6-GGUF.gguf..." -ForegroundColor Green
+                    $clnt = New-Object System.Net.WebClient
+                    $clnt.Headers.Add("User-Agent", "Mozilla/5.0")
+                    $clnt.DownloadFile("https://huggingface.co/PaddlePaddle/PaddleOCR-VL-1.6-GGUF/resolve/main/PaddleOCR-VL-1.6-GGUF.gguf", $modelFile)
+                }
+                if (-not (Test-Path $mmprojFile)) {
+                    Write-Host "      正在下载 PaddleOCR-VL-1.6-GGUF-mmproj.gguf..." -ForegroundColor Green
+                    $clnt = New-Object System.Net.WebClient
+                    $clnt.Headers.Add("User-Agent", "Mozilla/5.0")
+                    $clnt.DownloadFile("https://huggingface.co/PaddlePaddle/PaddleOCR-VL-1.6-GGUF/resolve/main/PaddleOCR-VL-1.6-GGUF-mmproj.gguf", $mmprojFile)
+                }
+                Write-Host "      GGUF 模型文件下载完成！" -ForegroundColor Green
+            } catch {
+                Write-Host "      自动下载失败: $_" -ForegroundColor Red
+                Write-Host "      请稍后手动下载并放入 tools/llama/ 目录:" -ForegroundColor Yellow
+                Write-Host "      - https://huggingface.co/PaddlePaddle/PaddleOCR-VL-1.6-GGUF/resolve/main/PaddleOCR-VL-1.6-GGUF.gguf" -ForegroundColor Cyan
+                Write-Host "      - https://huggingface.co/PaddlePaddle/PaddleOCR-VL-1.6-GGUF/resolve/main/PaddleOCR-VL-1.6-GGUF-mmproj.gguf" -ForegroundColor Cyan
+            }
+        }
+        
+        Write-Host "      提示: 请从 https://github.com/ggerganov/llama.cpp/releases 下载编译好的 llama-server 压缩包" -ForegroundColor Yellow
+        Write-Host "      解压出 llama-server.exe 及配套的 dll (包含对应 CUDA 版本的运行期 dll)" -ForegroundColor Yellow
+        Write-Host "      并将它们全部拖入 tools/llama 文件夹下。" -ForegroundColor Yellow
+        
+        if (Test-Path "config/settings.json") {
+            try {
+                $settingsContent = Get-Content "config/settings.json" -Raw -Encoding utf8
+                $setObj = ConvertFrom-Json $settingsContent
+                $setObj.ocr_backend = "paddle_vl"
+                $setObj.ocr_paddle_vl_mode = "gguf"
+                $setObj.ocr_paddle_vl_url = "http://localhost:8000/v1"
+                $setObj.ocr_gguf_model_path = "tools/llama/PaddleOCR-VL-1.6-GGUF.gguf"
+                $setObj.ocr_gguf_mmproj_path = "tools/llama/PaddleOCR-VL-1.6-GGUF-mmproj.gguf"
+                $setObj | ConvertTo-Json -Depth 100 | Set-Content "config/settings.json" -Encoding utf8
+                Write-Host "      已自动将 settings.json 配置更新为 GGUF 模式！" -ForegroundColor Green
+            } catch {
+                Write-Host "      自动更新 settings.json 失败，请稍后手动修改。" -ForegroundColor Yellow
+            }
+        }
+    } elseif ($answer -eq "2") {
         Write-Host "    正在检查 GPU 设备..." -ForegroundColor Yellow
         $hasNvidia = $false
         if (Get-Command nvidia-smi -ErrorAction SilentlyContinue) {
@@ -295,7 +362,6 @@ if ($LASTEXITCODE -eq 0) {
         
         if ($hasNvidia) {
             Write-Host "    [检测到 NVIDIA GPU] 正在使用飞桨镜像源安装 GPU 版本的 paddlepaddle-gpu..." -ForegroundColor Green
-            # 卸载 CPU 版以防冲突
             & $venvPython -m pip uninstall paddlepaddle -y --quiet 2>$null
             & $venvPython -m pip install paddlepaddle-gpu -i https://www.paddlepaddle.org.cn/packages/stable/cu126/
         } else {
@@ -308,6 +374,20 @@ if ($LASTEXITCODE -eq 0) {
         & $venvPython -m pip install paddleocr>=3.4.0
         Write-Host "    正在安装 paddlex[ocr] 依赖..." -ForegroundColor Yellow
         & $venvPython -m pip install "paddlex[ocr]"
+        
+        if (Test-Path "config/settings.json") {
+            try {
+                $settingsContent = Get-Content "config/settings.json" -Raw -Encoding utf8
+                $setObj = ConvertFrom-Json $settingsContent
+                $setObj.ocr_backend = "paddle_vl"
+                $setObj.ocr_paddle_vl_mode = "native"
+                $setObj.ocr_paddle_vl_url = "http://localhost:8000/v1"
+                $setObj | ConvertTo-Json -Depth 100 | Set-Content "config/settings.json" -Encoding utf8
+                Write-Host "      已自动将 settings.json 配置更新为飞桨原生 Python 模式！" -ForegroundColor Green
+            } catch {
+                Write-Host "      自动更新 settings.json 失败，请稍后手动修改。" -ForegroundColor Yellow
+            }
+        }
     }
 }
 

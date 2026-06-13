@@ -1,0 +1,4 @@
+# 忽略 tools/llama 文件夹下的所有本地大二进制文件与动态链接库
+*
+# 允许追踪 .gitignore 自身
+!.gitignore

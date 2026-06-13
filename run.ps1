@@ -71,10 +71,34 @@ if (Test-Path "config/settings.json") {
                     }
                 }
                 
+                $serverProcess = $null
                 if (-not (Test-PortOpen $hostName $port)) {
                     Write-Host "检测到 PaddleOCR-VL 后端未启动，正在自动拉起本地 API 服务..." -ForegroundColor Yellow
-                    # 在新窗口启动服务，方便用户查看加载进度和模型下载日志
-                    Start-Process powershell.exe -ArgumentList "-ExecutionPolicy Bypass", "-NoExit", "-Command `& `'$venvPython`' tools/paddle_vl_server.py" -WindowStyle Minimized
+                    
+                    $vlMode = $config.ocr_paddle_vl_mode
+                    if ($vlMode -eq "gguf") {
+                        $llamaServer = Join-Path $projectRoot "tools/llama/llama-server.exe"
+                        if (Test-Path $llamaServer) {
+                            $modelPath = $config.ocr_gguf_model_path
+                            $mmprojPath = $config.ocr_gguf_mmproj_path
+                            if (-not $modelPath) { $modelPath = "tools/llama/PaddleOCR-VL-1.6-GGUF.gguf" }
+                            if (-not $mmprojPath) { $mmprojPath = "tools/llama/PaddleOCR-VL-1.6-GGUF-mmproj.gguf" }
+                            
+                            $absModel = [System.IO.Path]::GetFullPath((Join-Path $projectRoot $modelPath))
+                            $absMmproj = [System.IO.Path]::GetFullPath((Join-Path $projectRoot $mmprojPath))
+                            $absLlamaDir = [System.IO.Path]::GetFullPath((Join-Path $projectRoot "tools/llama"))
+                            
+                            Write-Host "正在通过 llama.cpp 极速版 (GGUF) 启动本地 API 服务..." -ForegroundColor Green
+                            # 直接启动 exe，以方便获取 PID 进行生命周期管理
+                            $serverProcess = Start-Process -FilePath ".\llama-server.exe" -ArgumentList "-m `"$absModel`" --mmproj `"$absMmproj`" --port $port -ngl 99" -WorkingDirectory $absLlamaDir -WindowStyle Minimized -PassThru
+                        } else {
+                            Write-Host "错误: 未找到 llama-server.exe (路径: $llamaServer)，回退到原生飞桨后端..." -ForegroundColor Red
+                            $serverProcess = Start-Process -FilePath $venvPython -ArgumentList "tools/paddle_vl_server.py" -WindowStyle Minimized -PassThru
+                        }
+                    } else {
+                        # 默认 native 模式，在新窗口启动原生的 paddle_vl_server.py
+                        $serverProcess = Start-Process -FilePath $venvPython -ArgumentList "tools/paddle_vl_server.py" -WindowStyle Minimized -PassThru
+                    }
                     
                     Write-Host "等待 PaddleOCR-VL 服务 (端口 $port) 响应..." -ForegroundColor Yellow
                     $retries = 45
@@ -106,5 +130,12 @@ if (Test-Path "config/settings.json") {
 Write-Host ""
 Write-Host "启动 Ludiglot GUI..." -ForegroundColor Green
 Write-Host ""
-& $venvPython -m ludiglot
+try {
+    & $venvPython -m ludiglot
+} finally {
+    if ($serverProcess) {
+        Write-Host "正在关闭本地 PaddleOCR-VL API 服务 (PID: $($serverProcess.Id))..." -ForegroundColor Yellow
+        Stop-Process -Id $serverProcess.Id -Force -ErrorAction SilentlyContinue
+    }
+}
 

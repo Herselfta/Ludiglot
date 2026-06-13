@@ -36,6 +36,9 @@ class AppConfig:
     ocr_backend: str = "auto"  # auto | windows | paddle_vl
     ocr_paddle_vl_url: str = "http://localhost:8000/v1"
     ocr_paddle_vl_model: str = "PaddlePaddle/PaddleOCR-VL"
+    ocr_paddle_vl_mode: str = "native"  # native | gguf
+    ocr_gguf_model_path: str = "tools/llama/PaddleOCR-VL-1.6-GGUF.gguf"
+    ocr_gguf_mmproj_path: str = "tools/llama/PaddleOCR-VL-1.6-GGUF-mmproj.gguf"
     ocr_debug_dump_input: bool = False
     ocr_raw_capture: bool = False
     ocr_windows_input: str = "auto"  # auto | raw | png
@@ -169,6 +172,9 @@ def load_config(path: Path, *, validate_data: bool = True) -> AppConfig:
     
     ocr_paddle_vl_url = str(raw.get("ocr_paddle_vl_url", "http://localhost:8000/v1"))
     ocr_paddle_vl_model = str(raw.get("ocr_paddle_vl_model", "PaddlePaddle/PaddleOCR-VL"))
+    ocr_paddle_vl_mode = str(raw.get("ocr_paddle_vl_mode", "native")).lower()
+    ocr_gguf_model_path = str(raw.get("ocr_gguf_model_path", "tools/llama/PaddleOCR-VL-1.6-GGUF.gguf"))
+    ocr_gguf_mmproj_path = str(raw.get("ocr_gguf_mmproj_path", "tools/llama/PaddleOCR-VL-1.6-GGUF-mmproj.gguf"))
     # Removed Ollama/GLM backend fields
     capture_force_dpr = raw.get("capture_force_dpr")
     try:
@@ -284,6 +290,9 @@ def load_config(path: Path, *, validate_data: bool = True) -> AppConfig:
         ocr_backend=str(raw.get("ocr_backend", "auto")).lower(),
         ocr_paddle_vl_url=ocr_paddle_vl_url,
         ocr_paddle_vl_model=ocr_paddle_vl_model,
+        ocr_paddle_vl_mode=ocr_paddle_vl_mode,
+        ocr_gguf_model_path=ocr_gguf_model_path,
+        ocr_gguf_mmproj_path=ocr_gguf_mmproj_path,
         ocr_debug_dump_input=bool(raw.get("ocr_debug_dump_input", False)),
         ocr_raw_capture=bool(raw.get("ocr_raw_capture", False)),
         ocr_windows_input=ocr_windows_input,

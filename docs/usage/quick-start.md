@@ -156,15 +156,26 @@ A: Windows 原生 OCR 需要系统语言包。打开 **设置 > 时间和语言 
 
 **Q: 如何使用高精度 PaddleOCR-VL-1.6 视觉语言模型后端？**
 
-A: 如果您遇到复杂排版或对识别精度有更高要求，可以使用可选的 PaddleOCR-VL 后端：
-1. **安装依赖**：运行 `.\setup.ps1` 时，选择 `y` 确认安装可选的 PaddleOCR-VL 依赖（或手动在虚拟环境中运行 `pip install -e .[paddle]` 与 `pip install "paddlex[ocr]"`）。
+A: 如果您对识别精度有极高要求，推荐启用 `PaddleOCR-VL` 视觉语言后端。我们提供两种部署方式：
+
+#### 方案 A：llama.cpp + GGUF 极速版 (极力推荐，显存省、亚秒响应)
+1. **下载模型**：从 HuggingFace 仓库 `PaddlePaddle/PaddleOCR-VL-1.6-GGUF` 下载 `PaddleOCR-VL-1.6-GGUF.gguf` 与 `PaddleOCR-VL-1.6-GGUF-mmproj.gguf`。
+2. **准备运行环境**：下载免安装的 `llama-server.exe` 及配套库（如 CUDA 版本需包含 dll 运行依赖），全部存入项目 `tools/llama` 文件夹下。
+3. **启动服务**：在 `tools/llama` 下执行：
+   ```powershell
+   .\llama-server.exe -m PaddleOCR-VL-1.6-GGUF.gguf --mmproj PaddleOCR-VL-1.6-GGUF-mmproj.gguf --port 8000 -ngl 99
+   ```
+4. **启用后端**：在 `config/settings.json` 中配置 `"ocr_backend": "paddle_vl"` 即可无缝调用。
+
+#### 方案 B：飞桨原生 Python 服务版 (较重，显存占用大)
+1. **安装依赖**：运行 `.\setup.ps1` 时选择 `y` 确认安装飞桨依赖（或手动安装 `paddlepaddle-gpu` 及 `paddlex`）。
 2. **运行本地服务**：打开一个新的 PowerShell 窗口，激活虚拟环境并启动 API 服务：
    ```powershell
    .\.venv\Scripts\Activate.ps1
    python tools/paddle_vl_server.py
    ```
-   *服务启动后会下载大模型 checkpoints，并在 `http://localhost:8000` 监听 OpenAI 兼容的 API 请求。*
-3. **启用后端**：在 `config/settings.json` 中配置 `"ocr_backend": "paddle_vl"`，或在运行程序后的 GUI 覆盖层菜单中选择 **PaddleOCR-VL**。
+   *服务会在 `http://localhost:8000` 监听 API 请求。*
+3. **启用后端**：在 `config/settings.json` 中配置 `"ocr_backend": "paddle_vl"`。
 
 **Q: 为什么游戏内匹配经常失败、漏匹配或不播语音？**
 
