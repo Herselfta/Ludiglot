@@ -101,7 +101,16 @@ class PaddleVLRequestHandler(http.server.BaseHTTPRequestHandler):
                 # Predict
                 pipe = get_pipeline()
                 print("[Server] 正在使用 PaddleOCR-VL 识别图像...")
-                output = pipe.predict(str(img_path), use_queues=False)
+                output = pipe.predict(
+                    str(img_path),
+                    use_layout_detection=False,
+                    use_doc_orientation_classify=False,
+                    use_doc_unwarping=False,
+                    use_chart_recognition=False,
+                    use_seal_recognition=False,
+                    use_ocr_for_image_block=False,
+                    use_queues=False
+                )
                 
                 # Extract markdown text using temp directory
                 markdown_texts = []
