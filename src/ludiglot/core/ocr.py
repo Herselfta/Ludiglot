@@ -34,9 +34,6 @@ except ImportError:
     np = None
     HAS_NUMPY = False
 
-PaddleOCR = None
-
-
 @dataclass(frozen=True)
 class OcrPipelineResult:
     boxes: List[Dict[str, object]]
@@ -55,7 +52,6 @@ class OCREngine:
         det: bool = True,
         rec: bool = True,
         cls: bool = False,
-        allow_paddle: bool = True,
         *args,
         **kwargs,
     ) -> None:
@@ -68,7 +64,6 @@ class OCREngine:
         self.ready = False
         self._ocr = None
         self._supports_cls = True
-        self._pytesseract = None
         self.active_gpu = False
         self._windows_ocr = None
         self._windows_ready = False
@@ -82,7 +77,6 @@ class OCREngine:
         self.win_ocr_multiscale = False
         self._words_segmenter = None
         self._words_segmenter_ready = False
-        self.allow_paddle = bool(allow_paddle)
         self._log_callback: Callable[[str], None] | None = None
         self._status_callback: Callable[[str], None] | None = None
         self._prewarm_lock = threading.Lock()
@@ -171,201 +165,20 @@ class OCREngine:
             self._prewarm_started.add(key)
 
         def _worker() -> None:
-            if key == "paddle":
-                self.initialize(force_paddle=True, allow_paddle=True)
-            elif key == "auto":
-                self.initialize(allow_paddle=self.allow_paddle)
+            self.initialize()
 
         if async_:
             threading.Thread(target=_worker, daemon=True).start()
         else:
             _worker()
 
-    def _detect_paddle_cls_support(self, ocr_obj) -> bool:
-        try:
-            predict = getattr(ocr_obj, "predict", None)
-            if predict is not None:
-                sig = inspect.signature(predict)
-                return "cls" in sig.parameters
-        except Exception:
-            return False
-
-        try:
-            ocr_fn = getattr(ocr_obj, "ocr", None)
-            if ocr_fn is None:
-                return False
-            sig = inspect.signature(ocr_fn)
-            return "cls" in sig.parameters
-        except Exception:
-            return False
-
-    def _paddle_extract_lines(self, result) -> List[Dict[str, object]]:
-        lines: List[Dict[str, object]] = []
-        if not result:
-            return lines
-
-        if isinstance(result, list) and result and isinstance(result[0], dict):
-            for page in result:
-                texts = page.get("rec_texts")
-                if texts is None:
-                    texts = []
-                scores = page.get("rec_scores")
-                if scores is None:
-                    scores = []
-                polys = page.get("rec_polys")
-                if polys is None:
-                    polys = page.get("dt_polys")
-                if polys is None:
-                    polys = []
-                rec_boxes = page.get("rec_boxes")
-                if rec_boxes is None:
-                    rec_boxes = []
-
-                for i, text in enumerate(texts):
-                    conf = float(scores[i]) if i < len(scores) else 0.0
-                    box = None
-                    if i < len(polys):
-                        try:
-                            poly = polys[i]
-                            box = [[int(p[0]), int(p[1])] for p in poly]
-                        except Exception:
-                            box = None
-                    if box is None and i < len(rec_boxes):
-                        try:
-                            rb = rec_boxes[i]
-                            if len(rb) >= 4 and isinstance(rb[0], (list, tuple)):
-                                box = [[int(p[0]), int(p[1])] for p in rb]
-                            elif len(rb) >= 4:
-                                x1, y1, x2, y2 = map(int, rb[:4])
-                                box = [[x1, y1], [x2, y1], [x2, y2], [x1, y2]]
-                        except Exception:
-                            box = None
-                    if box is None:
-                        box = [[0, 0], [0, 0], [0, 0], [0, 0]]
-                    lines.append({"text": str(text), "conf": conf, "box": box})
-            return lines
-
-        for block in result:
-            for item in block:
-                box = item[0]
-                text = item[1][0]
-                conf = float(item[1][1])
-                lines.append({"text": text, "conf": conf, "box": box})
-        return lines
-
-    def initialize(self, force_paddle: bool = False, allow_paddle: bool | None = None) -> None:
+    def initialize(self) -> None:
         """初始化 OCR 引擎。
 
         策略：
         1. 总是初始化 Windows OCR（如果可用）。
-        2. 只有在明确指定paddle模式或auto模式下Windows OCR不可用时才加载PaddleOCR。
         """
-        if allow_paddle is None:
-            allow_paddle = self.allow_paddle
-        # 1. 初始化 Windows OCR (轻量级)
         self._init_windows_ocr()
-
-        if not allow_paddle and not force_paddle:
-            self.ready = True
-            return
-
-        # 2. 准备加载 PaddleOCR（仅在明确需要时）
-        global PaddleOCR
-        
-        os.environ.setdefault("FLAGS_enable_pir_api", "0")
-        os.environ.setdefault("FLAGS_use_pir_api", "0")
-        os.environ.setdefault("FLAGS_enable_pir_in_executor", "0")
-        os.environ.setdefault("FLAGS_use_pir", "0")
-        os.environ.setdefault("FLAGS_enable_new_ir", "0")
-        os.environ.setdefault("FLAGS_use_new_executor", "0")
-        os.environ.setdefault("FLAGS_use_mkldnn", "0")
-        os.environ.setdefault("FLAGS_use_onednn", "0")
-        os.environ.setdefault("PADDLE_ENABLE_PIR", "0")
-        os.environ.setdefault("GLOG_minloglevel", "3")
-        os.environ.setdefault("PADDLE_DISABLE_WARNINGS", "1")
-        os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
-        
-        try:
-            import warnings
-            warnings.filterwarnings("ignore", category=UserWarning, module="paddle")
-        except Exception:
-            pass
-
-        if PaddleOCR is None:
-            try:
-                # Filter out CWD/project root from sys.path to avoid name conflict with local 'tools' directory
-                sys_path_backup = list(sys.path)
-                try:
-                    sys.path = [p for p in sys.path if p not in ("", ".", os.getcwd(), str(Path(os.getcwd()).resolve()))]
-                    from paddleocr import PaddleOCR as _PaddleOCR
-                    PaddleOCR = _PaddleOCR
-                finally:
-                    sys.path = sys_path_backup
-            except ImportError:
-                if self.mode == "paddle":
-                    raise RuntimeError(
-                        "PaddleOCR 未安装，请先完成安装: pip install ludiglot[paddle]"
-                    )
-                else:
-                    print("[OCR] PaddleOCR 未安装，跳过加载。")
-                    return
-            except Exception as exc:
-                print(f"[OCR] 加载 PaddleOCR 失败: {exc}")
-                return
-
-        try:
-            import paddle
-
-            paddle.set_flags(
-                {
-                    "FLAGS_enable_pir_api": 0,
-                    "FLAGS_use_pir_api": 0,
-                    "FLAGS_enable_pir_in_executor": 0,
-                    "FLAGS_use_pir": 0,
-                    "FLAGS_enable_new_ir": 0,
-                    "FLAGS_use_new_executor": 0,
-                    "FLAGS_use_mkldnn": 0,
-                    "FLAGS_use_onednn": 0,
-                }
-            )
-        except Exception:
-            pass
-        if self.mode == "auto":
-            gpu_candidates = [True, False]
-        elif self.mode == "gpu":
-            gpu_candidates = [True]
-        else:
-            gpu_candidates = [False]
-
-        base_candidates = []
-        for use_gpu in gpu_candidates:
-            base_candidates.append({"use_gpu": use_gpu, "lang": self.lang})
-        base_candidates.extend([
-            {"lang": self.lang},
-            {},
-        ])
-        extra_candidates = [
-            {"det": self.det, "rec": self.rec, "cls": self.cls},
-            {"det": self.det, "rec": self.rec},
-            {"det": self.det},
-            {},
-        ]
-        last_error: Exception | None = None
-        for base_kwargs in base_candidates:
-            for extra in extra_candidates:
-                try:
-                    self._ocr = PaddleOCR(**base_kwargs, **extra)
-                    self._supports_cls = self._detect_paddle_cls_support(self._ocr)
-                    self.active_gpu = bool(base_kwargs.get("use_gpu"))
-                    last_error = None
-                    break
-                except Exception as exc:
-                    last_error = exc
-                    continue
-            if self._ocr is not None:
-                break
-        if self._ocr is None and last_error is not None:
-            raise last_error
         self.ready = True
 
     def _init_windows_ocr(self) -> None:
@@ -1438,12 +1251,10 @@ class OCREngine:
     def recognize_pipeline(
         self,
         image_input: Union[str, Path, Any],
-        prefer_tesseract: bool = False,
         backend: str | None = None,
     ) -> OcrPipelineResult:
         boxes = self.recognize_with_boxes(
             image_input,
-            prefer_tesseract=prefer_tesseract,
             backend=backend,
         )
         lines = group_ocr_lines(boxes, lang=self.lang) if boxes else []
@@ -1456,36 +1267,24 @@ class OCREngine:
     def recognize_with_boxes(
         self,
         image_input: Union[str, Path, Any],
-        prefer_tesseract: bool = False,
         backend: str | None = None,
     ) -> List[Dict[str, object]]:
-        """使用多后端策略识别图片中的文本框和内容。
+        """使用 Windows OCR 识别图片中的文本框和内容。
         
         Args:
             image_input: 文件路径 (str/Path) 或 PIL Image 对象
-            prefer_tesseract: 是否强制使用 Tesseract
-            backend: 指定后端（auto/windows/paddle/tesseract/glm/glm_ollama）
+            backend: 指定后端（auto/windows）
         """
         backend_key = str(backend or "auto").strip().lower().replace("-", "_")
-        if backend_key not in {"auto", "windows", "paddle", "tesseract"}:
+        if backend_key not in {"auto", "windows"}:
             backend_key = "auto"
         raw_tuple = None
         if isinstance(image_input, tuple) and len(image_input) == 3:
             raw_tuple = image_input
-            # Keep a lazy fallback for non-Windows backends
 
-        # 策略1: 如果明确要求 Tesseract，直接使用
-        if prefer_tesseract or backend_key == "tesseract":
-            print("[OCR] 使用后端: Tesseract (明确指定)")
-            self.last_backend = "tesseract"
-            if raw_tuple and HAS_PIL and Image is not None:
-                r_bytes, r_w, r_h = raw_tuple
-                image_input = Image.frombytes("RGBA", (int(r_w), int(r_h)), r_bytes, "raw", "BGRA")
-            return self._pytesseract_recognize_boxes(image_input)
-        
-        # 策略2: 尝试 Windows 原生 OCR（默认优先）
+        # 尝试 Windows 原生 OCR
         if backend_key in {"auto", "windows"}:
-            print("[OCR] 尝试后端: Windows OCR (优先)")
+            print("[OCR] 使用后端: Windows OCR")
             windows_lines = []
             if self.win_ocr_preprocess:
                 pre_bytes = self._preprocess_windows_input(raw_tuple if raw_tuple is not None else image_input)
@@ -1505,209 +1304,7 @@ class OCREngine:
                 self.last_backend = "windows"
                 return windows_lines
 
-        # Prepare fallback input for non-Windows backends
-        if raw_tuple is not None and HAS_PIL and Image is not None:
-            r_bytes, r_w, r_h = raw_tuple
-            image_input = Image.frombytes("RGBA", (int(r_w), int(r_h)), r_bytes, "raw", "BGRA")
-        
-        # 策略4: 尝试 PaddleOCR
-        allow_paddle = bool(getattr(self, "allow_paddle", True)) or backend_key == "paddle"
-        if allow_paddle and backend_key == "paddle" and self._ocr is None:
-            self.initialize(force_paddle=True, allow_paddle=True)
-        elif allow_paddle and not self.ready and backend_key in {"paddle", "auto"}:
-            self.initialize(allow_paddle=True)
-
-        if allow_paddle and self._ocr is not None:
-            print("[OCR] 尝试后端: PaddleOCR")
-            try:
-                # Prepare input for Paddle (Path string or Numpy Array)
-                paddle_input = image_input
-                if not isinstance(paddle_input, (str, Path)) and HAS_NUMPY and np is not None:
-                     if isinstance(paddle_input, Image.Image):
-                         paddle_input = np.array(paddle_input)
-                
-                # If path, ensure string
-                if isinstance(paddle_input, Path):
-                     paddle_input = str(paddle_input)
-
-                if self._supports_cls:
-                    result = self._ocr.ocr(paddle_input, cls=self.cls)
-                else:
-                    result = self._ocr.ocr(paddle_input)
-            except Exception as e:
-                print(f"[OCR] PaddleOCR 运行失败：{e.__class__.__name__}, 回退到 Tesseract")
-                result = None
-        else:
-            print("[OCR] 跳过 PaddleOCR (未安装或未初始化)")
-            result = None
-        
-        # 策略5: 最后的兜底 Tesseract
-        if not result:
-            print("[OCR] 使用后端: Tesseract (最后兜底)")
-            self.last_backend = "tesseract"
-            return self._pytesseract_recognize_boxes(image_input)
-        
-        lines = self._paddle_extract_lines(result)
-        
-        # 策略5: 质量检查 - 如果 PaddleOCR 结果质量差，尝试 Tesseract 兜底
-        if lines:
-            avg_conf = sum(float(x.get("conf", 0.0)) for x in lines) / max(len(lines), 1)
-            print(f"[OCR] PaddleOCR 完成，识别 {len(lines)} 行，平均置信度 {avg_conf:.3f}")
-            
-            if avg_conf < 0.6 and len(lines) > 6:
-                print("[OCR] PaddleOCR 质量较低，尝试 Tesseract 兜底")
-                fallback = self._pytesseract_recognize_boxes(image_input)
-                if fallback:
-                    fallback_conf = sum(float(x.get("conf", 0.0)) for x in fallback) / max(len(fallback), 1)
-                    if fallback_conf > avg_conf:
-                        print(f"[OCR] Tesseract 结果更优 ({fallback_conf:.3f} > {avg_conf:.3f})，使用 Tesseract")
-                        self.last_backend = "tesseract"
-                        return fallback
-        
-        self.last_backend = "paddle"
-        return lines
-
-    def _pytesseract_recognize(self, image_path: str | Path) -> List[Tuple[str, float]]:
-        if self._pytesseract is None:
-            try:
-                import pytesseract
-            except Exception as exc:  # pragma: no cover
-                print("PaddleOCR 失败且 pytesseract 不可用")
-                return []
-            self._pytesseract = pytesseract
-
-            # 优先使用环境变量或常见安装路径，避免未添加到 PATH 导致的找不到可执行文件
-            candidate_env = os.getenv("TESSERACT_CMD") or os.getenv("TESSERACT_PATH")
-            candidates = [
-                candidate_env,
-                shutil.which("tesseract"),
-                Path(r"C:\\Program Files\\Tesseract-OCR\\tesseract.exe"),
-                Path(r"C:\\Program Files (x86)\\Tesseract-OCR\\tesseract.exe"),
-                Path("/usr/bin/tesseract"),
-                Path("/usr/local/bin/tesseract"),
-            ]
-            for candidate in candidates:
-                if not candidate:
-                    continue
-                candidate_path = Path(candidate)
-                if candidate_path.exists():
-                    self._pytesseract.pytesseract.tesseract_cmd = str(candidate_path)
-                    break
-
-        try:
-            from PIL import Image
-            from pytesseract import Output
-        except Exception:
-            return []
-
-        try:
-            data = self._pytesseract.image_to_data(
-                Image.open(image_path), output_type=Output.DICT
-            )
-        except Exception:
-            print("tesseract 未安装或不可用，OCR 跳过")
-            return []
-        texts: List[Tuple[str, float]] = []
-        for text, conf in zip(data.get("text", []), data.get("conf", [])):
-            if not text or text.strip() == "":
-                continue
-            try:
-                conf_val = float(conf) / 100.0
-            except Exception:
-                conf_val = 0.0
-            texts.append((text.strip(), conf_val))
-        return texts
-
-    def _pytesseract_recognize_boxes(self, image_input: Union[str, Path, Any]) -> List[Dict[str, object]]:
-        if self._pytesseract is None:
-            try:
-                import pytesseract
-            except Exception:
-                return []
-            self._pytesseract = pytesseract
-
-            candidate_env = os.getenv("TESSERACT_CMD") or os.getenv("TESSERACT_PATH")
-            candidates = [
-                candidate_env,
-                shutil.which("tesseract"),
-                Path(r"C:\\Program Files\\Tesseract-OCR\\tesseract.exe"),
-                Path(r"C:\\Program Files (x86)\\Tesseract-OCR\\tesseract.exe"),
-                Path("/usr/bin/tesseract"),
-                Path("/usr/local/bin/tesseract"),
-            ]
-            for candidate in candidates:
-                if not candidate:
-                    continue
-                candidate_path = Path(candidate)
-                if candidate_path.exists():
-                    self._pytesseract.pytesseract.tesseract_cmd = str(candidate_path)
-                    break
-
-        try:
-            from PIL import Image
-            from pytesseract import Output
-        except Exception:
-            return []
-
-        if isinstance(image_input, tuple) and len(image_input) == 3:
-            try:
-                r_bytes, r_w, r_h = image_input
-                image_input = Image.frombytes("RGBA", (int(r_w), int(r_h)), r_bytes, "raw", "BGRA")
-            except Exception:
-                return []
-
-        lang = "eng" if self.lang.startswith("en") else self.lang
-        configs = [
-            f"--oem 1 --psm 6 -l {lang} -c preserve_interword_spaces=1",
-            f"--oem 1 --psm 4 -l {lang} -c preserve_interword_spaces=1",
-            f"--oem 1 --psm 3 -l {lang} -c preserve_interword_spaces=1",
-        ]
-
-        best_lines: List[Dict[str, object]] = []
-        best_score = -1.0
-        for cfg in configs:
-            try:
-                img_source = image_input
-                if isinstance(img_source, (str, Path)):
-                    img_source = Image.open(str(img_source))
-                
-                data = self._pytesseract.image_to_data(
-                    img_source, output_type=Output.DICT, config=cfg
-                )
-            except Exception:
-                continue
-            lines: List[Dict[str, object]] = []
-            for text, conf, left, top, width, height in zip(
-                data.get("text", []),
-                data.get("conf", []),
-                data.get("left", []),
-                data.get("top", []),
-                data.get("width", []),
-                data.get("height", []),
-            ):
-                if not text or text.strip() == "":
-                    continue
-                try:
-                    conf_val = float(conf) / 100.0
-                except Exception:
-                    conf_val = 0.0
-                box = [
-                    [int(left), int(top)],
-                    [int(left) + int(width), int(top)],
-                    [int(left) + int(width), int(top) + int(height)],
-                    [int(left), int(top) + int(height)],
-                ]
-                lines.append({"text": text.strip(), "conf": conf_val, "box": box})
-
-            if not lines:
-                continue
-            avg_conf = sum(float(x.get("conf", 0.0)) for x in lines) / max(len(lines), 1)
-            total_len = sum(len(str(x.get("text", ""))) for x in lines)
-            score = avg_conf + min(total_len / 200.0, 1.0)
-            if score > best_score:
-                best_score = score
-                best_lines = lines
-        return best_lines
+        return []
 
 
 def _sanitize_ocr_fragment(text: str) -> str:

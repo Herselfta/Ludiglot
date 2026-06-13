@@ -3,7 +3,6 @@ from dataclasses import dataclass
 from ludiglot.core.capture_match_workflow import (
     CaptureProcessCallbacks,
     CaptureProcessRequest,
-    needs_tesseract,
     run_capture_match_workflow,
 )
 
@@ -26,8 +25,8 @@ class FakeEngine:
         self.results = list(results)
         self.calls = []
 
-    def recognize_pipeline(self, img, prefer_tesseract=False, backend=None):
-        self.calls.append((prefer_tesseract, backend))
+    def recognize_pipeline(self, img, backend=None):
+        self.calls.append(backend)
         return self.results.pop(0)
 
 
@@ -49,11 +48,6 @@ def callbacks():
         error=events["error"].append,
         result=events["result"].append,
     )
-
-
-def test_needs_tesseract_detects_low_quality_lines():
-    assert needs_tesseract([("bad text", 0.3), ("more bad", 0.35), ("still bad", 0.9)]) is True
-    assert needs_tesseract([("Readable text", 0.95)]) is False
 
 
 def test_workflow_skips_tiny_capture():
@@ -101,53 +95,6 @@ def test_workflow_matches_lines_without_boxes():
 
     assert outcome.status == "success"
     assert matcher.lines == [("Readable", 0.9)]
-
-
-def test_workflow_retries_tesseract_for_low_quality_auto_ocr():
-    events, cb = callbacks()
-    matcher = FakeMatcher({"matches": [{"text_key": "A"}]})
-    engine = FakeEngine([
-        OcrResult([{"box": 1}], [("@@@@", 0.2), ("####", 0.3), ("!!!!", 0.4)], "paddle"),
-        OcrResult([{"box": 1}], [("Readable", 0.9)], "tesseract"),
-    ])
-
-    outcome = run_capture_match_workflow(
-        CaptureProcessRequest(
-            capture_image=lambda: FakeImage(100, 50),
-            ocr_engine=engine,
-            matcher=matcher,
-            ocr_backend="auto",
-        ),
-        cb,
-    )
-
-    assert outcome.status == "success"
-    assert engine.calls == [(False, "auto"), (True, None)]
-    assert matcher.lines == [("Readable", 0.9)]
-    assert any("切换 Tesseract" in line for line in events["log"])
-
-
-def test_workflow_reports_no_text_after_empty_tesseract_retry():
-    events, cb = callbacks()
-    matcher = FakeMatcher({"matches": [{"text_key": "A"}]})
-    engine = FakeEngine([
-        OcrResult([{"box": 1}], [("@@@@", 0.2), ("####", 0.3), ("!!!!", 0.4)], "paddle"),
-        OcrResult([], [], "tesseract"),
-    ])
-
-    outcome = run_capture_match_workflow(
-        CaptureProcessRequest(
-            capture_image=lambda: FakeImage(100, 50),
-            ocr_engine=engine,
-            matcher=matcher,
-            ocr_backend="auto",
-        ),
-        cb,
-    )
-
-    assert outcome.status == "no_text"
-    assert matcher.lines is None
-    assert "OCR 未识别到文本" in events["status"]
 
 
 def test_workflow_reports_missing_matcher():

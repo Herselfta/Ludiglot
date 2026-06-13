@@ -16,7 +16,7 @@
 
 ## ✨ Features
 
-- **🔍 Smart OCR**: Windows native OCR priority (startup < 0.1s), optional GLM-OCR (local Transformers) backend, auto-fallback to PaddleOCR/Tesseract
+- **🔍 Smart OCR**: Powered by Windows native OCR engine, fast start-up, fully local, lightweight and low memory usage.
 - **🌏 Instant Translation**: Non-intrusive overlay displays official Chinese text
 - **🎵 Voice Playback**: Auto-play corresponding official voice-over with Wwise logic
 - **⌨️ Global Hotkeys**: Hotkey screenshot and smart title separation

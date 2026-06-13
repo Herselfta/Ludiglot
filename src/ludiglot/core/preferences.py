@@ -14,7 +14,7 @@ LINE_SPACING_MIN = 0.5
 LINE_SPACING_MAX = 5.0
 VALID_FONT_WEIGHTS = {"Light", "Normal", "SemiBold", "Bold", "Heavy"}
 VALID_MENU_DIRECTIONS = {"left", "right"}
-VALID_OCR_BACKENDS = {"auto", "paddle", "tesseract", "windows", "glm_ollama"}
+VALID_OCR_BACKENDS = {"auto", "windows"}
 VALID_OCR_MODES = {"auto", "gpu", "cpu"}
 
 

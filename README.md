@@ -16,7 +16,7 @@
 
 ## ✨ 特性一览
 
-- **🔍 智能 OCR**：Windows 原生 OCR 与 PaddleOCR 双通道引擎，秒级启动。智能在 Windows OCR、PaddleOCR 和 Tesseract 之间切换与回退。
+- **🔍 智能 OCR**：基于 Windows 原生 OCR 引擎，秒级启动，完全本地运行，极速且低内存。
 - **🌏 即时翻译**：非侵入式复刻《鸣潮》风格覆盖层，实时检索官方文本。
 - **🎵 原声语音**：自动定位并播放对应官方语音，支持 Wwise 逻辑推导。
 - **⌨️ 全局集成**：热键截图、智能标题分离一应俱全。
@@ -85,7 +85,7 @@ Ludiglot/
 - 核心框架：[PyQt6](https://www.riverbankcomputing.com/software/pyqt/)
 - 资源提取：[FModelCLI](https://github.com/Herselfta/FModelCLI) (基于 [FModel](https://github.com/4sval/FModel) / [CUE4Parse](https://github.com/FabianFG/CUE4Parse))
 - 数据来源：[yarik0chka/wuwa-keys](https://github.com/yarik0chka/wuwa-keys)
-- 工具组件：`vgmstream`, `wwiser`, `PaddleOCR`
+- 工具组件：`vgmstream`, `wwiser`
 
 ---
 

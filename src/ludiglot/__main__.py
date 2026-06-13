@@ -458,7 +458,6 @@ def cmd_run(args: argparse.Namespace) -> None:
         lang=cfg.ocr_lang,
         use_gpu=cfg.ocr_gpu,
         mode=cfg.ocr_mode,
-        allow_paddle=(getattr(cfg, "ocr_backend", "auto") == "paddle"),
     )
     try:
         engine.prewarm(getattr(cfg, "ocr_backend", "auto"), async_=True)

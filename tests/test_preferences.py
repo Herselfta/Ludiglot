@@ -27,7 +27,7 @@ def test_save_overlay_preferences_preserves_unknown_fields(tmp_path):
             menu_direction="left",
             font_en="EN",
             font_cn="CN",
-            ocr_backend="tesseract",
+            ocr_backend="windows",
             ocr_mode="cpu",
         )
     )
@@ -46,7 +46,7 @@ def test_save_overlay_preferences_preserves_unknown_fields(tmp_path):
         "font_en": "EN",
         "font_cn": "CN",
     }
-    assert raw["ocr_backend"] == "tesseract"
+    assert raw["ocr_backend"] == "windows"
     assert raw["ocr_mode"] == "cpu"
     assert raw["font_en"] == "EN"
     assert raw["font_cn"] == "CN"
@@ -87,7 +87,7 @@ def test_load_overlay_preferences_uses_ui_settings_and_defaults(tmp_path):
                 "window_size": {"width": "500", "height": "300"},
                 "font_en": "TopEN",
                 "font_cn": "TopCN",
-                "ocr_backend": "paddle",
+                "ocr_backend": "windows",
                 "ocr_mode": "gpu",
                 "ui_settings": {
                     "font_size": "16",
@@ -116,7 +116,7 @@ def test_load_overlay_preferences_uses_ui_settings_and_defaults(tmp_path):
     assert prefs.menu_direction == "right"
     assert prefs.font_en == "UiEN"
     assert prefs.font_cn == "TopCN"
-    assert prefs.ocr_backend == "paddle"
+    assert prefs.ocr_backend == "windows"
     assert prefs.ocr_mode == "gpu"
 
 

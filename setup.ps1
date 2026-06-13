@@ -200,10 +200,8 @@ $folders = @(
     "cache",
     "cache/audio",
     "cache/hf",
-    "cache/paddlex",
     "tools",
     "tools/.data",
-    "tools/tesseract",
     "data",
     "config"
 )
@@ -220,40 +218,11 @@ Write-Host "启用本地依赖隔离..." -ForegroundColor Yellow
 $projectRoot = $PSScriptRoot
 $cacheRoot = Join-Path $projectRoot "cache"
 $hfCache = Join-Path $cacheRoot "hf"
-$paddlexCache = Join-Path $cacheRoot "paddlex"
-$tesseractDir = Join-Path $projectRoot "tools\\tesseract"
-$tesseractExe = Join-Path $tesseractDir "tesseract.exe"
 
 $env:HF_HOME = $hfCache
 $env:TRANSFORMERS_CACHE = $hfCache
 $env:HUGGINGFACE_HUB_CACHE = Join-Path $hfCache "hub"
 $env:XDG_CACHE_HOME = $cacheRoot
-$env:PADDLE_PDX_CACHE_HOME = $paddlexCache
-
-if (Test-Path $tesseractExe) {
-    $env:TESSERACT_CMD = $tesseractExe
-    $env:PATH = "$tesseractDir;$env:PATH"
-}
-
-# 尝试将 ~/.paddlex 指向项目缓存（仅在不存在时创建）
-$paddlexHome = Join-Path $env:USERPROFILE ".paddlex"
-if (-not (Test-Path $paddlexHome)) {
-    try {
-        & cmd /c "mklink /J `"$paddlexHome`" `"$paddlexCache`"" | Out-Null
-        Write-Host "  已创建 .paddlex 目录联接 -> cache/paddlex" -ForegroundColor Green
-    } catch {
-        Write-Host "  无法创建 .paddlex 联接，将仅使用环境变量" -ForegroundColor Yellow
-    }
-} else {
-    try {
-        $attr = (Get-Item $paddlexHome).Attributes
-        if (($attr -band [IO.FileAttributes]::ReparsePoint) -eq 0) {
-            Write-Host "  检测到现有 .paddlex 目录，未覆盖（避免破坏用户数据）" -ForegroundColor Gray
-        }
-    } catch {
-        Write-Host "  检测 .paddlex 状态失败，已跳过" -ForegroundColor Gray
-    }
-}
 
 # 检查可选依赖
 Write-Host ""
@@ -289,63 +258,7 @@ if (Test-Path "config/settings.json") {
 }
 
 Write-Host ""
-Write-Host "选择 OCR 后端 (可多选，首个为首选)..." -ForegroundColor Yellow
-Write-Host "  1. Paddle-OCR" -ForegroundColor White
-Write-Host "  2. Windows-OCR" -ForegroundColor White
-Write-Host "  3. Tesseract-OCR" -ForegroundColor White
-Write-Host "  提示: GLM-OCR 通过 Ollama 使用，无需额外安装" -ForegroundColor Gray
-$choiceRaw = Read-Host "  请输入数字 (例: 1 2 3)"
-
-$selected = @()
-if ($choiceRaw) {
-    $matches = [regex]::Matches($choiceRaw, "[1-3]")
-    foreach ($m in $matches) {
-        $n = [int]$m.Value
-        if (-not ($selected -contains $n)) {
-            $selected += $n
-        }
-    }
-}
-if ($selected.Count -eq 0) {
-    Write-Host "  未识别有效选择，跳过 OCR 后端安装" -ForegroundColor Gray
-}
-
-$selectPaddle = $false
-$selectWindows = $false
-$selectTesseract = $false
-
-foreach ($n in $selected) {
-    switch ($n) {
-        1 { $selectPaddle = $true }
-        2 { $selectWindows = $true }
-        3 { $selectTesseract = $true }
-    }
-}
-
-$preferredBackend = $null
-if ($selected.Count -gt 0) {
-    switch ($selected[0]) {
-        1 { $preferredBackend = "paddle" }
-        2 { $preferredBackend = "windows" }
-        3 { $preferredBackend = "tesseract" }
-    }
-}
-
-if ($preferredBackend -and (Test-Path "config/settings.json")) {
-    try {
-        $configLines = Get-Content "config/settings.json" -Encoding utf8
-        $updated = $configLines -replace '"ocr_backend"\s*:\s*"[^"]+"', ('"ocr_backend": "' + $preferredBackend + '"')
-        if ($updated -ne $configLines) {
-            Set-Content -Path "config/settings.json" -Encoding utf8 -Value $updated
-            Write-Host "  已设置首选 OCR 后端: $preferredBackend" -ForegroundColor Green
-        }
-    } catch {
-        Write-Host "  设置首选 OCR 后端失败，可稍后手动修改 config/settings.json" -ForegroundColor Yellow
-    }
-}
-
-Write-Host ""
-Write-Host "检查并安装选择的 OCR 后端..." -ForegroundColor Yellow
+Write-Host "检查并安装 Windows OCR 依赖..." -ForegroundColor Yellow
 
 # 检查 Windows OCR 支持
 Write-Host "  - Windows OCR (WinRT)..." -NoNewline
@@ -354,101 +267,13 @@ if ($LASTEXITCODE -eq 0) {
     Write-Host " 已安装 (推荐)" -ForegroundColor Green
 } else {
     Write-Host " 未安装" -ForegroundColor Yellow
-    if ($selectWindows) {
-        Write-Host "    正在安装 Windows OCR 依赖..." -ForegroundColor Yellow
-        & $venvPython -m pip install winrt-Windows.Media.Ocr winrt-Windows.Globalization winrt-Windows.Storage.Streams winrt-Windows.Graphics.Imaging winrt-Windows.Foundation winrt-Windows.Foundation.Collections
-        & $venvPython -c "import winrt.windows.media.ocr" 2>$null
-        if ($LASTEXITCODE -eq 0) {
-            Write-Host "    Windows OCR 依赖安装完成" -ForegroundColor Green
-        } else {
-            Write-Host "    Windows OCR 安装失败，可稍后手动安装" -ForegroundColor Yellow
-        }
+    Write-Host "    正在安装 Windows OCR 依赖..." -ForegroundColor Yellow
+    & $venvPython -m pip install winrt-Windows.Media.Ocr winrt-Windows.Globalization winrt-Windows.Storage.Streams winrt-Windows.Graphics.Imaging winrt-Windows.Foundation winrt-Windows.Foundation.Collections
+    & $venvPython -c "import winrt.windows.media.ocr" 2>$null
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "    Windows OCR 依赖安装完成" -ForegroundColor Green
     } else {
-        Write-Host "    如果您使用的是 Windows 10/11，强烈建议安装: pip install winrt-Windows.Media.Ocr" -ForegroundColor Gray
-    }
-}
-
-# 检查 PaddleOCR 支持
-Write-Host "  - PaddleOCR..." -NoNewline
-& $venvPython -c "import paddleocr" 2>$null
-if ($LASTEXITCODE -eq 0) {
-    Write-Host " 已安装" -ForegroundColor Green
-    $paddleAvailable = $true
-} else {
-    Write-Host " 未安装 (可选)" -ForegroundColor Cyan
-    Write-Host "    如需更高识别率且不介意性能，可安装: pip install ludiglot[paddle]" -ForegroundColor Gray
-    $paddleAvailable = $false
-    if ($selectPaddle) {
-        Write-Host "    正在安装 PaddleOCR 依赖..." -ForegroundColor Yellow
-        & $venvPython -m pip install -e .[paddle]
-        & $venvPython -c "import paddleocr" 2>$null
-        if ($LASTEXITCODE -eq 0) {
-            Write-Host "    PaddleOCR 依赖安装完成" -ForegroundColor Green
-            $paddleAvailable = $true
-        } else {
-            Write-Host "    PaddleOCR 安装失败，可稍后手动安装" -ForegroundColor Yellow
-        }
-    }
-}
-
-Write-Host "  - Tesseract OCR..." -NoNewline
-$tesseractOk = $false
-$tesseractLocalExe = Join-Path $PSScriptRoot "tools\\tesseract\\tesseract.exe"
-if (Test-Path $tesseractLocalExe) {
-    $tesseractOk = $true
-    $env:TESSERACT_CMD = $tesseractLocalExe
-    $env:PATH = (Split-Path $tesseractLocalExe) + ";" + $env:PATH
-} else {
-    try {
-        $tessCmd = Get-Command tesseract -ErrorAction SilentlyContinue
-        if ($tessCmd) { $tesseractOk = $true }
-    } catch {}
-}
-if ($tesseractOk) {
-    Write-Host " 已安装" -ForegroundColor Green
-} else {
-    Write-Host " 未安装 (可选)" -ForegroundColor Cyan
-    if ($selectTesseract) {
-        $wingetCmd = Get-Command winget -ErrorAction SilentlyContinue
-        if ($wingetCmd) {
-            Write-Host "    正在安装 Tesseract (优先本地目录)..." -ForegroundColor Yellow
-            $tessLocation = Join-Path $PSScriptRoot "tools\\tesseract"
-            winget install --id UB-Mannheim.TesseractOCR -e --accept-package-agreements --accept-source-agreements --location $tessLocation
-            if (Test-Path $tesseractLocalExe) {
-                Write-Host "    Tesseract 已安装到 tools/tesseract" -ForegroundColor Green
-                $env:TESSERACT_CMD = $tesseractLocalExe
-                $env:PATH = (Split-Path $tesseractLocalExe) + ";" + $env:PATH
-            } else {
-                $tessCmd = Get-Command tesseract -ErrorAction SilentlyContinue
-                if ($tessCmd) {
-                    Write-Host "    Tesseract 已安装到系统 (非项目目录)" -ForegroundColor Yellow
-                } else {
-                    Write-Host "    Tesseract 安装失败，可稍后手动安装" -ForegroundColor Yellow
-                }
-            }
-        } else {
-            Write-Host "    未找到 winget，请手动安装 Tesseract (UB-Mannheim 版本)" -ForegroundColor Yellow
-        }
-    } else {
-        Write-Host "    需要系统安装 Tesseract 可执行文件" -ForegroundColor Gray
-    }
-}
-
-# 预下载 PaddleOCR 模型（可选）
-if ($paddleAvailable -and $selectPaddle) {
-    Write-Host "    预下载 PaddleOCR 模型..." -ForegroundColor Yellow
-    $lang = "en"
-    if ($ocrLang) {
-        if ($ocrLang -like "zh*") { $lang = "ch" }
-        elseif ($ocrLang -like "en*") { $lang = "en" }
-    }
-    @"
-from paddleocr import PaddleOCR
-PaddleOCR(lang='$lang')
-print('PaddleOCR model ready')
-"@ | & $venvPython
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "    预下载失败，可稍后手动触发" -ForegroundColor Yellow
+        Write-Host "    Windows OCR 安装失败，可稍后手动安装" -ForegroundColor Yellow
     }
 }
 

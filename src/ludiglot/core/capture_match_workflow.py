@@ -31,25 +31,6 @@ class CaptureProcessCallbacks:
     result: Callable[[dict[str, Any]], None] | None = None
 
 
-def needs_tesseract(lines: list[tuple[str, float]]) -> bool:
-    if len(lines) < 3:
-        return False
-    for text, conf in lines:
-        if conf < 0.35 and len(text) >= 15:
-            return True
-    low_conf = [conf for _, conf in lines if conf < 0.4]
-    if low_conf and (len(low_conf) / len(lines)) >= 0.4:
-        return True
-    avg_conf = sum(conf for _, conf in lines) / max(len(lines), 1)
-    if avg_conf < 0.7:
-        return True
-    joined = " ".join(text for text, _ in lines)
-    if not joined:
-        return False
-    alpha = sum(ch.isalpha() or ch.isspace() for ch in joined)
-    return alpha / max(len(joined), 1) < 0.65
-
-
 def run_capture_match_workflow(
     request: CaptureProcessRequest,
     callbacks: CaptureProcessCallbacks | None = None,
@@ -81,12 +62,11 @@ def run_capture_match_workflow(
 
         ocr_result = request.ocr_engine.recognize_pipeline(
             img_obj,
-            prefer_tesseract=request.ocr_backend == "tesseract",
             backend=request.ocr_backend,
         )
         box_lines = ocr_result.boxes
         lines = ocr_result.lines
-        backend = ocr_result.backend or "paddle"
+        backend = ocr_result.backend or "windows"
         _emit(callbacks.log, f"[OCR] 后端: {_backend_label(backend)}")
         _emit(callbacks.log, f"[PERF] OCR识别耗时: {(time.time() - t_ocr_start):.3f}s")
     except Exception as exc:
@@ -97,18 +77,6 @@ def run_capture_match_workflow(
         _emit(callbacks.status, "OCR 未识别到文本")
         _emit(callbacks.log, "[OCR] 未识别到文本")
         return CaptureProcessOutcome(status="no_text")
-
-    t_group_start = time.time()
-    if request.ocr_backend == "auto" and needs_tesseract(lines):
-        _emit(callbacks.log, "[OCR] 质量较差，切换 Tesseract")
-        ocr_result = request.ocr_engine.recognize_pipeline(img_obj, prefer_tesseract=True)
-        box_lines = ocr_result.boxes
-        lines = ocr_result.lines
-        if not lines:
-            _emit(callbacks.status, "OCR 未识别到文本")
-            _emit(callbacks.log, "[OCR] 未识别到文本")
-            return CaptureProcessOutcome(status="no_text")
-    _emit(callbacks.log, f"[PERF] 文本分组耗时: {(time.time() - t_group_start):.3f}s")
 
     _emit(callbacks.log, "[OCR] 识别结果:")
     for text, conf in lines:
@@ -176,9 +144,6 @@ def _dump_ocr_input(img_obj: Any, debug_dump_dir: Path | None, callbacks: Captur
 def _backend_label(backend: str) -> str:
     return {
         "windows": "WindowsOCR",
-        "glm_ollama": "GLM-OCR (Ollama)",
-        "tesseract": "Tesseract",
-        "paddle": "PaddleOCR",
     }.get(backend, backend)
 
 

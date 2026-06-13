@@ -4,7 +4,7 @@
 
 ### 核心功能
 - ✅ Windows 原生 OCR 集成（优先使用）
-- ✅ PaddleOCR / Tesseract 回退机制
+- ✅ GLM-OCR 大模型辅助支持
 - ✅ 模糊文本匹配（RapidFuzz）
 - ✅ 智能混合内容识别（标题 + 正文分离）
 - ✅ 官方语音播放（Wwise Hash 推导 + vgmstream 转码）
@@ -109,6 +109,4 @@
 
 ## 技术债务
 
-- [ ] 移除 Tesseract 依赖（Windows OCR 已足够稳定）
-- [ ] PaddleOCR 改为可选依赖
 - [ ] 测试覆盖率提升

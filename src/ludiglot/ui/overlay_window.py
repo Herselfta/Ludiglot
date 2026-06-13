@@ -903,12 +903,10 @@ class OverlayWindow(QMainWindow):
 
         self.ocr_backend_group = QActionGroup(self)
         self.ocr_backend_group.setExclusive(True)
-        for backend in ["auto", "glm_ollama", "paddle", "tesseract"]:
+        for backend in ["auto", "windows"]:
             display_name = {
                 "auto": "Auto (Prefer WinOCR)",
-                "glm_ollama": "GLM-OCR (Ollama)",
-                "paddle": "Paddle",
-                "tesseract": "Tesseract"
+                "windows": "Windows OCR",
             }.get(backend, backend)
             action = QAction(display_name, self)
             action.setCheckable(True)
@@ -1523,11 +1521,6 @@ class OverlayWindow(QMainWindow):
 
     def _on_backend_changed(self, backend: str) -> None:
         self.config.ocr_backend = backend
-        try:
-            self.engine.allow_paddle = backend == "paddle"
-        except Exception:
-            # OCR backend configuration is optional; on any error we fall back to the engine's default
-            pass
         self.signals.status.emit(f"OCR 后端: {backend}")
         self._persist_window_position()
 

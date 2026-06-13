@@ -4,8 +4,8 @@ from ludiglot.core.ocr import OCREngine, OcrPipelineResult
 
 
 class FakeOCREngine(OCREngine):
-    def recognize_with_boxes(self, image_input, prefer_tesseract=False, backend=None):
-        self.last_backend = "tesseract" if prefer_tesseract else (backend or "windows")
+    def recognize_with_boxes(self, image_input, backend=None):
+        self.last_backend = backend or "windows"
         return [
             {
                 "text": "Hello",
@@ -43,11 +43,3 @@ def test_recognize_with_confidence_uses_pipeline_lines() -> None:
         ("Hello Rover", 0.8500000000000001),
         ("Next line", 0.7),
     ]
-
-
-def test_recognize_pipeline_preserves_prefer_tesseract_backend_metadata() -> None:
-    engine = FakeOCREngine(lang="en")
-
-    result = engine.recognize_pipeline("fake.png", prefer_tesseract=True)
-
-    assert result.backend == "tesseract"

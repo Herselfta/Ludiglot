@@ -250,12 +250,7 @@ def test_create_overlay_ocr_engine_applies_config(monkeypatch, tmp_path):
         ocr_lang="zh",
         ocr_gpu=True,
         ocr_mode="gpu",
-        ocr_backend="paddle",
-        ocr_glm_endpoint="http://localhost",
-        ocr_glm_ollama_model="model",
-        ocr_glm_max_tokens=123,
-        ocr_glm_timeout=4.5,
-        ocr_glm_prompt="prompt",
+        ocr_backend="windows",
         ocr_line_refine=True,
         ocr_preprocess=True,
         ocr_word_segment=True,
@@ -270,12 +265,6 @@ def test_create_overlay_ocr_engine_applies_config(monkeypatch, tmp_path):
         "lang": "zh",
         "use_gpu": True,
         "mode": "gpu",
-        "glm_endpoint": "http://localhost",
-        "glm_ollama_model": "model",
-        "glm_max_tokens": 123,
-        "glm_timeout": 4.5,
-        "glm_prompt": "prompt",
-        "allow_paddle": True,
     }
     engine.logger("log-message")
     engine.status("status-message")

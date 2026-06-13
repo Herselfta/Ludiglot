@@ -48,7 +48,6 @@ def create_overlay_ocr_engine(config: AppConfig, callbacks: OverlayRuntimeCallba
         lang=config.ocr_lang,
         use_gpu=config.ocr_gpu,
         mode=config.ocr_mode,
-        allow_paddle=(getattr(config, "ocr_backend", "auto") == "paddle"),
     )
     engine.set_logger(callbacks.log, callbacks.status)
     _set_optional_ocr_flag(engine, "win_ocr_line_refine", getattr(config, "ocr_line_refine", False))
