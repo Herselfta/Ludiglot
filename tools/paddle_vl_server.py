@@ -109,7 +109,10 @@ class PaddleVLRequestHandler(http.server.BaseHTTPRequestHandler):
                     use_chart_recognition=False,
                     use_seal_recognition=False,
                     use_ocr_for_image_block=False,
-                    use_queues=False
+                    use_queues=False,
+                    max_new_tokens=150,
+                    min_pixels=50176,
+                    max_pixels=200704
                 )
                 
                 # Extract markdown text using temp directory
