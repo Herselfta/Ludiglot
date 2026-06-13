@@ -27,7 +27,7 @@
 *通用组件，不包含特定游戏逻辑。*
 
 * **Infrastructure**: 工具管理器（FModelCLI, vgmstream）。
-* **Vision**: OCR 引擎（必须使用 GLM-OCR 等 VL 多模态模型以正常体验，Windows OCR 仅作为基础/备用）。
+* **Vision**: OCR 引擎（支持 Windows OCR 与高精度的 PaddleOCR-VL-1.6 视觉语言多模态模型）。
 * **Search**: `RapidFuzz` 模糊匹配引擎。
 * **UI**: 基于 `PyQt6` 的覆盖层系统，支持 QSS 样式表定制。
 
@@ -302,7 +302,7 @@ To maintain maintainability and testability, the code is organized into logical 
 |-----------|------------|
 | Language | Python 3.10+ |
 | GUI | PyQt6 |
-| OCR | GLM-OCR (API/私有部署, 必须以获得正常体验), Windows.Media.Ocr (基础/备用) |
+| OCR | PaddleOCR-VL (本地部署 API 服务, 推荐), Windows.Media.Ocr (系统内置, 极速低内存) |
 | Search | RapidFuzz |
 | Audio | vgmstream, PyQt6.QtMultimedia |
 | Pak Extract | FModelCLI (CUE4Parse) |

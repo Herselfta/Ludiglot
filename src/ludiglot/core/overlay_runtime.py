@@ -55,6 +55,8 @@ def create_overlay_ocr_engine(config: AppConfig, callbacks: OverlayRuntimeCallba
     _set_optional_ocr_flag(engine, "win_ocr_segment", getattr(config, "ocr_word_segment", False))
     _set_optional_ocr_flag(engine, "win_ocr_multiscale", getattr(config, "ocr_multiscale", False))
     _set_optional_ocr_flag(engine, "win_ocr_adaptive", getattr(config, "ocr_adaptive", True))
+    setattr(engine, "paddle_vl_url", getattr(config, "ocr_paddle_vl_url", "http://localhost:8000/v1"))
+    setattr(engine, "paddle_vl_model", getattr(config, "ocr_paddle_vl_model", "PaddlePaddle/PaddleOCR-VL"))
     return engine
 
 

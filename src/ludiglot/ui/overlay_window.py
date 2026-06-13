@@ -903,10 +903,11 @@ class OverlayWindow(QMainWindow):
 
         self.ocr_backend_group = QActionGroup(self)
         self.ocr_backend_group.setExclusive(True)
-        for backend in ["auto", "windows"]:
+        for backend in ["auto", "windows", "paddle_vl"]:
             display_name = {
                 "auto": "Auto (Prefer WinOCR)",
                 "windows": "Windows OCR",
+                "paddle_vl": "PaddleOCR-VL",
             }.get(backend, backend)
             action = QAction(display_name, self)
             action.setCheckable(True)

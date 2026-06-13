@@ -154,9 +154,25 @@ A: 确认 `extract_audio` 为 `true`，`game_audio_languages` 包含要播放的
 
 A: Windows 原生 OCR 需要系统语言包。打开 **设置 > 时间和语言 > 语言和区域**，安装 **English (United States)**；如需中文 OCR，也安装 **中文(简体，中国)**。
 
+**Q: 如何使用高精度 PaddleOCR-VL-1.6 视觉语言模型后端？**
+
+A: 如果您遇到复杂排版或对识别精度有更高要求，可以使用可选的 PaddleOCR-VL 后端：
+1. **安装依赖**：运行 `.\setup.ps1` 时，选择 `y` 确认安装可选的 PaddleOCR-VL 依赖（或手动在虚拟环境中运行 `pip install -e .[paddle]` 与 `pip install "paddlex[ocr]"`）。
+2. **运行本地服务**：打开一个新的 PowerShell 窗口，激活虚拟环境并启动 API 服务：
+   ```powershell
+   .\.venv\Scripts\Activate.ps1
+   python tools/paddle_vl_server.py
+   ```
+   *服务启动后会下载大模型 checkpoints，并在 `http://localhost:8000` 监听 OpenAI 兼容的 API 请求。*
+3. **启用后端**：在 `config/settings.json` 中配置 `"ocr_backend": "paddle_vl"`，或在运行程序后的 GUI 覆盖层菜单中选择 **PaddleOCR-VL**。
+
 **Q: 为什么游戏内匹配经常失败、漏匹配或不播语音？**
 
-A: **请确保您的 Windows OCR 语言包已正确安装且识别框大小合适**。目前的匹配系统完全基于本地高速的 Windows 原生 OCR。由于去除了复杂的深度学习大模型，如果出现匹配失败，请检查：
-1. 游戏字幕区域是否被正确框选。
-2. Windows 系统中是否安装了当前翻译源语言（如 English）的 OCR 功能包。
-3. 调整游戏分辨率或缩放，以获得最清晰的字符边缘。
+A: **请确保您的 OCR 后端已正确配置且识别框大小合适**。
+- 如果使用 **Windows OCR**（默认）：
+  1. 确认已安装当前翻译源语言（如 English）的系统 OCR 功能包。
+  2. 游戏字幕区域被正确框选。
+  3. 调整游戏分辨率或缩放以获得最清晰的字符边缘。
+- 如果使用 **PaddleOCR-VL**：
+  1. 确认本地 API 服务 `tools/paddle_vl_server.py` 正在后台运行。
+  2. 确认 `settings.json` 中的 `ocr_paddle_vl_url` 配置正确。

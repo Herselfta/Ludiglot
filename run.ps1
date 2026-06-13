@@ -40,8 +40,70 @@ if ($LASTEXITCODE -ne 0) {
     & $venvPython -m pip install -e . --quiet
 }
 
+# 检查 PaddleOCR-VL 后端状态并自动启动
+if (Test-Path "config/settings.json") {
+    try {
+        $config = Get-Content "config/settings.json" -Encoding utf8 | ConvertFrom-Json
+        if ($config.ocr_backend -eq "paddle_vl") {
+            $url = $config.ocr_paddle_vl_url
+            if ($url) {
+                $uri = New-Object System.Uri($url)
+                $hostName = $uri.Host
+                if ($hostName -eq "localhost") { $hostName = "127.0.0.1" }
+                $port = $uri.Port
+                
+                # 定义快速端口连接测试
+                function Test-PortOpen {
+                    param([string]$h, [int]$p)
+                    $client = New-Object System.Net.Sockets.TcpClient
+                    try {
+                        $asyncResult = $client.BeginConnect($h, $p, $null, $null)
+                        if ($asyncResult.AsyncWaitHandle.WaitOne(300)) {
+                            $client.EndConnect($asyncResult) | Out-Null
+                            return $true
+                        }
+                        return $false
+                    } catch {
+                        return $false
+                    } finally {
+                        $client.Close()
+                    }
+                }
+                
+                if (-not (Test-PortOpen $hostName $port)) {
+                    Write-Host "检测到 PaddleOCR-VL 后端未启动，正在自动拉起本地 API 服务..." -ForegroundColor Yellow
+                    # 在新窗口启动服务，方便用户查看加载进度和模型下载日志
+                    Start-Process powershell.exe -ArgumentList "-ExecutionPolicy Bypass", "-NoExit", "-Command `& `'$venvPython`' tools/paddle_vl_server.py" -WindowStyle Minimized
+                    
+                    Write-Host "等待 PaddleOCR-VL 服务 (端口 $port) 响应..." -ForegroundColor Yellow
+                    $retries = 45
+                    $started = $false
+                    while ($retries -gt 0) {
+                        Start-Sleep -Seconds 1
+                        if (Test-PortOpen $hostName $port) {
+                            $started = $true
+                            break
+                        }
+                        $retries--
+                    }
+                    if ($started) {
+                        Write-Host "PaddleOCR-VL 服务已就绪！" -ForegroundColor Green
+                    } else {
+                        Write-Host "警告: 等待 PaddleOCR-VL 服务启动超时，将尝试继续启动 GUI..." -ForegroundColor Red
+                    }
+                } else {
+                    Write-Host "检测到 PaddleOCR-VL 服务已在运行 (端口 $port)" -ForegroundColor Green
+                }
+            }
+        }
+    } catch {
+        Write-Host "警告: 解析 settings.json 或检查 PaddleOCR-VL 后端失败: $_" -ForegroundColor Yellow
+    }
+}
+
 # 启动程序
 Write-Host ""
 Write-Host "启动 Ludiglot GUI..." -ForegroundColor Green
 Write-Host ""
 & $venvPython -m ludiglot
+

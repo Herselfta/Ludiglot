@@ -1,5 +1,17 @@
 # 更新日志
 
+## 2026-06-13 - PaddleOCR-VL-1.6 视觉语言大模型集成
+
+### ✨ 新特性与优化
+- **新增 PaddleOCR-VL 后端支持**：为复杂排版和高精度文本识别需求引入 PaddleOCR-VL-1.6 视觉语言模型 (VLM) 后端。
+- **本地 API 服务 (`tools/paddle_vl_server.py`)**：基于 Python 内置 `http.server` 编写零依赖的本地 HTTP 服务，提供 OpenAI 兼容的 `/v1/chat/completions` 接口。
+- **绕过 Baidu CDN 证书过期与 Gateway 504 限制**：
+  - 动态全局修补 `ssl._create_default_https_context`，并屏蔽 Python/cURL/urllib 的 SSL 证书校验。
+  - 重写 `requests.Session.request` 方法，在运行时内存中强制设置 `verify=False`。
+  - 动态修补 `aistudio_sdk.switch_downoad.switch_cdn` 方法，绕过 Baidu CDNs 导致的 504 Gateway Timeout 并直接从 Baidu 主服务器拉取大模型文件。
+- **GUI 完美整合**：在 PyQt 覆盖层设置菜单中加入 "PaddleOCR-VL" 后端选项，支持运行期无缝切换。
+- **环境一键配置**：更新 `setup.ps1` 和 `config/settings.example.json` / `config/settings.json`，提供交互式 PaddleOCR-VL 环境依赖一键安装。
+
 ## 2026-02-10 - 文本数据库构建修复与嵌套目录扫描增强
 
 ### 🐛 关键技术修复：中英文本脱钩与数据缺失问题

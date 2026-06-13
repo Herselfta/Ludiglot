@@ -27,7 +27,7 @@ test = [
 ]
 paddle = [
 	"paddleocr>=3.4.0",
-	"paddlepaddle>=3.2,<3.3",
+	"paddlepaddle-gpu>=3.0.0b1",
 ]
 
 [project.scripts]

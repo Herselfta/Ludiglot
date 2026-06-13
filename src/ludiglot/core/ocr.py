@@ -1264,23 +1264,119 @@ class OCREngine:
             backend=self.last_backend,
         )
 
+    def _image_input_to_png_bytes(self, image_input) -> bytes | None:
+        if not HAS_PIL or Image is None:
+            return None
+        try:
+            if isinstance(image_input, (str, Path)):
+                img = Image.open(str(image_input))
+            elif isinstance(image_input, tuple) and len(image_input) == 3:
+                r_bytes, r_w, r_h = image_input
+                img = Image.frombytes("RGBA", (int(r_w), int(r_h)), r_bytes, "raw", "BGRA")
+            elif isinstance(image_input, Image.Image):
+                img = image_input
+            else:
+                return None
+            
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
+            return buf.getvalue()
+        except Exception as e:
+            self._emit_log(f"[OCR] 图像转换为 PNG 字节流失败: {e}")
+            return None
+
+    def _paddle_vl_recognize_api(self, image_input) -> List[Dict[str, object]]:
+        png_bytes = self._image_input_to_png_bytes(image_input)
+        if not png_bytes:
+            return []
+            
+        url = getattr(self, "paddle_vl_url", "http://localhost:8000/v1")
+        model = getattr(self, "paddle_vl_model", "PaddlePaddle/PaddleOCR-VL")
+        
+        endpoint = url
+        if not endpoint.endswith("/chat/completions"):
+            if endpoint.endswith("/"):
+                endpoint += "chat/completions"
+            else:
+                endpoint += "/chat/completions"
+                
+        try:
+            b64_data = base64.b64encode(png_bytes).decode("utf-8")
+            data_url = f"data:image/png;base64,{b64_data}"
+            
+            payload = {
+                "model": model,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": data_url}
+                            },
+                            {
+                                "type": "text",
+                                "text": "OCR:"
+                            }
+                        ]
+                    }
+                ],
+                "temperature": 0.0
+            }
+            
+            req_data = json.dumps(payload).encode("utf-8")
+            req = urllib.request.Request(
+                endpoint,
+                data=req_data,
+                headers={"Content-Type": "application/json"}
+            )
+            
+            self._emit_log(f"[OCR] 发送 PaddleOCR-VL API 请求到 {endpoint}...")
+            with urllib.request.urlopen(req, timeout=60.0) as response:
+                resp_data = json.loads(response.read().decode("utf-8"))
+                text_content = resp_data["choices"][0]["message"]["content"]
+                
+                lines = []
+                for idx, text_line in enumerate(text_content.split("\n")):
+                    t = text_line.strip()
+                    if t:
+                        mock_box = [[0, idx * 30], [100, idx * 30], [100, idx * 30 + 20], [0, idx * 30 + 20]]
+                        lines.append({
+                            "text": t,
+                            "conf": 0.95,
+                            "box": mock_box
+                        })
+                return lines
+        except Exception as e:
+            self._emit_log(f"[OCR] PaddleOCR-VL API 请求失败: {e}")
+            return []
+
     def recognize_with_boxes(
         self,
-        image_input: Union[str, Path, Any],
+        image_input,
         backend: str | None = None,
     ) -> List[Dict[str, object]]:
-        """使用 Windows OCR 识别图片中的文本框和内容。
+        """使用指定的 OCR 后端识别图片中的文本框和内容。
         
         Args:
             image_input: 文件路径 (str/Path) 或 PIL Image 对象
-            backend: 指定后端（auto/windows）
+            backend: 指定后端（auto/windows/paddle_vl）
         """
         backend_key = str(backend or "auto").strip().lower().replace("-", "_")
-        if backend_key not in {"auto", "windows"}:
+        if backend_key not in {"auto", "windows", "paddle_vl"}:
             backend_key = "auto"
         raw_tuple = None
         if isinstance(image_input, tuple) and len(image_input) == 3:
             raw_tuple = image_input
+
+        # 尝试 PaddleOCR-VL
+        if backend_key == "paddle_vl":
+            print("[OCR] 使用后端: PaddleOCR-VL (VLM API)")
+            paddle_lines = self._paddle_vl_recognize_api(image_input)
+            if paddle_lines:
+                self.last_backend = "paddle_vl"
+                return paddle_lines
+            return []
 
         # 尝试 Windows 原生 OCR
         if backend_key in {"auto", "windows"}:
@@ -1299,7 +1395,7 @@ class OCREngine:
                 else:
                      # PIL Image or Object
                      windows_lines = self.recognize_from_image(image_input)
-                 
+                  
             if windows_lines:
                 self.last_backend = "windows"
                 return windows_lines

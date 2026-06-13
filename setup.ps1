@@ -278,6 +278,40 @@ if ($LASTEXITCODE -eq 0) {
 }
 
 Write-Host ""
+Write-Host "检查并安装可选的 PaddleOCR-VL 依赖..." -ForegroundColor Yellow
+Write-Host "  - PaddleOCR & PaddlePaddle..." -NoNewline
+& $venvPython -c "import paddleocr" 2>$null
+if ($LASTEXITCODE -eq 0) {
+    Write-Host " 已安装" -ForegroundColor Green
+} else {
+    Write-Host " 未安装" -ForegroundColor Yellow
+    $answer = Read-Host "    是否安装 PaddleOCR-VL 支持? (y/N)"
+    if ($answer -eq "y" -or $answer -eq "Y") {
+        Write-Host "    正在检查 GPU 设备..." -ForegroundColor Yellow
+        $hasNvidia = $false
+        if (Get-Command nvidia-smi -ErrorAction SilentlyContinue) {
+            $hasNvidia = $true
+        }
+        
+        if ($hasNvidia) {
+            Write-Host "    [检测到 NVIDIA GPU] 正在使用飞桨镜像源安装 GPU 版本的 paddlepaddle-gpu..." -ForegroundColor Green
+            # 卸载 CPU 版以防冲突
+            & $venvPython -m pip uninstall paddlepaddle -y --quiet 2>$null
+            & $venvPython -m pip install paddlepaddle-gpu -i https://www.paddlepaddle.org.cn/packages/stable/cu123/
+        } else {
+            Write-Host "    [未检测到 NVIDIA GPU] 正在安装 CPU 版本的 paddlepaddle..." -ForegroundColor Yellow
+            & $venvPython -m pip uninstall paddlepaddle-gpu -y --quiet 2>$null
+            & $venvPython -m pip install paddlepaddle
+        }
+        
+        Write-Host "    正在安装 paddleocr 依赖..." -ForegroundColor Yellow
+        & $venvPython -m pip install paddleocr>=3.4.0
+        Write-Host "    正在安装 paddlex[ocr] 依赖..." -ForegroundColor Yellow
+        & $venvPython -m pip install "paddlex[ocr]"
+    }
+}
+
+Write-Host ""
 Write-Host "检查第三方工具 (解包必需)..." -ForegroundColor Yellow
 
 # 检查 FModelCLI
