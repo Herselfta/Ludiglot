@@ -61,6 +61,14 @@ class DatabaseUpdateController:
         self._progress_dialog = progress
         progress.show()
 
+        # 暂时禁用快捷键监听，避免数据库更新期间用户误触截图导致卡死
+        if hasattr(self._parent, "_hotkeys"):
+            try:
+                self._parent._hotkeys.stop()
+                self._log("[HOTKEY] 数据库更新期间已暂时禁用快捷键监听")
+            except Exception as e:
+                self._log(f"[HOTKEY] 暂时禁用快捷键监听失败: {e}")
+
         thread = self._thread_cls(self._config_path, config.db_path)
         self._thread = thread
 
@@ -75,6 +83,15 @@ class DatabaseUpdateController:
             else:
                 self._dialog_cls.critical(self._parent, "失败", f"数据库更新失败：\n{message}")
                 self._log(f"[DB UPDATE] 失败：{message}")
+            
+            # 恢复快捷键监听
+            if hasattr(self._parent, "_hotkeys"):
+                try:
+                    self._parent._hotkeys.start()
+                    self._log("[HOTKEY] 数据库更新已完成，已恢复快捷键监听")
+                except Exception as e:
+                    self._log(f"[HOTKEY] 恢复快捷键监听失败: {e}")
+
             self._thread = None
             self._progress_dialog = None
 

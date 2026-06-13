@@ -105,6 +105,44 @@ def build_smart_candidates(
     clean_func=None,
     normalize_func=None
 ) -> Dict[str, Any]:
+    res = _build_smart_candidates_raw(lines, clean_func, normalize_func)
+    candidates = res.get('candidates', [])
+    if not candidates:
+        return res
+        
+    if normalize_func is None:
+        normalize_func = lambda x: x.lower().replace(' ', '')
+        
+    sub_sentence_candidates = []
+    for text, conf in candidates:
+        if not text:
+            continue
+        # 英文/中文标点分句
+        parts = re.split(r'(?<=[.!?。！？])\s+', text)
+        if len(parts) >= 2:
+            for p in parts:
+                p_clean = p.strip()
+                if p_clean and len(p_clean.split()) >= 2 and len(p_clean) >= 6:
+                    sub_sentence_candidates.append((p_clean, conf * 0.98))
+                    
+    existing_keys = {normalize_func(t) for t, _ in candidates}
+    for text, conf in sub_sentence_candidates:
+        key = normalize_func(text)
+        if key and key not in existing_keys:
+            candidates.append((text, conf))
+            existing_keys.add(key)
+            
+    # 按照置信度降序排序，确保高质量候选排在前面
+    candidates.sort(key=lambda x: x[1], reverse=True)
+    res['candidates'] = candidates
+    return res
+
+
+def _build_smart_candidates_raw(
+    lines: List[Tuple[str, float]], 
+    clean_func=None,
+    normalize_func=None
+) -> Dict[str, Any]:
     """构建智能候选集合
     
     返回:
@@ -177,6 +215,12 @@ def build_smart_candidates(
         full_text = ' '.join(l['cleaned'] for l in lines_info)
         avg_conf = sum(l['conf'] for l in lines_info) / len(lines_info)
         candidates = [(full_text, avg_conf)]
+
+        # 将每个独立的、长度足够的行也作为候选评估，防止硬拼接导致整体失配
+        for l in lines_info:
+            cleaned_line = l['cleaned'].strip()
+            if len(cleaned_line.split()) >= 2:
+                candidates.append((cleaned_line, l['conf']))
 
         # 新增：检测分割人名场景
         # 场景1: Line1=缩写人名(N.A.N.A.), Line2=正文  → 直接取 Line2 以后的文本

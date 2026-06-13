@@ -1040,9 +1040,12 @@ class TextMatcher:
         
         # 优化：减少候选数量，优先处理高质量候选
         if len(candidates) > 10:
-            max_candidates = 12 if context_len >= 120 else 5
+            max_candidates = 15 if context_len >= 120 else 10
         else:
             max_candidates = len(candidates)
+        
+        successful_sub_matches = []
+        seen_text_keys = set()
         
         for idx, (text, conf) in enumerate(candidates[:max_candidates]):
              # 早期退出：如果已经找到高质量匹配，停止搜索
@@ -1056,8 +1059,8 @@ class TextMatcher:
              # Filter short garbage
              # 仅在长上下文中启用，避免误杀“短但完整”的剧情句。
              if context_len >= 40:
-                 if len(text.split()) <= 3: continue
-                 if len(key) < 20: continue
+                 if len(text.split()) <= 2: continue
+                 if len(key) < 12: continue
 
              result, score = self.search_key(key)
              matched_key = result.get("_matched_key", "")
@@ -1121,6 +1124,13 @@ class TextMatcher:
 
              # 长段落锚词一致性：候选若缺少核心锚词，降权
              if context_anchors and matched_key:
+                 is_sub_candidate = len(text) < len(context_text) * 0.7
+                 if is_sub_candidate and anchor_hit == 0:
+                     if score < 0.85:
+                         weighted_score *= 0.8
+                     anchor_hit = 1
+                     anchor_ratio = 0.6
+                 
                  if anchor_hit == 0:
                      weighted_score *= 0.20
                      self.log(f"[MATCH] 锚词缺失降权: hits=0/{len(context_anchors)}, weighted={weighted_score:.3f}")
@@ -1160,6 +1170,28 @@ class TextMatcher:
                  best_result["_ocr_text"] = best_text
                  best_result["_ocr_conf"] = round(best_conf, 3)
                  best_result["_weighted"] = round(weighted_score, 3)
+             
+             # 收集成功匹配的子句
+             if weighted_score >= 0.55:
+                 is_sub = len(text) < len(context_text) * 0.95
+                 if is_sub:
+                     matches = result.get("matches", [])
+                     first_match = matches[0] if matches else {}
+                     tk = first_match.get("text_key")
+                     if tk and tk not in seen_text_keys:
+                         seen_text_keys.add(tk)
+                         official_en = first_match.get("official_en") or text
+                         official_cn = first_match.get("official_cn") or first_match.get("cn") or ""
+                         successful_sub_matches.append({
+                             "ocr": text,
+                             "query_key": key,
+                             "score": round(score, 3),
+                             "text_key": tk,
+                             "official_en": official_en,
+                             "official_cn": official_cn,
+                             "result_obj": result,
+                             "weighted": weighted_score
+                         })
 
         elapsed = time.time() - start_time
 
@@ -1169,6 +1201,44 @@ class TextMatcher:
             if rescue is not None:
                 self.log(f"[SEARCH] 耗时: {elapsed:.2f}s, 采用锚词救援结果")
                 return self._attach_title_hint(rescue, title_hint)
+
+        if len(successful_sub_matches) >= 2 and best_score >= 0.62:
+            def get_start_pos(item):
+                try:
+                    return context_text.lower().find(item["query_key"][:10])
+                except Exception:
+                    return 999
+            successful_sub_matches.sort(key=get_start_pos)
+            
+            items = []
+            has_high_confidence_audio = False
+            for item in successful_sub_matches:
+                items.append({
+                    "ocr": item["ocr"],
+                    "query_key": item["query_key"],
+                    "score": item["score"],
+                    "text_key": item["text_key"],
+                    "official_en": item["official_en"],
+                    "official_cn": item["official_cn"],
+                })
+                if item["score"] >= 0.85 and self._has_voice_match(item["result_obj"]):
+                    has_high_confidence_audio = True
+            
+            multi_res = {
+                "_multi": True,
+                "items": items,
+                "_has_audio": has_high_confidence_audio,
+                "_official_en": " / ".join([i.get("official_en") or i.get("ocr") or "" for i in items if i.get("official_en") or i.get("ocr")]),
+                "_official_cn": " / ".join([i.get("official_cn") or "" for i in items if i.get("official_cn")]),
+                "_query_key": " / ".join([i["query_key"] for i in items if i.get("query_key")]),
+                "_ocr_text": " / ".join([i["ocr"] for i in items if i.get("ocr")]),
+                "_score": round(best_score, 3),
+                "_weighted": round(best_score, 3),
+            }
+            if best_result:
+                multi_res["matches"] = best_result.get("matches", [])
+            self.log(f"[MATCH] 智能子句合并多条目输出: 合并了 {len(items)} 个独立子句台词")
+            return self._attach_title_hint(multi_res, title_hint)
 
         if best_result:
             # 修改：增加全局置信度阈值

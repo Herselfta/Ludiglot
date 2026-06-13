@@ -1815,7 +1815,15 @@ def group_ocr_lines(box_lines: List[Dict[str, object]], lang: str = "en") -> Lis
             if abs(c_x1 - l_x1) > 50:
                  allowed_gap = min(l_h, c_h) * 0.2  # Very strict if not aligned
             
-            if gap < allowed_gap:
+            # 检查上一行是否以句子终止标点结尾（过滤尾部空格）
+            last_line_text = " ".join(_sanitize_ocr_fragment(str(t.get("text", ""))).strip() for t in last_line).strip()
+            ends_with_sentence_punct = False
+            if last_line_text:
+                cleaned_tail = last_line_text.rstrip()
+                if cleaned_tail and cleaned_tail[-1] in {'.', '!', '?', '。', '！', '？'}:
+                    ends_with_sentence_punct = True
+
+            if gap < allowed_gap and not ends_with_sentence_punct:
                 current_para.append(curr_line)
             else:
                 para_groups.append(current_para)
