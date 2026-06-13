@@ -1278,6 +1278,9 @@ class OCREngine:
             else:
                 return None
             
+            if img.mode != "RGB":
+                img = img.convert("RGB")
+            
             buf = io.BytesIO()
             img.save(buf, format="PNG")
             return buf.getvalue()

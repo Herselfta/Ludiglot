@@ -13,6 +13,7 @@ from PIL import Image
 ssl._create_default_https_context = ssl._create_unverified_context
 os.environ["PYTHONHTTPSVERIFY"] = "0"
 os.environ["CURL_CA_BUNDLE"] = ""
+os.environ["FLAGS_enable_pir_api"] = "0"
 
 import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -38,6 +39,11 @@ def get_pipeline():
     global pipeline
     if pipeline is None:
         print("[Server] 正在加载 PaddleOCR-VL-1.6 模型 (这可能需要几分钟，首次运行会自动下载模型权重)...")
+        import paddle
+        try:
+            paddle.set_flags({'FLAGS_enable_pir_api': 0})
+        except Exception as e:
+            print(f"[Server] 设置 FLAGS_enable_pir_api 失败: {e}")
         from paddleocr import PaddleOCRVL
         # 默认加载 v1 管道
         pipeline = PaddleOCRVL(pipeline_version="v1")
@@ -95,7 +101,7 @@ class PaddleVLRequestHandler(http.server.BaseHTTPRequestHandler):
                 # Predict
                 pipe = get_pipeline()
                 print("[Server] 正在使用 PaddleOCR-VL 识别图像...")
-                output = pipe.predict(str(img_path))
+                output = pipe.predict(str(img_path), use_queues=False)
                 
                 # Extract markdown text using temp directory
                 markdown_texts = []

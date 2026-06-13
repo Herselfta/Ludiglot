@@ -297,7 +297,7 @@ if ($LASTEXITCODE -eq 0) {
             Write-Host "    [检测到 NVIDIA GPU] 正在使用飞桨镜像源安装 GPU 版本的 paddlepaddle-gpu..." -ForegroundColor Green
             # 卸载 CPU 版以防冲突
             & $venvPython -m pip uninstall paddlepaddle -y --quiet 2>$null
-            & $venvPython -m pip install paddlepaddle-gpu -i https://www.paddlepaddle.org.cn/packages/stable/cu123/
+            & $venvPython -m pip install paddlepaddle-gpu -i https://www.paddlepaddle.org.cn/packages/stable/cu126/
         } else {
             Write-Host "    [未检测到 NVIDIA GPU] 正在安装 CPU 版本的 paddlepaddle..." -ForegroundColor Yellow
             & $venvPython -m pip uninstall paddlepaddle-gpu -y --quiet 2>$null

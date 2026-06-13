@@ -30,6 +30,7 @@ $env:HF_HOME = $hfCache
 $env:TRANSFORMERS_CACHE = $hfCache
 $env:HUGGINGFACE_HUB_CACHE = Join-Path $hfCache "hub"
 $env:XDG_CACHE_HOME = $cacheRoot
+$env:FLAGS_enable_pir_api = "0"
 
 # 检查安装状态
 Write-Host "检查安装状态..." -ForegroundColor Yellow

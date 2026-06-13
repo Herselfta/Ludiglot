@@ -48,7 +48,7 @@ pip install winrt-Windows.Foundation.Collections
 # 卸载 CPU 版本防止冲突
 pip uninstall paddlepaddle -y
 # 使用飞桨镜像源安装 GPU 版本
-pip install paddlepaddle-gpu -i https://www.paddlepaddle.org.cn/packages/stable/cu123/
+pip install paddlepaddle-gpu -i https://www.paddlepaddle.org.cn/packages/stable/cu126/
 # 安装其他依赖
 pip install paddleocr>=3.4.0 "paddlex[ocr]"
 ```
