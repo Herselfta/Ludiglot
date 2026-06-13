@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import base64
 from dataclasses import dataclass
@@ -35,16 +35,6 @@ except ImportError:
     HAS_NUMPY = False
 
 PaddleOCR = None
-# The GLM-OCR model expects task-directive prompts, NOT descriptive instructions.
-# Passing descriptive rules causes the model to hallucinate them as OCR output.
-# Official prompts (from zai-org/GLM-OCR SDK config.yaml):
-#   "Text Recognition:"    – general text / subtitles
-#   "Table Recognition:"   – tabular data
-#   "Formula Recognition:" – math formulas
-DEFAULT_GLM_OCR_PROMPT = "Text Recognition:"
-DEFAULT_GLM_OCR_TIMEOUT = 30.0
-# <=0 means "follow Ollama default behavior" (do not send num_predict).
-DEFAULT_GLM_OCR_MAX_TOKENS = 0
 
 
 @dataclass(frozen=True)
@@ -65,12 +55,9 @@ class OCREngine:
         det: bool = True,
         rec: bool = True,
         cls: bool = False,
-        glm_endpoint: str | None = None,
-        glm_ollama_model: str | None = None,
-        glm_timeout: float | None = None,
-        glm_max_tokens: int | None = None,
-        glm_prompt: str | None = None,
         allow_paddle: bool = True,
+        *args,
+        **kwargs,
     ) -> None:
         self.lang = lang
         self.mode = (mode or ("gpu" if use_gpu else "cpu")).lower()
@@ -96,34 +83,6 @@ class OCREngine:
         self._words_segmenter = None
         self._words_segmenter_ready = False
         self.allow_paddle = bool(allow_paddle)
-        endpoint = glm_endpoint or os.getenv("LUDIGLOT_GLM_OCR_ENDPOINT") or os.getenv("OLLAMA_HOST")
-        if endpoint:
-            endpoint = str(endpoint).strip()
-            if not endpoint.startswith(("http://", "https://")):
-                endpoint = f"http://{endpoint}"
-            self.glm_endpoint = endpoint.rstrip("/")
-        else:
-            self.glm_endpoint = None
-        ollama_model = glm_ollama_model or os.getenv("LUDIGLOT_GLM_OCR_OLLAMA_MODEL") or os.getenv("LUDIGLOT_GLM_OCR_MODEL") or "glm-ocr:latest"
-        self.glm_ollama_model = str(ollama_model)
-        timeout_raw = glm_timeout if glm_timeout is not None else os.getenv("LUDIGLOT_GLM_OCR_TIMEOUT")
-        try:
-            self.glm_timeout = float(timeout_raw) if timeout_raw is not None else DEFAULT_GLM_OCR_TIMEOUT
-        except Exception:
-            self.glm_timeout = DEFAULT_GLM_OCR_TIMEOUT
-        max_tokens_raw = glm_max_tokens if glm_max_tokens is not None else os.getenv("LUDIGLOT_GLM_OCR_MAX_TOKENS")
-        try:
-            if max_tokens_raw is None:
-                self.glm_max_tokens = DEFAULT_GLM_OCR_MAX_TOKENS
-            else:
-                mt = int(max_tokens_raw)
-                self.glm_max_tokens = mt if mt > 0 else 0
-        except Exception:
-            self.glm_max_tokens = DEFAULT_GLM_OCR_MAX_TOKENS
-
-        prompt = str(glm_prompt).strip() if glm_prompt is not None else ""
-        self.glm_prompt = prompt or DEFAULT_GLM_OCR_PROMPT
-        self._glm_ollama_last_error = None
         self._log_callback: Callable[[str], None] | None = None
         self._status_callback: Callable[[str], None] | None = None
         self._prewarm_lock = threading.Lock()
@@ -196,66 +155,23 @@ class OCREngine:
             return cleaned
         return cleaned[: max(0, limit - 1)] + "…"
 
-    def _reset_glm_ollama_error(self) -> None:
-        self._glm_ollama_last_error = None
-
-    def _set_glm_ollama_error(self, stage: str, exc: Exception | None = None) -> None:
-        self._glm_ollama_last_error = self._format_error(stage, exc)
-
     def set_mode(self, mode: str) -> None:
         self.mode = mode.lower()
         self.ready = False
         self._ocr = None
 
     def _normalize_backend_key(self, backend: str | None) -> str:
-        key = str(backend or "auto").strip().lower().replace("-", "_")
-        if key == "glm_ocr":
-            key = "glm"
-        return key
-
-    def _warmup_glm_ollama(self) -> bool:
-        self._reset_glm_ollama_error()
-        if not self.glm_endpoint:
-            self._set_glm_ollama_error("Ollama 地址未设置")
-            return False
-        url = f"{self.glm_endpoint}/api/tags"
-        req = urllib.request.Request(
-            url,
-            headers={"Content-Type": "application/json"},
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=min(self.glm_timeout, 5.0)) as resp:
-                ok = 200 <= getattr(resp, "status", 200) < 300
-                if not ok:
-                    self._set_glm_ollama_error("预热失败")
-                return ok
-        except Exception as exc:
-            self._emit_log(f"[OCR] GLM-OCR (Ollama) 预热失败：{exc}")
-            self._set_glm_ollama_error("预热失败", exc)
-            return False
+        return str(backend or "auto").strip().lower().replace("-", "_")
 
     def prewarm(self, backend: str | None = None, async_: bool = True) -> None:
         key = self._normalize_backend_key(backend)
-        if key == "glm_ollama" and not self.glm_endpoint:
-            return
         with self._prewarm_lock:
             if key in self._prewarm_started:
                 return
             self._prewarm_started.add(key)
 
         def _worker() -> None:
-            if key in {"glm", "glm_ollama"}:
-                self._emit_log("[OCR] 预热 GLM-OCR (Ollama)...")
-                ok = self._warmup_glm_ollama()
-                if ok:
-                    self._emit_log("[OCR] GLM-OCR (Ollama) 预热完成")
-                else:
-                    reason = self._shorten_error(self._glm_ollama_last_error)
-                    if reason:
-                        self._emit_log(f"[OCR] GLM-OCR (Ollama) 预热失败：{reason}")
-                    else:
-                        self._emit_log("[OCR] GLM-OCR (Ollama) 预热失败")
-            elif key == "paddle":
+            if key == "paddle":
                 self.initialize(force_paddle=True, allow_paddle=True)
             elif key == "auto":
                 self.initialize(allow_paddle=self.allow_paddle)
@@ -353,21 +269,7 @@ class OCREngine:
             self.ready = True
             return
 
-        # 2. 检查是否需要加载 PaddleOCR
-        # 如果是 winrt 模式，或 auto 模式下 Windows OCR 可用，则无需加载 Paddle
-        if (not force_paddle) and self.mode == "winrt":
-             print("[OCR] 模式=winrt，无需加载 PaddleOCR")
-             return
-
-        if (not force_paddle) and self.mode == "auto" and self._windows_ocr is not None:
-             print("[OCR] 模式=auto 且 Windows OCR 可用，无需加载 PaddleOCR")
-             return
-
-        if (not force_paddle) and self.mode == "tesseract":
-             print("[OCR] 使用 Tesseract，无需加载 PaddleOCR")
-             return
-
-        # 3. 准备加载 PaddleOCR（仅在明确需要时）
+        # 2. 准备加载 PaddleOCR（仅在明确需要时）
         global PaddleOCR
         
         os.environ.setdefault("FLAGS_enable_pir_api", "0")
@@ -379,11 +281,26 @@ class OCREngine:
         os.environ.setdefault("FLAGS_use_mkldnn", "0")
         os.environ.setdefault("FLAGS_use_onednn", "0")
         os.environ.setdefault("PADDLE_ENABLE_PIR", "0")
+        os.environ.setdefault("GLOG_minloglevel", "3")
+        os.environ.setdefault("PADDLE_DISABLE_WARNINGS", "1")
+        os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
+        
+        try:
+            import warnings
+            warnings.filterwarnings("ignore", category=UserWarning, module="paddle")
+        except Exception:
+            pass
 
         if PaddleOCR is None:
             try:
-                from paddleocr import PaddleOCR as _PaddleOCR
-                PaddleOCR = _PaddleOCR
+                # Filter out CWD/project root from sys.path to avoid name conflict with local 'tools' directory
+                sys_path_backup = list(sys.path)
+                try:
+                    sys.path = [p for p in sys.path if p not in ("", ".", os.getcwd(), str(Path(os.getcwd()).resolve()))]
+                    from paddleocr import PaddleOCR as _PaddleOCR
+                    PaddleOCR = _PaddleOCR
+                finally:
+                    sys.path = sys_path_backup
             except ImportError:
                 if self.mode == "paddle":
                     raise RuntimeError(
@@ -540,233 +457,7 @@ class OCREngine:
         except Exception:
             return None
 
-    def _glm_image_to_bytes(self, image_input: Union[str, Path, Any, tuple]) -> bytes | None:
-        if isinstance(image_input, (str, Path)):
-            try:
-                return Path(image_input).read_bytes()
-            except Exception:
-                return None
 
-        if isinstance(image_input, tuple) and len(image_input) == 3:
-            if not HAS_PIL or Image is None:
-                return None
-            try:
-                r_bytes, r_w, r_h = image_input
-                img = Image.frombytes("RGBA", (int(r_w), int(r_h)), r_bytes, "raw", "BGRA")
-                return self._pil_to_png_bytes(img)
-            except Exception:
-                return None
-
-        if HAS_NUMPY and np is not None and isinstance(image_input, np.ndarray):
-            if not HAS_PIL or Image is None:
-                return None
-            try:
-                if len(image_input.shape) == 3 and image_input.shape[2] == 3:
-                    img = Image.fromarray(image_input[:, :, ::-1])
-                else:
-                    img = Image.fromarray(image_input)
-                return self._pil_to_png_bytes(img)
-            except Exception:
-                return None
-
-        if HAS_PIL and Image is not None and isinstance(image_input, Image.Image):
-            return self._pil_to_png_bytes(image_input)
-
-        return None
-
-    def _glm_extract_lines(self, text: str) -> List[str]:
-        if not text:
-            return []
-        cleaned = str(text).strip()
-        if not cleaned:
-            return []
-
-        # strip markdown fences if model wraps plain output with ```...```
-        cleaned = re.sub(r"^\s*```[A-Za-z0-9_-]*\s*", "", cleaned)
-        cleaned = re.sub(r"\s*```\s*$", "", cleaned)
-
-        # remove common LLM special tokens
-        cleaned = re.sub(r"<\|[^>]*\|>", "", cleaned)
-        cleaned = re.sub(r"<\|[^>]*", "", cleaned)
-
-        # normalize escaped newlines from JSON-like payload
-        cleaned = cleaned.replace("\\r\\n", "\n").replace("\\n", "\n").replace("\\r", "\n")
-
-        lines_out: list[str] = []
-        for raw_line in cleaned.splitlines():
-            line = _sanitize_ocr_fragment(raw_line)
-            # Strip markdown heading markers (# ## ###) produced by "Text Recognition:"
-            line = re.sub(r"^#{1,6}\s+", "", line).strip()
-            # Strip markdown list markers and numbered lists
-            line = re.sub(r"^([-*•]\s+|\d+[.)]\s+)", "", line).strip()
-            # Strip inline bold/italic markers (**text**, __text__, *text*, _text_)
-            line = re.sub(r"\*{1,3}([^\*]+)\*{1,3}", r"\1", line)
-            line = re.sub(r"_{1,3}([^_]+)_{1,3}", r"\1", line)
-            # Skip horizontal rules
-            if re.fullmatch(r"[-=_*]{3,}", line):
-                continue
-            if not line:
-                continue
-            line = re.sub(r"\s+", " ", line).strip()
-            if line == str(self.glm_prompt).strip():
-                continue
-            if re.fullmatch(r"[{}\[\],:]+", line):
-                continue
-            split_lines = self._split_glm_compound_line(line)
-            for seg in split_lines:
-                seg = re.sub(r"\s+", " ", str(seg or "")).strip()
-                if seg:
-                    lines_out.append(seg)
-
-        # Fallback: preserve one-line content if no explicit line breaks remain.
-        if not lines_out:
-            one = _sanitize_ocr_fragment(cleaned)
-            one = re.sub(r"\s+", " ", one).strip()
-            if one:
-                lines_out.append(one)
-        return lines_out
-
-    def _split_glm_compound_line(self, line: str) -> List[str]:
-        """
-        尝试拆分 GLM 把「短标题 + 长正文」误并为一行的情况。
-        仅做保守拆分，避免误切正常句子。
-        """
-        s = str(line or "").strip()
-        if not s:
-            return []
-
-        if len(s) < 48:
-            return [s]
-        if not re.search(r"[.!?…]", s):
-            return [s]
-
-        # 例： "Luuk Herssen The Academy has its theories..."
-        m = re.match(
-            r"^([A-Z][A-Za-z'’\-]{1,24}(?:\s+[A-Z][A-Za-z'’\-]{1,24}){0,3})\s+([A-Z].+)$",
-            s,
-        )
-        if not m:
-            return [s]
-
-        title = m.group(1).strip()
-        body = m.group(2).strip()
-        if not title or not body:
-            return [s]
-
-        title_words = title.split()
-        if len(title_words) > 4:
-            return [s]
-        if len(body) < 30:
-            return [s]
-        if not re.search(r"[.!?…]", body):
-            return [s]
-
-        # 避免拆分普通句首（如 "The Academy ..."）
-        low = {w.lower() for w in title_words}
-        common_sentence_starters = {
-            "the", "a", "an", "this", "that", "these", "those", "there", "here",
-            "when", "while", "if", "after", "before", "in", "on", "at", "from",
-            "to", "for", "with", "without", "and", "or", "but",
-        }
-        if low & common_sentence_starters:
-            return [s]
-
-        return [title, body]
-
-    def _glm_build_boxes(self, lines: List[str]) -> List[Dict[str, object]]:
-        if not lines:
-            return []
-        box_lines: List[Dict[str, object]] = []
-        y_step = 80
-        box_h = 40
-        box_w = 1000
-        for idx, text in enumerate(lines):
-            y1 = idx * y_step
-            y2 = y1 + box_h
-            box = [[0, y1], [box_w, y1], [box_w, y2], [0, y2]]
-            box_lines.append({"text": text, "conf": 0.85, "box": box})
-        return box_lines
-
-    def _glm_ollama_recognize_boxes(self, image_input: Union[str, Path, Any, tuple]) -> List[Dict[str, object]]:
-        self._reset_glm_ollama_error()
-        if not self.glm_endpoint:
-            self._set_glm_ollama_error("Ollama 地址未设置")
-            return []
-        image_bytes = self._glm_image_to_bytes(image_input)
-        if not image_bytes:
-            print("[OCR] GLM-OCR 输入转换失败")
-            self._set_glm_ollama_error("输入转换失败")
-            return []
-
-        b64_img = base64.b64encode(image_bytes).decode("ascii")
-
-        # glm-ocr uses a custom RENDERER/PARSER in Ollama and requires
-        # /api/generate (not /api/chat which triggers GGML_ASSERT crashes).
-        # Ollama 0.17+ auto-reduces num_ctx based on VRAM; glm-ocr's MRoPE
-        # fails when num_ctx < 8192 – always force a safe minimum.
-        # (ollama/ollama issues #14171 / #14401)
-        payload: Dict[str, Any] = {
-            "model": self.glm_ollama_model,
-            "prompt": self.glm_prompt,
-            "images": [b64_img],
-            "stream": False,
-            "options": {"num_ctx": 8192},
-        }
-        try:
-            max_tokens = int(self.glm_max_tokens or 0)
-        except Exception:
-            max_tokens = 0
-        if max_tokens > 0:
-            payload["options"]["num_predict"] = max_tokens
-            self._emit_log(f"[OCR] GLM num_predict={max_tokens}")
-
-        url = f"{self.glm_endpoint}/api/generate"
-        req = urllib.request.Request(
-            url,
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=self.glm_timeout) as resp:
-                raw = resp.read().decode("utf-8", errors="ignore")
-        except urllib.error.URLError as exc:
-            print(f"[OCR] GLM-OCR 请求失败：{exc}")
-            self._set_glm_ollama_error("请求失败", exc)
-            return []
-        except Exception as exc:
-            print(f"[OCR] GLM-OCR 请求失败：{exc}")
-            self._set_glm_ollama_error("请求失败", exc)
-            return []
-
-        response_obj = None
-        try:
-            response_obj = json.loads(raw)
-        except Exception:
-            for line in raw.splitlines():
-                try:
-                    response_obj = json.loads(line)
-                    break
-                except Exception:
-                    continue
-
-        if isinstance(response_obj, dict):
-            if response_obj.get("error"):
-                self._emit_log(f"[OCR] GLM-OCR 错误：{response_obj.get('error')}")
-                self._set_glm_ollama_error("响应错误", Exception(str(response_obj.get("error"))))
-                return []
-            text = response_obj.get("response", "")
-        else:
-            text = raw
-
-        lines = self._glm_extract_lines(text)
-
-        if not lines:
-            self._set_glm_ollama_error("输出解析为空")
-            return []
-        return self._glm_build_boxes(lines)
-
-    def _glm_ocr_recognize_boxes(self, image_input: Union[str, Path, Any, tuple]) -> List[Dict[str, object]]:
-        return self._glm_ollama_recognize_boxes(image_input)
 
     def _windows_ocr_recognize_boxes(self, image_path: str | Path) -> List[Dict[str, object]]:
         """使用 Windows 原生 OCR 识别图片中的文本。
@@ -1776,43 +1467,12 @@ class OCREngine:
             backend: 指定后端（auto/windows/paddle/tesseract/glm/glm_ollama）
         """
         backend_key = str(backend or "auto").strip().lower().replace("-", "_")
-        if backend_key == "glm_ocr":
-            backend_key = "glm"
-        if backend_key not in {"auto", "windows", "paddle", "tesseract", "glm", "glm_ollama"}:
+        if backend_key not in {"auto", "windows", "paddle", "tesseract"}:
             backend_key = "auto"
         raw_tuple = None
         if isinstance(image_input, tuple) and len(image_input) == 3:
             raw_tuple = image_input
             # Keep a lazy fallback for non-Windows backends
-
-        # 策略0: GLM-OCR (Ollama) - 显式指定
-        if backend_key == "glm_ollama":
-            print("[OCR] 尝试后端: GLM-OCR (Ollama)")
-            glm_lines = self._glm_ollama_recognize_boxes(image_input)
-            if glm_lines:
-                self.last_backend = "glm_ollama"
-                return glm_lines
-            ollama_reason = self._shorten_error(self._glm_ollama_last_error)
-            if ollama_reason:
-                print(f"[OCR] GLM-OCR (Ollama) 不可用，回退到 Windows/Paddle/Tesseract（原因：{ollama_reason}）")
-            else:
-                print("[OCR] GLM-OCR (Ollama) 不可用，回退到 Windows/Paddle/Tesseract")
-            backend_key = "auto"
-
-        # 策略0b: GLM-OCR "glm" 重定向至 Ollama
-        if backend_key == "glm":
-            backend_key = "glm_ollama"
-            print("[OCR] 尝试后端: GLM-OCR (Ollama)")
-            glm_lines = self._glm_ollama_recognize_boxes(image_input)
-            if glm_lines:
-                self.last_backend = "glm_ollama"
-                return glm_lines
-            ollama_reason = self._shorten_error(self._glm_ollama_last_error)
-            if ollama_reason:
-                print(f"[OCR] GLM-OCR (Ollama) 不可用，回退到 Windows/Paddle/Tesseract（原因：{ollama_reason}）")
-            else:
-                print("[OCR] GLM-OCR (Ollama) 不可用，回退到 Windows/Paddle/Tesseract")
-            backend_key = "auto"
 
         # 策略1: 如果明确要求 Tesseract，直接使用
         if prefer_tesseract or backend_key == "tesseract":

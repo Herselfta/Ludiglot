@@ -48,11 +48,6 @@ def create_overlay_ocr_engine(config: AppConfig, callbacks: OverlayRuntimeCallba
         lang=config.ocr_lang,
         use_gpu=config.ocr_gpu,
         mode=config.ocr_mode,
-        glm_endpoint=getattr(config, "ocr_glm_endpoint", None),
-        glm_ollama_model=getattr(config, "ocr_glm_ollama_model", None),
-        glm_max_tokens=getattr(config, "ocr_glm_max_tokens", None),
-        glm_timeout=getattr(config, "ocr_glm_timeout", None),
-        glm_prompt=getattr(config, "ocr_glm_prompt", None),
         allow_paddle=(getattr(config, "ocr_backend", "auto") == "paddle"),
     )
     engine.set_logger(callbacks.log, callbacks.status)

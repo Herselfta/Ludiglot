@@ -458,11 +458,6 @@ def cmd_run(args: argparse.Namespace) -> None:
         lang=cfg.ocr_lang,
         use_gpu=cfg.ocr_gpu,
         mode=cfg.ocr_mode,
-        glm_endpoint=getattr(cfg, "ocr_glm_endpoint", None),
-        glm_ollama_model=getattr(cfg, "ocr_glm_ollama_model", None),
-        glm_max_tokens=getattr(cfg, "ocr_glm_max_tokens", None),
-        glm_timeout=getattr(cfg, "ocr_glm_timeout", None),
-        glm_prompt=getattr(cfg, "ocr_glm_prompt", None),
         allow_paddle=(getattr(cfg, "ocr_backend", "auto") == "paddle"),
     )
     try:
