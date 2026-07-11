@@ -87,6 +87,10 @@ Ludiglot/
 - 数据来源：[yarik0chka/wuwa-keys](https://github.com/yarik0chka/wuwa-keys)
 - 工具组件：`vgmstream`, `wwiser`
 
+## 友情链接
+
+- [Linux.do](https://linux.do) — 开源技术与 AI 实践社区
+
 ---
 
 <div align="center">
